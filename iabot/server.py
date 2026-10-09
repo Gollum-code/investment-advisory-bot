@@ -16,7 +16,7 @@ from . import __version__, netutil, symbols as sym_mod
 from .advisor import Advisor
 from .config import load_config, save_config
 from .scheduler import Scheduler
-from .signals import MODES
+from .signals import FACTOR_DEFAULTS, MODES
 from .store import SignalStore
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -280,6 +280,12 @@ def make_handler(app: App):
                 return self._json({"ok": True, "win": app.store.win_stats(
                     days=int(days) if days else None),
                     "outcomes": app.store.outcome_counts()})
+
+            if path == "/api/weights":
+                cur = (app.cfg.get("analysis") or {}).get("factor_weights") or {}
+                merged = {name: float(cur.get(name, w)) for name, w in FACTOR_DEFAULTS.items()}
+                return self._json({"ok": True, "defaults": FACTOR_DEFAULTS,
+                                   "weights": merged, "customized": bool(cur)})
 
             if path == "/api/schedule":
                 return self._json({"ok": True, "schedule": app.scheduler.status()})

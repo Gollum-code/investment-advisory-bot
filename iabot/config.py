@@ -51,6 +51,9 @@ DEFAULTS: dict[str, Any] = {
         "score_threshold": 30,       # |score| 达到该值才给方向（tanh 归一化后）
         "cache_ttl_sec": 20,          # 同一合约多久内重复查询直接复用结果
         "snapshot_ttl_sec": 20,       # 行情快照保鲜期（定时任务靠它拿到新数据）
+        # 因子权重覆盖（可选）：{"trend_daily": 0.2, "momentum": 0.1, ...}
+        # 不填用内置默认；网页上可调并保存到这里
+        "factor_weights": {},
     },
 
     # 定时任务
@@ -156,6 +159,12 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                       "analysis.cache_ttl_sec", 1, 3600, 20.0)
     an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),
                                          "analysis.snapshot_ttl_sec", 1, 3600, 20.0)
+    fw = an.get("factor_weights")
+    if fw is None:
+        an["factor_weights"] = {}
+    elif not isinstance(fw, dict):
+        print("[config] analysis.factor_weights 不是字典，已重置为空")
+        an["factor_weights"] = {}
 
     out["http_timeout_sec"] = _coerce_num(out.get("http_timeout_sec"),
                                           "http_timeout_sec", 1, 120, 12.0)

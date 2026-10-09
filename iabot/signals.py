@@ -334,6 +334,24 @@ FACTOR_FNS = [
     (_f_oi, False), (_f_elite, False), (_f_orderbook, True), (_f_volatility, False),
 ]
 
+# 因子内部硬编码的默认权重；config 的 analysis.factor_weights 可覆盖同名项。
+FACTOR_DEFAULTS = {
+    "trend_daily": 0.20, "trend_intraday": 0.12, "momentum": 0.15,
+    "structure": 0.14, "vwap": 0.08, "funding": 0.10,
+    "open_interest": 0.09, "elite": 0.12, "orderbook": 0.07, "volatility": 0.05,
+}
+
+
+def apply_factor_weights(factors: list[Factor], weights: dict | None = None) -> list[Factor]:
+    """按 config 里的权重覆盖因子的 weight（只覆盖存在且 >0 的项）。"""
+    if not weights:
+        return factors
+    for f in factors:
+        w = weights.get(f.name)
+        if w is not None and float(w) > 0:
+            f.weight = float(w)
+    return factors
+
 
 def _confidence_score(factors: list[Factor], score: float, direction: str, agree: int) -> float:
     """0-100 置信度。
@@ -464,7 +482,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         return plan
 
     price = snap.price
-    factors = compute_factors(snap)
+    factors = apply_factor_weights(compute_factors(snap),
+                                   (cfg.get("analysis") or {}).get("factor_weights"))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)
     total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0

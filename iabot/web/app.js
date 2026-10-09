@@ -153,6 +153,7 @@
       loadHistory();
       loadSchedule();
       loadWinStats();
+      loadWeights();
       analyze(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
@@ -190,6 +191,8 @@
     $('btn-run').onclick = runNow;
     $('btn-test-notify').onclick = testNotify;
     $('win-days').onchange = () => loadWinStats();
+    $('btn-weights-save').onclick = () => saveWeights(false);
+    $('btn-weights-reset').onclick = () => saveWeights(true);
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -832,6 +835,70 @@
       group('按币种', win.by_symbol) +
       '</div>';
     sum.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------- 因子权重调参
+  async function loadWeights() {
+    try {
+      const d = await api('/api/weights');
+      state.weights = d.weights || {};
+      state.weightsDefaults = d.defaults || {};
+      const names = {
+        trend_daily: '日线趋势', trend_intraday: '1小时趋势', momentum: '动量',
+        structure: '摆动结构', vwap: 'VWAP', funding: '资金费率',
+        open_interest: '持仓量', elite: '大户持仓', orderbook: '盘口深度',
+        volatility: '波动率',
+      };
+      $('weights').innerHTML = Object.keys(d.weights).map((k) => {
+        const def = d.defaults[k];
+        const cur = d.weights[k];
+        const isCustom = Math.abs(cur - def) > 1e-9;
+        return '<label class="w-row" title="' + esc(k) + '">' +
+          '<span class="k">' + esc(names[k] || k) + '</span>' +
+          '<input type="range" min="0" max="0.5" step="0.01" value="' + cur +
+          '" data-name="' + esc(k) + '">' +
+          '<span class="v">' + cur.toFixed(2) + '</span>' +
+          (isCustom ? '<span class="tag">自定义</span>' : '') +
+          '</label>';
+      }).join('');
+      $('weights').oninput = (e) => {
+        const input = e.target.closest('input[type=range]');
+        if (!input) return;
+        const v = parseFloat(input.value);
+        input.closest('.w-row').querySelector('.v').textContent = v.toFixed(2);
+        state.weights[input.dataset.name] = v;
+      };
+      setWeightsMsg(d.customized ? '已加载自定义权重（与默认不同）' : '使用默认权重', d.customized ? '' : 'ok');
+    } catch (e) {
+      $('weights').innerHTML = '<div class="empty">权重加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function setWeightsMsg(text, kind) {
+    const el = $('weights-msg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  async function saveWeights(reset) {
+    $('btn-weights-save').disabled = true;
+    try {
+      const data = reset ? {} : (state.weights || {});
+      await api('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysis: { factor_weights: data } }),
+      });
+      setWeightsMsg(reset ? '已恢复默认权重' : '权重已保存', 'ok');
+      await loadWeights();
+      toast('权重' + (reset ? '已重置' : '已保存'), '', 'ok');
+    } catch (err) {
+      setWeightsMsg('保存失败：' + err.message, 'err');
+      toast('保存失败', err.message, 'err');
+    } finally {
+      $('btn-weights-save').disabled = false;
+    }
   }
 
   // ---------------------------------------------------------------- 日志 / SSE

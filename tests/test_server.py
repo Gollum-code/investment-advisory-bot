@@ -121,6 +121,15 @@ class TestServerAPI(unittest.TestCase):
         self.assertAlmostEqual(b["bear_ratio"], 1 / 3, places=2)
         self.assertEqual(b["sentiment"], "偏多")
 
+    def test_weights_returns_defaults(self):
+        code, body = self._get("/api/weights")
+        self.assertEqual(code, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"])
+        self.assertIn("trend_daily", d["defaults"])
+        self.assertEqual(len(d["weights"]), len(d["defaults"]))
+        self.assertFalse(d["customized"])
+
 
 class TestServerAuth(unittest.TestCase):
     def setUp(self):
@@ -181,23 +190,6 @@ class TestServerAuth(unittest.TestCase):
         except urllib.error.HTTPError as e:
             code = e.code
         self.assertEqual(code, 401)
-
-    def test_breadth_aggregates(self):
-        from iabot.server import market_breadth
-        plans = [
-            {"symbol": "BTC-USDT", "direction": "long", "score": 60.0},
-            {"symbol": "ETH-USDT", "direction": "long", "score": 35.0},
-            {"symbol": "SOL-USDT", "direction": "short", "score": -55.0},
-            {"symbol": "XRP-USDT", "direction": "wait", "score": 10.0},
-        ]
-        b = market_breadth(plans)
-        self.assertEqual(b["scanned"], 4)
-        self.assertEqual(b["longs"], 2)
-        self.assertEqual(b["shorts"], 1)
-        self.assertEqual(b["waits"], 1)
-        self.assertAlmostEqual(b["bull_ratio"], 2 / 3, places=2)
-        self.assertAlmostEqual(b["bear_ratio"], 1 / 3, places=2)
-        self.assertEqual(b["sentiment"], "偏多")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ python -m iabot analyze btc --mode swing
 python -m iabot analyze BTC-USDT --json --brief
 python -m iabot analyze BTC-USDT --save     :: 分析后把这条信号写入历史库
 python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT   :: 批量扫描，按信号强度排序
+python -m iabot backtest BTC-USDT --mode swing   :: 历史回测，统计胜率与期望值
 python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 ```
 
@@ -52,6 +53,15 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 | `--save` | 把本次分析结果写入信号历史库（SQLite，默认 `data/signals.db`） |
 | `--json` / `--brief` | 输出原始 JSON / 不打印因子明细 |
 
+`backtest` 常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--mode swing` | 回测模式（日内按 15min、波段按 1day 重放） |
+| `--bars 300` | 取多少根主周期 K 线做历史 |
+| `--step 3` | 每隔多少根构造一个建仓点（越小越密越慢） |
+| `--json` | 输出含 R 权益曲线的原始 JSON |
+
 ---
 
 ## 网页控制台
@@ -64,9 +74,12 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 - **交易建议**：方向 / 评分 / 置信度 / 入场区间 / 止损 / 止盈列表（含每档预计盈利 U）/ 张数 / 保证金 / 盈亏比 / 风险提示。
 - **因子明细**：10 项因子的得分、权重、贡献和文字依据，评分怎么来的看得见。
 - **定时任务**：勾选"启用循环执行"，填间隔秒数和合约列表，保存后后台线程开始轮询；可随时"立即执行一轮"。运行日志与历史信号通过 SSE 实时推送到页面。
-- **多币种速览**：一键扫描关注列表，按 |评分| 排序，点任意一条跳到该币分析。
+- **多币种速览**：一键扫描关注列表，按 |评分| 排序，点任意一条跳到该币分析。顶部有市场情绪条（多空占比）。
+- **信号胜率**：定时任务跑过的信号会被回填结局（先到目标还是先碰止损），按评分档/模式/置信度/币种统计胜率与平均 R。
+- **因子权重调参**：网页上拖动 10 个因子的权重滑块，保存到 `config.json`，配合回测与胜率统计找最优组合。
+- **通知**：配置 Telegram / Bark / 通用 Webhook 后，方向翻转与强信号实时推送（`config.json` 的 `notify` 块）。
 
-网页上改定时任务会写回 `config.json`，重启后依然生效。
+网页上改定时任务和因子权重会写回 `config.json`，重启后依然生效。
 
 ---
 

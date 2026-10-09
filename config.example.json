@@ -40,7 +40,8 @@
     "kline_size": 300,
     "score_threshold": 30,
     "cache_ttl_sec": 20,
-    "snapshot_ttl_sec": 20
+    "snapshot_ttl_sec": 20,
+    "factor_weights": {}
   },
   "schedule": {
     "enabled": false,
