@@ -573,6 +573,24 @@
   }
 
   // ---------------------------------------------------------------- 扫描
+  // ---------------------------------------------------------------- 市场情绪
+  function renderBreadth(b) {
+    if (!b || !b.scanned) return '';
+    const bull = Math.round((b.bull_ratio || 0) * 100);
+    const bear = Math.round((b.bear_ratio || 0) * 100);
+    const sent = { 偏多: 'good', 偏空: 'bad', 中性: '' }[b.sentiment] || '';
+    return '<div class="breadth">' +
+      '<span class="bd-sent ' + sent + '">' + esc(b.sentiment || '--') + '</span>' +
+      '<div class="bd-bar">' +
+      '<i class="long" style="width:' + bull + '%"></i>' +
+      '<i class="short" style="width:' + bear + '%"></i>' +
+      '</div>' +
+      '<span class="bd-nums">' + (b.longs || 0) + ' 多 / ' + (b.shorts || 0) +
+      ' 空 / ' + (b.waits || 0) + ' 观望' +
+      ' · 平均 |评分| ' + fmtNum(b.avg_abs_score, 1) + '</span>' +
+      '</div>';
+  }
+
   async function scan() {
     const btn = $('btn-scan');
     btn.disabled = true;
@@ -588,7 +606,8 @@
       const d = await api('/api/scan?' + q.toString());
       const plans = d.plans || [];
       if (!plans.length) { $('scan').innerHTML = '<div class="empty">没有结果。</div>'; return; }
-      $('scan').innerHTML = plans.map((p) => {
+      const bd = d.breadth || {};
+      $('scan').innerHTML = renderBreadth(bd) + plans.map((p) => {
         const dd = digitsFor(p.price);
         const s = p.sizing || {};
         return '<div class="scan-row ' + p.direction + '" data-sym="' + esc(p.symbol) + '">' +

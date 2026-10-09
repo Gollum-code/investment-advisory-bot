@@ -75,6 +75,7 @@ class Plan:
     direction: str = "wait"          # long | short | wait
     score: float = 0.0               # -100 .. +100
     confidence: str = "低"
+    confidence_score: float = 0.0    # 0-100 数值置信度（同向因子加权占比 × 评分强度）
     entry_low: float | None = None
     entry_high: float | None = None
     entry_note: str = ""
@@ -334,6 +335,30 @@ FACTOR_FNS = [
 ]
 
 
+def _confidence_score(factors: list[Factor], score: float, direction: str, agree: int) -> float:
+    """0-100 置信度。
+
+    两部分相乘：
+    - 一致度 = 与方向同向的因子权重占比（0-1），用权重而非个数，
+      避免一个低权重因子和日线趋势被等同看待；
+    - 强度 = tanh(|score|/70)，把评分饱和到 0-1。
+    一致但评分不强、或评分强但因子打架，都拿不到高置信度。
+    """
+    total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0
+    if direction == "wait":
+        return 0.0
+    long = direction == "long"
+    agree_w = sum(f.weight for f in factors
+                  if abs(f.score) > 0.05 and (f.score > 0) == long)
+    consensus = agree_w / total_w
+    intensity = math.tanh(abs(score) / 70.0)
+    return round(100.0 * consensus * intensity, 1)
+
+
+def _confidence_label(cs: float) -> str:
+    return "高" if cs >= 60 else ("中" if cs >= 40 else "低")
+
+
 def compute_factors(snap: Snapshot) -> list[Factor]:
     out: list[Factor] = []
     for fn, needs_price in FACTOR_FNS:
@@ -495,6 +520,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
 
     if plan.direction == "wait":
         plan.confidence = "低"
+        plan.confidence_score = 0.0
         plan.entry_note = f"评分 {plan.score:+.0f} 未达到 ±{threshold:.0f} 阈值，方向不明。"
         if dn and up:
             plan.entry_note += f" 关注区间 {dn[0]['price']:,.2f} – {up[0]['price']:,.2f}。"
@@ -613,8 +639,9 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     agree = sum(1 for f in factors
                 if abs(f.score) > 0.1 and (f.score > 0) == (plan.direction == "long"))
     strong = sum(1 for f in factors if abs(f.score) > 0.4)
-    plan.confidence = ("高" if (abs(plan.score) >= 60 and agree >= 6)
-                       else ("中" if abs(plan.score) >= 45 else "低"))
+    conf_score = _confidence_score(factors, plan.score, plan.direction, agree)
+    plan.confidence = _confidence_label(conf_score)
+    plan.confidence_score = conf_score
     plan.notes.append(f"{len(factors)} 个因子中 {agree} 个与方向一致，其中 {strong} 个为强信号。")
     plan.notes.append(f"信号强度：{'很强' if abs(plan.score) >= 70 else ('较强' if abs(plan.score) >= 50 else '一般')}"
                       f"；止损用 {stop_mult}×ATR({m['atr_period']})。")
@@ -690,6 +717,7 @@ def _downgrade(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
     """把计划降级为观望，并清掉会误导人的入场/止损数据。"""
     plan.direction = "wait"
     plan.confidence = "低"
+    plan.confidence_score = 0.0
     plan.entry_note = reason
     plan.entry_low = plan.entry_high = None
     plan.stop = None

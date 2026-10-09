@@ -22,6 +22,32 @@ from .store import SignalStore
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 
+def market_breadth(plans: list[dict]) -> dict:
+    """把一批合约的计划聚合成市场情绪：多空 vs 观望、平均分、做多/做空名单。
+
+    排除 direction=wait 的信号再算比例，避免大量观望把情绪稀释成"中性"。
+    """
+    longs = [p for p in plans if p.get("direction") == "long"]
+    shorts = [p for p in plans if p.get("direction") == "short"]
+    waits = [p for p in plans if p.get("direction") == "wait"]
+    scores = [p.get("score") or 0 for p in plans]
+    n_ls = len(longs) + len(shorts)
+    if n_ls:
+        bull = round(len(longs) / n_ls, 3)
+        bear = round(len(shorts) / n_ls, 3)
+    else:
+        bull = bear = 0.0
+    sentiment = ("偏多" if bull >= 0.6 else ("偏空" if bear >= 0.6 else "中性"))
+    return {
+        "scanned": len(plans),
+        "longs": len(longs), "shorts": len(shorts), "waits": len(waits),
+        "bull_ratio": bull, "bear_ratio": bear,
+        "avg_abs_score": round(sum(abs(s) for s in scores) / len(scores), 1) if scores else 0.0,
+        "sentiment": sentiment,
+        "scores": {p.get("symbol"): p.get("score") for p in plans},
+    }
+
+
 class App:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
@@ -187,7 +213,21 @@ def make_handler(app: App):
                         errs.append(f"{s}: {type(exc).__name__}: {exc}")
                 out.sort(key=lambda p: -abs(p.get("score") or 0))
                 return self._json({"ok": True, "plans": out, "errors": errs,
+                                   "breadth": market_breadth(out),
                                    "ts": time.time()})
+
+            if path == "/api/breadth":
+                raw = q.get("symbols") or ",".join(app.cfg.get("symbols") or ["BTC-USDT"])
+                syms = [s for s in raw.split(",") if s.strip()][:30]
+                mode = q.get("mode") or "intraday"
+                plans, errs = [], []
+                for s in syms:
+                    try:
+                        plans.append(app.advisor.plan_payload(s, mode=mode))
+                    except Exception as exc:
+                        errs.append(f"{s}: {type(exc).__name__}: {exc}")
+                return self._json({"ok": True, "breadth": market_breadth(plans),
+                                   "errors": errs, "ts": time.time()})
 
             if path == "/api/history":
                 lim = min(500, int(q.get("limit") or 100))
