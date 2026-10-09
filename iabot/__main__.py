@@ -24,7 +24,6 @@ from .server import build_server, make_app
 from .signals import MODES
 from .symbols import to_contract
 
-
 # --------------------------------------------------------------------------
 # 纯文本输出
 # --------------------------------------------------------------------------
@@ -251,6 +250,59 @@ def cmd_check(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_backtest(args) -> int:
+    from .backtest import backtest
+    from .market import period_seconds
+    cfg = load_config()
+    adv = Advisor(cfg)
+    main_period = "15min" if args.mode == "intraday" else "1day"
+    sym = to_contract(args.symbol)
+    # 各周期按主周期时间跨度换算根数：15min 300 根只覆盖 3 天，回测一年日线
+    # 就需要 365*24*4=35000 根 15min。给个上限，宁可早段少几个因子也不要缺数据。
+    def _bars(period):
+        if period == main_period:
+            return args.bars
+        ratio = period_seconds(main_period) / period_seconds(period)
+        return min(4000, max(60, int(args.bars * ratio)))
+    periods = cfg.get("analysis", {}).get("tf_periods") or ["1min", "5min", "15min", "60min", "1day"]
+    try:
+        snap = adv.client.snapshot(sym, periods=periods, kline_size=max(args.bars, 120))
+        # 主周期 K 线数不够时按换算好的各自根数补齐
+        for p in periods:
+            if p == main_period:
+                continue
+            need = _bars(p)
+            if len(snap.klines.get(p) or []) < need:
+                try:
+                    snap.klines[p] = adv.client.kline(sym, p, need)
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"[错误] 拉取历史失败: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    t0 = time.time()
+    res = backtest(snap, cfg, mode=args.mode, step=args.step,
+                   warmup=args.warmup, max_points=2000)
+    ms = (time.time() - t0) * 1000
+    if args.json:
+        print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+    print("=" * 66)
+    print(f"  回测 {sym}  |  {MODES.get(res.mode, {}).get('label', res.mode)}"
+          f"  |  {res.bars} 根 {main_period} K线  |  {ms:.0f}ms")
+    print(f"  建仓点       : {res.trades}（观望/被闸门拦下不计）")
+    print(f"  胜 / 负      : {res.wins} / {res.losses}"
+          f"（{res.timeouts} 根窗口内未了结）")
+    print(f"  胜率         : {res.win_rate * 100:.1f}%")
+    print(f"  期望值       : {res.expectancy_r:+.3f} R/笔"
+          f"（正 = 长期按规则做有优势）")
+    print(f"  平均盈亏 R   : 胜 {res.avg_win_r:.2f} / 负 {res.avg_loss_r:.2f}")
+    print(f"  最大浮盈/浮亏: {res.max_mfe:+.2f}% / {res.max_mae:+.2f}%")
+    print(f"  累计 R       : {res.total_r:+.1f}（按 1R 单笔计算，曲线见 --json）")
+    print("=" * 66)
+    return 0
+
+
 def cmd_serve(args) -> int:
     cfg = load_config()
     ensure_example()
@@ -310,7 +362,7 @@ def cmd_serve(args) -> int:
 # 参数解析
 # --------------------------------------------------------------------------
 
-COMMANDS = ("serve", "analyze", "scan", "check")
+COMMANDS = ("serve", "analyze", "scan", "check", "backtest")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -350,6 +402,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ck = sub.add_parser("check", help="网络 / 证书 / 行情接口自检")
     p_ck.add_argument("--symbol", help="用哪个合约做行情测试，默认取配置里第一个")
 
+    p_bk = sub.add_parser("backtest", help="历史回测：用真实 K 线评估策略胜率与期望值")
+    p_bk.add_argument("symbol", help="合约代码，如 BTC-USDT")
+    p_bk.add_argument("--mode", choices=list(MODES), default="intraday")
+    p_bk.add_argument("--step", type=int, default=10,
+                      help="每隔多少根主周期 K 线构造一个建仓点（默认 10）")
+    p_bk.add_argument("--warmup", type=int, default=60, help="跳过前多少根（指标预热）")
+    p_bk.add_argument("--bars", type=int, default=300,
+                      help="取多少根主周期 K 线做历史（日内 15min / 波断 1day）")
+    p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")
+
     return ap
 
 
@@ -374,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_scan(args)
     if args.cmd == "check":
         return cmd_check(args)
+    if args.cmd == "backtest":
+        return cmd_backtest(args)
     return cmd_serve(args)
 
 
