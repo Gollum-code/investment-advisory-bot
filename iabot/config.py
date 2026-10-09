@@ -77,6 +77,17 @@ DEFAULTS: dict[str, Any] = {
         "db_file": "data/signals.db",
         "keep_days": 30,
     },
+
+    # 信号通知（配置里的 token/URL 只在本地 config.json，不进仓库）
+    "notify": {
+        "enabled": False,
+        "min_abs_score": 45.0,       # 只推 |score| 达到这个的信号
+        "on_direction_change": True,  # 方向翻转时也推
+        "timeout_sec": 8.0,
+        "webhook": {},               # {"url": "...", "headers": {...}}
+        "telegram": {},              # {"token": "xxx", "chat_id": "123"}
+        "bark": {},                  # {"url": "https://api.day.app/KEY"}
+    },
 }
 
 

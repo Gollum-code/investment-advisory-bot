@@ -8,6 +8,7 @@ from collections import deque
 from typing import Any, Callable
 
 from .advisor import Advisor
+from .notify import Notifier
 from .outcomes import evaluate_outcome, window_atr_period
 from .store import SignalStore
 
@@ -26,6 +27,7 @@ class Scheduler:
         self.advisor = advisor
         self.store = store
         self.cfg = cfg
+        self.notifier = Notifier(cfg)
         self.enabled: bool = bool(sc.get("enabled", False))
         self.interval: int = max(30, int(sc.get("interval_sec") or 300))
         self.symbols: list[str] = list(sc.get("symbols") or ["BTC-USDT"])
@@ -135,6 +137,8 @@ class Scheduler:
                                    price=res["price"], rr=res["rr"],
                                    mfe=res["mfe_pct"], mae=res["mae_pct"])
             done += 1
+            self.notifier.notify_outcome(sym, res["outcome"], mfe_pct=res["mfe_pct"],
+                                         mae_pct=res["mae_pct"])
             self._emit({"type": "outcome", "ts": res["ts"],
                         "symbol": sym, "outcome": res["outcome"],
                         "mfe_pct": res["mfe_pct"], "mae_pct": res["mae_pct"]})
@@ -155,10 +159,15 @@ class Scheduler:
                     break
                 try:
                     plan = self.advisor.plan_payload(sym, mode=self.mode, force=True)
+                    # 推送前先看上一条信号的方向，用于判断"方向翻转"
+                    prev = self.store.last_row(sym, self.mode)
+                    prev_dir = (prev or {}).get("direction")
+                    sent = self.notifier.notify_signal(plan, prev_direction=prev_dir)
                     self.store.save(plan, only_on_signal=self.only_on_signal,
                                     dedupe=self.dedupe)
                     results.append(plan)
-                    self._emit({"type": "plan", "ts": plan.get("generated_at"), "plan": plan})
+                    self._emit({"type": "plan", "ts": plan.get("generated_at"),
+                                "plan": plan, "notified": sent})
                 except Exception as exc:
                     self.last_error = f"{sym}: {type(exc).__name__}: {exc}"
                     self._emit({"type": "error", "ts": time.time(), "symbol": sym,
@@ -192,6 +201,7 @@ class Scheduler:
             "next_run": self.next_run,
             "run_count": self.run_count,
             "last_error": self.last_error,
+            "notify": self.notifier.status(),
             "log": list(self.log)[-40:],
         }
 

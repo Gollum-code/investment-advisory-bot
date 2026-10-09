@@ -188,6 +188,7 @@
     });
     $('equity').onchange = $('leverage').onchange = $('risk').onchange = () => analyze(true);
     $('btn-run').onclick = runNow;
+    $('btn-test-notify').onclick = testNotify;
     $('win-days').onchange = () => loadWinStats();
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
@@ -689,6 +690,23 @@
       toast('执行失败', err.message, 'err');
     } finally {
       $('btn-run').disabled = false;
+    }
+  }
+
+  async function testNotify() {
+    const btn = $('btn-test-notify');
+    btn.disabled = true;
+    try {
+      const d = await api('/api/notify/test', { method: 'POST' });
+      const st = d.status || {};
+      if (!st.enabled) toast('未开启', 'notify.enabled 还是 false', 'warn');
+      else if (!st.configured) toast('未配置', '请在 config.json 填 webhook / telegram / bark', 'warn');
+      else if (d.sent > 0) toast('已发送', '已推送 ' + d.sent + ' 个渠道', 'ok');
+      else toast('发送失败', st.last_error || '未知错误', 'err', 6000);
+    } catch (err) {
+      toast('测试失败', err.message, 'err');
+    } finally {
+      btn.disabled = false;
     }
   }
 

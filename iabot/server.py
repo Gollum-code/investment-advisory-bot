@@ -294,6 +294,12 @@ def make_handler(app: App):
                     return self._json({"ok": True, "count": len(results),
                                        "plans": results})
 
+                if path == "/api/notify/test":
+                    n = app.scheduler.notifier.send("[iabot] 测试通知",
+                                                    "这是一条测试消息。\n配置正确的话你应该已经收到了。")
+                    return self._json({"ok": True, "sent": n,
+                                       "status": app.scheduler.notifier.status()})
+
                 if path == "/api/config":
                     acc = body.get("account")
                     if isinstance(acc, dict):
