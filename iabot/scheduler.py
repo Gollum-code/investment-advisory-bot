@@ -8,14 +8,16 @@ from collections import deque
 from typing import Any, Callable
 
 from .advisor import Advisor
+from .outcomes import evaluate_outcome, window_atr_period
 from .store import SignalStore
 
 
 class Scheduler:
     """一个轻量的循环任务器。
 
-    跑在一个后台线程里，按 interval_sec 依次分析 symbols（可分批间隔），
-    每次结果都会写入 SQLite 并通过订阅者回调推送给前端（SSE）。
+    跑在一个后台线程里，按 interval_sec 依次分析 symbols（可分批间隔）。
+    每轮先回填上一轮信号的结果（先碰止损还是先到目标），再分析新的一批；
+    新信号落库前会做去重，避免同一个状态刷屏，然后通过订阅者回调推送给前端（SSE）。
     """
 
     def __init__(self, advisor: Advisor, store: SignalStore,
@@ -29,6 +31,14 @@ class Scheduler:
         self.symbols: list[str] = list(sc.get("symbols") or ["BTC-USDT"])
         self.mode: str = sc.get("mode") or "intraday"
         self.only_on_signal: bool = bool(sc.get("only_on_signal", False))
+        # 落库去重：方向没变且评分变化不大时，间隔期内不重复记录
+        self.dedupe: dict = dict(sc.get("dedupe") or {}) if sc.get("dedupe") else {
+            "cooldown_sec": 3600, "score_delta": 5.0}
+        # 结果回填
+        v = sc.get("verify") or {}
+        self.verify_enabled: bool = bool(v.get("enabled", True))
+        self.verify_min_age: float = float(v.get("min_age_sec") or 900)
+        self.verify_max: int = int(v.get("max_per_run") or 50)
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -99,21 +109,54 @@ class Scheduler:
             self._run_once()
         self.next_run = None
 
+    def _verify_pending(self) -> int:
+        """回填上一轮留下、尚未判定结局的信号（用后续 K 线判断先到止损还是先到目标）。"""
+        if not self.verify_enabled:
+            return 0
+        pending = self.store.pending(before=time.time() - self.verify_min_age,
+                                     limit=self.verify_max)
+        if not pending:
+            return 0
+        done = 0
+        for row_id, plan in pending:
+            sym = plan.get("symbol")
+            if not sym:
+                continue
+            period = window_atr_period(plan.get("mode") or self.mode)
+            try:
+                candles = self.advisor.client.kline(sym, period, 200)
+            except Exception as exc:
+                self.last_error = f"verify {sym}: {type(exc).__name__}: {exc}"
+                continue
+            res = evaluate_outcome(plan, candles or [])
+            if not res:
+                continue  # 还没有后续 K 线，留到下一轮
+            self.store.set_outcome(row_id, res["outcome"], ts=res["ts"],
+                                   price=res["price"], rr=res["rr"],
+                                   mfe=res["mfe_pct"], mae=res["mae_pct"])
+            done += 1
+            self._emit({"type": "outcome", "ts": res["ts"],
+                        "symbol": sym, "outcome": res["outcome"],
+                        "mfe_pct": res["mfe_pct"], "mae_pct": res["mae_pct"]})
+        return done
+
     def _run_once(self) -> list[dict]:
         if not self._run_lock.acquire(blocking=False):
             self._emit({"type": "skip", "ts": time.time(), "reason": "上一轮还没跑完"})
             return []
         try:
             t0 = time.time()
+            verified = self._verify_pending()
             self._emit({"type": "run_start", "ts": t0, "symbols": list(self.symbols),
-                        "mode": self.mode})
+                        "mode": self.mode, "verified": verified})
             results: list[dict] = []
             for sym in list(self.symbols):
                 if self._stop.is_set():
                     break
                 try:
                     plan = self.advisor.plan_payload(sym, mode=self.mode, force=True)
-                    self.store.save(plan, only_on_signal=self.only_on_signal)
+                    self.store.save(plan, only_on_signal=self.only_on_signal,
+                                    dedupe=self.dedupe)
                     results.append(plan)
                     self._emit({"type": "plan", "ts": plan.get("generated_at"), "plan": plan})
                 except Exception as exc:
@@ -124,6 +167,7 @@ class Scheduler:
             self.last_run = time.time()
             self._emit({"type": "run_done", "ts": self.last_run,
                         "elapsed": round(self.last_run - t0, 2), "count": len(results),
+                        "verified": verified,
                         "signals": [{"symbol": p["symbol"], "direction": p["direction"],
                                      "score": p["score"]} for p in results]})
             return results

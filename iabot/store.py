@@ -1,4 +1,13 @@
-"""信号历史存储（SQLite，标准库自带）。"""
+"""信号历史存储（SQLite，标准库自带）。
+
+除了落库/查询，这里还负责两件事：
+
+1. 去重：定时任务每轮都分析，同一个信号会连续几十分钟反复出现。
+   不去重的话 30 天能堆出十万条几乎重复的记录，后面算胜率会被同一个状态刷爆。
+2. 结果回填：保存时并不知道后来是涨是跌。这里记下信号的方向/止损/目标位，
+   由 outcomes 模块拿后续 K 线判断"先碰止损还是先到目标"，写回结果，
+   胜率统计才有意义。
+"""
 
 from __future__ import annotations
 
@@ -26,12 +35,46 @@ CREATE TABLE IF NOT EXISTS signals (
     stop          REAL,
     stop_pct      REAL,
     rr            REAL,
-    payload       TEXT    NOT NULL
+    payload       TEXT    NOT NULL,
+    outcome       TEXT,            -- pending 结果：tp1/tp2/tp3/stopped/timeout/空=未回填
+    outcome_ts    REAL,
+    outcome_price REAL,
+    outcome_rr    REAL,            -- 命中那档目标的盈亏比；止损=-1
+    mfe_pct       REAL,            -- 最大有利偏移（相对入场中值 %）
+    mae_pct       REAL,            -- 最大不利偏移（相对入场中值 %）
+    checked_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_sym ON signals(symbol, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_dir ON signals(direction, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(outcome, ts) WHERE outcome IS NULL;
 """
+
+# 老库（加结果回填之前建的）没有这些列，启动时补齐
+_MIGRATE: list[tuple[str, str]] = [
+    ("outcome", "TEXT"),
+    ("outcome_ts", "REAL"),
+    ("outcome_price", "REAL"),
+    ("outcome_rr", "REAL"),
+    ("mfe_pct", "REAL"),
+    ("mae_pct", "REAL"),
+    ("checked_at", "REAL"),
+]
+
+# 按 |score| 分档，用来统计"评分越高是不是真的越准"
+_SCORE_BUCKETS = (
+    (0.0, 40.0, "<40"),
+    (40.0, 60.0, "40-60"),
+    (60.0, 80.0, "60-80"),
+    (80.0, 200.0, ">=80"),
+)
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(signals)")}
+    for name, ddl in _MIGRATE:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {ddl}")
 
 
 class SignalStore:
@@ -43,11 +86,21 @@ class SignalStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            _ensure_columns(self._conn)
             self._conn.commit()
 
     # ------------------------------------------------------------------
-    def save(self, plan: dict, *, only_on_signal: bool = False) -> int | None:
+    def save(self, plan: dict, *, only_on_signal: bool = False,
+             dedupe: dict | None = None) -> int | None:
+        """保存一条信号。
+
+        dedupe: {"cooldown_sec": 3600, "score_delta": 5.0}
+        同一 symbol+mode 的上一条若方向相同、|评分差| < score_delta、
+        且距离上次落库不到 cooldown_sec，就跳过，避免刷屏。
+        """
         if only_on_signal and plan.get("direction") == "wait":
+            return None
+        if dedupe and not self._should_record(plan, dedupe):
             return None
         payload = json.dumps(plan, ensure_ascii=False)
         with self._lock:
@@ -64,6 +117,58 @@ class SignalStore:
             self._conn.commit()
             return cur.lastrowid
 
+    def _should_record(self, plan: dict, dedupe: dict) -> bool:
+        last = self.last_row(plan.get("symbol", ""), plan.get("mode", "intraday"))
+        if last is None:
+            return True
+        if last.get("direction") != plan.get("direction"):
+            return True
+        score_now = plan.get("score") or 0
+        score_last = last.get("score") or 0
+        if abs(score_now - score_last) >= float(dedupe.get("score_delta") or 5.0):
+            return True
+        cooldown = float(dedupe.get("cooldown_sec") or 3600.0)
+        return (time.time() - (last.get("ts") or 0)) >= cooldown
+
+    def last_row(self, symbol: str, mode: str = "intraday") -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM signals WHERE symbol = ? AND mode = ?"
+                " ORDER BY ts DESC LIMIT 1", (symbol, mode)).fetchone()
+        if row is None:
+            return None
+        d = {k: row[k] for k in row.keys()}
+        return d
+
+    # ------------------------------------------------------------------
+    def pending(self, *, before: float, limit: int = 100) -> list[tuple[int, dict]]:
+        """还没回填结果的信号 [(id, payload)]。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, payload FROM signals"
+                " WHERE outcome IS NULL AND direction != 'wait' AND ts <= ?"
+                " ORDER BY ts LIMIT ?", (before, limit)).fetchall()
+        return [(r["id"], json.loads(r["payload"])) for r in rows]
+
+    def set_outcome(self, row_id: int, outcome: str, *, ts: float | None = None,
+                    price: float | None = None, rr: float | None = None,
+                    mfe: float | None = None, mae: float | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE signals SET outcome = ?, outcome_ts = ?, outcome_price = ?,"
+                " outcome_rr = ?, mfe_pct = ?, mae_pct = ?, checked_at = ?"
+                " WHERE id = ?",
+                (outcome, ts, price, rr, mfe, mae, time.time(), row_id))
+            self._conn.commit()
+
+    def outcome_counts(self) -> dict:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT outcome, COUNT(*) c FROM signals"
+                " WHERE outcome IS NOT NULL AND outcome != '' GROUP BY outcome").fetchall()
+        return {r["outcome"]: r["c"] for r in rows}
+
+    # ------------------------------------------------------------------
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
         try:
             return json.loads(row["payload"])
@@ -108,6 +213,7 @@ class SignalStore:
             rows = self._conn.execute(sql, args).fetchall()
         return [json.loads(r["payload"]) for r in rows]
 
+    # ------------------------------------------------------------------
     def stats(self, hours: int = 24) -> dict:
         since = time.time() - hours * 3600
         with self._lock:
@@ -128,6 +234,66 @@ class SignalStore:
             "by_symbol": {r["symbol"]: r["c"] for r in by_sym},
             "earliest_ts": first,
             "total_rows": self._count(),
+        }
+
+    def win_stats(self, *, days: int | None = None, limit: int = 20000) -> dict:
+        """已回填信号的胜率统计：总体 + 按模式/币种/评分档/置信度。"""
+        sql = ("SELECT symbol, mode, direction, score, confidence,"
+               " outcome, outcome_rr, mfe_pct, mae_pct, ts FROM signals"
+               " WHERE outcome IS NOT NULL AND outcome != ''")
+        args: list[Any] = []
+        if days:
+            sql += " AND ts >= ?"
+            args.append(time.time() - days * 86400)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+
+        resolved = [r for r in rows if r["outcome"] != "timeout"]
+        wins = [r for r in resolved if (r["outcome"] or "").startswith("tp")]
+        losses = [r for r in resolved if r["outcome"] == "stopped"]
+        timeouts = [r for r in rows if r["outcome"] == "timeout"]
+
+        def _agg(rs) -> dict:
+            n = len(rs)
+            if not n:
+                return {"n": 0, "wins": 0, "losses": 0, "win_rate": None, "avg_r": None,
+                        "avg_mfe_pct": None, "avg_mae_pct": None}
+            w = sum(1 for r in rs if (r["outcome"] or "").startswith("tp"))
+            l = n - w
+            rrs = [r["outcome_rr"] for r in rs if r["outcome_rr"] is not None]
+            mfes = [r["mfe_pct"] for r in rs if r["mfe_pct"] is not None]
+            maes = [r["mae_pct"] for r in rs if r["mae_pct"] is not None]
+            return {"n": n, "wins": w, "losses": l,
+                    "win_rate": round(w / n, 4) if n else None,
+                    "avg_r": round(sum(rrs) / len(rrs), 3) if rrs else None,
+                    "avg_mfe_pct": round(sum(mfes) / len(mfes), 3) if mfes else None,
+                    "avg_mae_pct": round(sum(maes) / len(maes), 3) if maes else None}
+
+        def _group(key):
+            out = {}
+            for r in rows:
+                out.setdefault(key(r), []).append(r)
+            return {k: _agg(v) for k, v in sorted(out.items())}
+
+        by_score = {}
+        for r in rows:
+            s = abs(r["score"] or 0)
+            b = next((label for lo, hi, label in _SCORE_BUCKETS if lo <= s < hi), ">=80")
+            by_score.setdefault(b, []).append(r)
+
+        return {
+            "days": days,
+            "resolved": len(resolved),
+            "wins": len(wins),
+            "losses": len(losses),
+            "timeouts": len(timeouts),
+            **_agg(resolved),
+            "by_mode": _group(lambda r: r["mode"]),
+            "by_symbol": _group(lambda r: r["symbol"]),
+            "by_confidence": _group(lambda r: r["confidence"] or "低"),
+            "by_score": {k: _agg(v) for k, v in sorted(by_score.items())},
         }
 
     def _count(self) -> int:

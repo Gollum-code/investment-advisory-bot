@@ -60,6 +60,17 @@ DEFAULTS: dict[str, Any] = {
         "symbols": ["BTC-USDT"],
         "run_on_start": True,
         "only_on_signal": False,     # 只在有明确方向时落库
+        # 落库去重：方向没变且评分变化不大时，间隔期内不重复记录同一个信号
+        "dedupe": {
+            "cooldown_sec": 3600,    # 同一合约同一方向两次落库的最小间隔
+            "score_delta": 5.0,      # 评分变化超过这个值才算"新信号"
+        },
+        # 结果回填：拿后续 K 线判断信号先碰止损还是先到目标，写回胜率统计
+        "verify": {
+            "enabled": True,
+            "min_age_sec": 900,      # 信号生成多久之后才开始回填
+            "max_per_run": 50,       # 每轮最多回填多少条
+        },
     },
 
     "storage": {

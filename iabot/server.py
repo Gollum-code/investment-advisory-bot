@@ -212,6 +212,12 @@ def make_handler(app: App):
                 return self._json({"ok": True, "stats": app.store.stats(
                     int(q.get("hours") or 24))})
 
+            if path == "/api/win-stats":
+                days = q.get("days")
+                return self._json({"ok": True, "win": app.store.win_stats(
+                    days=int(days) if days else None),
+                    "outcomes": app.store.outcome_counts()})
+
             if path == "/api/schedule":
                 return self._json({"ok": True, "schedule": app.scheduler.status()})
 

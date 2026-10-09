@@ -57,6 +57,58 @@ class TestSignalStore(unittest.TestCase):
         self.assertEqual(self.store.purge(days=30), 1)
         self.assertEqual(self.store._count(), 0)
 
+    def test_dedupe_skips_repeated_signal(self):
+        """同一个方向反复落库 -> 只存第一条，直到冷却期过或评分大变。"""
+        plan = self._plan()
+        dedupe = {"cooldown_sec": 3600, "score_delta": 5.0}
+        self.assertIsNotNone(self.store.save(plan, dedupe=dedupe))
+        # 一字不差再存一次 -> 跳过
+        self.assertIsNone(self.store.save(plan, dedupe=dedupe))
+        # 方向变了 -> 存
+        flipped = dict(plan)
+        flipped["direction"] = "short" if plan["direction"] == "long" else "long"
+        self.assertIsNotNone(self.store.save(flipped, dedupe=dedupe))
+        # 评分大变 -> 存
+        moved = dict(plan)
+        moved["score"] = (plan.get("score") or 0) + 50.0
+        self.assertIsNotNone(self.store.save(moved, dedupe=dedupe))
+
+    def test_no_dedupe_by_default(self):
+        plan = self._plan()
+        self.assertIsNotNone(self.store.save(plan))
+        self.assertIsNotNone(self.store.save(plan))  # 默认不去重，保持老行为
+
+    def test_pending_and_set_outcome(self):
+        plan = self._plan()
+        rid = self.store.save(plan)
+        pending = self.store.pending(before=time.time() + 1, limit=10)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0][0], rid)
+        self.store.set_outcome(rid, "tp1", ts=plan["generated_at"] + 60,
+                               price=104.0, rr=2.0, mfe=2.1, mae=-0.5)
+        self.assertEqual(self.store.pending(before=time.time() + 1, limit=10), [])
+        self.assertEqual(self.store.outcome_counts().get("tp1"), 1)
+
+    def test_win_stats_aggregates(self):
+        good = self._plan()
+        good["score"] = 70.0
+        bad = self._plan(RANGE)
+        bad["direction"] = "short"
+        bad["score"] = -30.0
+        r1 = self.store.save(good)
+        r2 = self.store.save(bad)
+        self.store.set_outcome(r1, "tp1", rr=2.0, mfe=2.0, mae=-0.5)
+        self.store.set_outcome(r2, "stopped", rr=-1.0, mfe=0.5, mae=-1.5)
+        st = self.store.win_stats()
+        self.assertEqual(st["resolved"], 2)
+        self.assertEqual(st["wins"], 1)
+        self.assertEqual(st["losses"], 1)
+        self.assertAlmostEqual(st["win_rate"], 0.5)
+        self.assertIn("intraday", st["by_mode"])
+        self.assertIn("TEST-USDT", st["by_symbol"])
+        self.assertIn("60-80", st["by_score"])   # score=70 落在 60-80 档
+        self.assertIn("<40", st["by_score"])      # score=-30 落在 <40 档
+
 
 if __name__ == "__main__":
     unittest.main()
