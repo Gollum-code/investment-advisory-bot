@@ -263,6 +263,8 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .prof .note{color:var(--dim);font-size:11.5px;margin:5px 0}
 .prof-acts{display:flex;gap:7px;margin-top:8px}
 .thr{margin-bottom:12px;max-width:180px}
+.line{display:flex;align-items:center;gap:6px;margin:10px 0}
+.line .hint{margin-left:4px}
 
 /* ---------------- 因子权重调参 ---------------- */
 .weights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px 20px}

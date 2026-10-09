@@ -132,6 +132,9 @@
     <label class="fld narrow thr"><span>评分阈值 |score|（达到才给方向）</span>
       <input id="score-threshold" type="number" min="0" max="100" step="1" value="30">
     </label>
+    <label class="line"><input type="checkbox" id="res-enabled"> 启用多周期共振因子
+      <span class="hint">日线与 1 小时同向共振加分、背离减分（第 11 因子）</span>
+    </label>
     <div id="weights" class="weights"></div>
     <div class="msg" id="weights-msg"></div>
   </section>

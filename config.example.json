@@ -41,10 +41,12 @@
     "score_threshold": 30,
     "cache_ttl_sec": 20,
     "snapshot_ttl_sec": 20,
-    "factor_weights": {}
+    "factor_weights": {},
+    "resonance": {
+      "enabled": false,
+      "weight": 0.06
+    }
   },
-  "profiles": {},
-  "active_profile": "",
   "schedule": {
     "enabled": false,
     "interval_sec": 300,
@@ -67,6 +69,8 @@
     "db_file": "data/signals.db",
     "keep_days": 30
   },
+  "profiles": {},
+  "active_profile": "",
   "auth": {
     "token": ""
   },

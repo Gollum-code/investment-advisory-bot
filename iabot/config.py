@@ -54,11 +54,10 @@ DEFAULTS: dict[str, Any] = {
         # 因子权重覆盖（可选）：{"trend_daily": 0.2, "momentum": 0.1, ...}
         # 不填用内置默认；网页上可调并保存到这里
         "factor_weights": {},
+        # 多周期共振因子（可选第 11 因子，默认关闭）：日线偏置 × 1h 偏置，
+        # 同向共振加分、周期背离减分。开启后评分口径与默认 10 因子模型略有不同。
+        "resonance": {"enabled": False, "weight": 0.06},
     },
-
-    # 参数方案：命名打包"权重+阈值+模式"，可回测对比后一键应用
-    "profiles": {},
-    "active_profile": "",
 
     # 定时任务
     "schedule": {
@@ -84,6 +83,10 @@ DEFAULTS: dict[str, Any] = {
         "db_file": "data/signals.db",
         "keep_days": 30,
     },
+
+    # 参数方案：命名打包"权重+阈值+模式"，可回测对比后一键应用
+    "profiles": {},
+    "active_profile": "",
 
     # HTTP 访问控制：绑定到非本机地址时建议设 token（只放本地 config.json）
     "auth": {
@@ -169,6 +172,13 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     elif not isinstance(fw, dict):
         print("[config] analysis.factor_weights 不是字典，已重置为空")
         an["factor_weights"] = {}
+    rc = an.get("resonance")
+    if not isinstance(rc, dict):
+        an["resonance"] = {"enabled": False, "weight": 0.06}
+    else:
+        rc["enabled"] = bool(rc.get("enabled", False))
+        rc["weight"] = _coerce_num(rc.get("weight"), "analysis.resonance.weight",
+                                   0.0, 1.0, 0.06)
 
     out["http_timeout_sec"] = _coerce_num(out.get("http_timeout_sec"),
                                           "http_timeout_sec", 1, 120, 12.0)

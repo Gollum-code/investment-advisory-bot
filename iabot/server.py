@@ -302,7 +302,8 @@ def make_handler(app: App):
                 merged = {name: float(cur.get(name, w)) for name, w in FACTOR_DEFAULTS.items()}
                 return self._json({"ok": True, "defaults": FACTOR_DEFAULTS,
                                    "weights": merged, "customized": bool(cur),
-                                   "score_threshold": float(an.get("score_threshold") or 30)})
+                                   "score_threshold": float(an.get("score_threshold") or 30),
+                                   "resonance_enabled": bool((an.get("resonance") or {}).get("enabled"))})
 
             if path == "/api/profiles":
                 ps = ProfileStore(app.cfg)

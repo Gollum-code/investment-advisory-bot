@@ -341,6 +341,66 @@ FACTOR_DEFAULTS = {
     "open_interest": 0.09, "elite": 0.12, "orderbook": 0.07, "volatility": 0.05,
 }
 
+# 多周期共振因子是可选的第 11 个因子（默认关闭，保持 10 因子模型）。
+# 权重独立于 FACTOR_DEFAULTS，不进权重滑块面板。
+RESONANCE_DEFAULT_WEIGHT = 0.06
+
+
+def _bias_daily(snap: Snapshot) -> float:
+    """日线方向偏置 [-1,1]：现价相对均线/EMA 的位置。"""
+    cs = snap.closes("1day")
+    if len(cs) < 30:
+        return 0.0
+    price = snap.price or cs[-1]
+    pts, w = 0.0, 0.0
+    for v, wt in ((ind.last(ind.sma(cs, 20)), 1.0),
+                  (ind.last(ind.sma(cs, 50)), 1.2),
+                  (ind.last(ind.sma(cs, 200)), 1.5)):
+        if v:
+            pts += wt if price > v else -wt
+            w += wt
+    e12, e26 = ind.last(ind.ema(cs, 12)), ind.last(ind.ema(cs, 26))
+    if e12 and e26:
+        pts += 0.8 if e12 > e26 else -0.8
+        w += 0.8
+    return max(-1.0, min(1.0, pts / w)) if w else 0.0
+
+
+def _bias_intraday(snap: Snapshot) -> float:
+    """60min 方向偏置 [-1,1]。"""
+    cs = snap.closes("60min")
+    if len(cs) < 30:
+        return 0.0
+    price = snap.price or cs[-1]
+    pts, w = 0.0, 0.0
+    for v, wt in ((ind.last(ind.sma(cs, 20)), 1.0), (ind.last(ind.sma(cs, 50)), 1.2)):
+        if v:
+            pts += wt if price > v else -wt
+            w += wt
+    _, _, hist = ind.macd(cs)
+    h = ind.last(hist)
+    if h is not None:
+        pts += 0.9 if h > 0 else -0.9
+        w += 0.9
+    return max(-1.0, min(1.0, pts / w)) if w else 0.0
+
+
+def _f_resonance(snap: Snapshot, weight: float) -> Factor:
+    """多周期共振 = 日线偏置 × 60min 偏置。
+
+    同向（都多或都空）-> 正，表示趋势共振，顺势信号更可靠；
+    背离 -> 负，表示在逆着高周期做，要谨慎。
+    """
+    hi = _bias_daily(snap)
+    lo = _bias_intraday(snap)
+    score = max(-1.0, min(1.0, hi * lo))
+    if hi == 0 or lo == 0:
+        detail = f"共振无法判断（日线偏置 {hi:+.2f} / 1h 偏置 {lo:+.2f}）"
+    else:
+        same = "同向共振" if score > 0 else "周期背离"
+        detail = f"{same}：日线 {hi:+.2f} × 1h {lo:+.2f}"
+    return Factor("resonance", "多周期共振", score, weight, detail)
+
 
 def apply_factor_weights(factors: list[Factor], weights: dict | None = None) -> list[Factor]:
     """按 config 里的权重覆盖因子的 weight（只覆盖存在且 >0 的项）。"""
@@ -377,13 +437,20 @@ def _confidence_label(cs: float) -> str:
     return "高" if cs >= 60 else ("中" if cs >= 40 else "低")
 
 
-def compute_factors(snap: Snapshot) -> list[Factor]:
+def compute_factors(snap: Snapshot, *, resonance: bool = False,
+                    resonance_weight: float = RESONANCE_DEFAULT_WEIGHT) -> list[Factor]:
     out: list[Factor] = []
     for fn, needs_price in FACTOR_FNS:
         try:
             out.append(fn(snap, snap.price) if needs_price else fn(snap))
         except Exception as exc:
             out.append(Factor(fn.__name__.replace("_f_", ""), "计算异常", 0.0, 0.0,
+                              f"{type(exc).__name__}: {exc}"))
+    if resonance:
+        try:
+            out.append(_f_resonance(snap, resonance_weight))
+        except Exception as exc:
+            out.append(Factor("resonance", "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))
     return out
 
@@ -482,8 +549,13 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         return plan
 
     price = snap.price
-    factors = apply_factor_weights(compute_factors(snap),
-                                   (cfg.get("analysis") or {}).get("factor_weights"))
+    an = cfg.get("analysis") or {}
+    res_cfg = an.get("resonance") or {}
+    factors = apply_factor_weights(
+        compute_factors(snap,
+                        resonance=bool(res_cfg.get("enabled")),
+                        resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT)),
+        an.get("factor_weights"))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)
     total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0

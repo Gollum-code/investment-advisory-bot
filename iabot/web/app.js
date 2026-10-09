@@ -880,6 +880,7 @@
       const def = d.defaults || {};
       if (def['score_threshold'] !== undefined) $('score-threshold').value = def['score_threshold'];
       state.threshold = def['score_threshold'] ?? 30;
+      $('res-enabled').checked = !!def['resonance_enabled'];
       $('weights').innerHTML = Object.keys(d.weights).map((k) => {
         const cur = d.weights[k];
         const isCustom = Math.abs(cur - def[k]) > 1e-9;
@@ -916,10 +917,14 @@
     try {
       const data = reset ? {} : (state.weights || {});
       const thr = reset ? 30 : parseInt($('score-threshold').value || '30', 10);
+      const res_on = reset ? false : $('res-enabled').checked;
       await api('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ analysis: { factor_weights: data, score_threshold: thr } }),
+        body: JSON.stringify({ analysis: {
+          factor_weights: data, score_threshold: thr,
+          resonance: { enabled: res_on, weight: 0.06 },
+        } }),
       });
       state.threshold = thr;
       setWeightsMsg(reset ? '已恢复默认权重与阈值' : '权重与阈值已保存', 'ok');
