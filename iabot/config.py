@@ -78,6 +78,14 @@ DEFAULTS: dict[str, Any] = {
         "keep_days": 30,
     },
 
+    # HTTP 访问控制：绑定到非本机地址时建议设 token（只放本地 config.json）
+    "auth": {
+        "token": "",
+    },
+
+    # 可选访问日志：留空则只在控制台打印；填路径则追加写入
+    "log_file": "",
+
     # 信号通知（配置里的 token/URL 只在本地 config.json，不进仓库）
     "notify": {
         "enabled": False,
@@ -101,6 +109,66 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
+def _coerce_num(val, name, lo=None, hi=None, default=0.0):
+    """把配置里的数值字段转成 float，超范围/非数字时钳回默认并告警。"""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        print(f"[config] 字段 {name}={val!r} 不是数字，改用 {default}")
+        return default
+    if lo is not None and v < lo:
+        print(f"[config] 字段 {name}={v} 低于下限 {lo}，改用 {lo}")
+        return lo
+    if hi is not None and v > hi:
+        print(f"[config] 字段 {name}={v} 高于上限 {hi}，改用 {hi}")
+        return hi
+    return v
+
+
+def _coerce_int(val, name, lo=None, hi=None, default=0):
+    return int(_coerce_num(val, name, lo, hi, float(default)))
+
+
+def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """类型强转 + 范围钳制。用户手改 config.json 最容易把数字写成字符串，
+    这里在启动时兜底：非法值回落默认并打一行告警，不让整个服务崩掉。
+
+    返回一个新的 dict，不改原 cfg。
+    """
+    out = copy.deepcopy(cfg)
+    acc = out.setdefault("account", {})
+    acc["equity_usdt"] = _coerce_num(acc.get("equity_usdt"), "account.equity_usdt",
+                                     1, None, 450.0)
+    acc["risk_pct_per_trade"] = _coerce_num(acc.get("risk_pct_per_trade"),
+                                            "account.risk_pct_per_trade", 0.01, 100, 2.0)
+    acc["max_leverage"] = _coerce_int(acc.get("max_leverage"), "account.max_leverage",
+                                      1, 125, 10)
+    acc["preferred_leverage"] = _coerce_int(acc.get("preferred_leverage"),
+                                            "account.preferred_leverage", 1, 125, 10)
+    acc["preferred_leverage"] = min(acc["preferred_leverage"], acc["max_leverage"])
+    acc["max_margin_pct"] = _coerce_num(acc.get("max_margin_pct"),
+                                        "account.max_margin_pct", 1, 100, 50.0)
+
+    an = out.setdefault("analysis", {})
+    an["score_threshold"] = _coerce_num(an.get("score_threshold"),
+                                        "analysis.score_threshold", 0, 100, 30.0)
+    an["cache_ttl_sec"] = _coerce_num(an.get("cache_ttl_sec"),
+                                      "analysis.cache_ttl_sec", 1, 3600, 20.0)
+    an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),
+                                         "analysis.snapshot_ttl_sec", 1, 3600, 20.0)
+
+    out["http_timeout_sec"] = _coerce_num(out.get("http_timeout_sec"),
+                                          "http_timeout_sec", 1, 120, 12.0)
+    out["http_retries"] = _coerce_int(out.get("http_retries"), "http_retries", 0, 5, 2)
+
+    if not isinstance(out.get("symbols"), list):
+        out["symbols"] = list(DEFAULTS["symbols"])
+    sc = out.setdefault("schedule", {})
+    sc["interval_sec"] = _coerce_int(sc.get("interval_sec"), "schedule.interval_sec",
+                                     30, 86400, 300)
+    return out
+
+
 def load_config() -> dict[str, Any]:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     cfg = copy.deepcopy(DEFAULTS)
@@ -109,7 +177,7 @@ def load_config() -> dict[str, Any]:
             cfg = _merge(cfg, json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception as exc:  # 配置坏了也要能启动
             print(f"[config] 读取 config.json 失败，使用默认配置: {exc}")
-    return cfg
+    return validate_config(cfg)
 
 
 def _write_json(path: Path, obj: Any) -> None:

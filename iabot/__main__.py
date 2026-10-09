@@ -267,7 +267,12 @@ def cmd_serve(args) -> int:
     app = make_app(cfg)
     app.start()
     httpd = build_server(app, cfg["host"], int(cfg["port"]))
-    url = f"http://{cfg['host']}:{cfg['port']}/"
+    url_host = "127.0.0.1" if cfg["host"] in ("0.0.0.0", "::") else cfg["host"]
+    url = f"http://{url_host}:{cfg['port']}/"
+
+    if cfg["host"] not in ("127.0.0.1", "localhost", "::1") and not app.auth_token:
+        print("  ! 正在监听非本机地址但未设置访问令牌，局域网内任何人都能操作这个服务"
+              + "（可在 config.json 的 auth.token 里设置）", file=sys.stderr)
 
     print("=" * 62)
     print(f"  火币合约行情分析 · 投资建议  v{__version__}")
@@ -278,6 +283,7 @@ def cmd_serve(args) -> int:
     print(f"  账户设置 : {cfg.get('account', {}).get('equity_usdt')} U / "
           f"{cfg.get('account', {}).get('preferred_leverage')}x / "
           f"单笔风险 {cfg.get('account', {}).get('risk_pct_per_trade')}%")
+    print(f"  访问控制 : {'Bearer 令牌' if app.auth_token else '本机免登录'}")
     print("  首次使用建议先跑: python -m iabot check")
     print("  停止: Ctrl+C")
     print("=" * 62)

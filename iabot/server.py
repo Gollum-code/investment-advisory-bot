@@ -56,6 +56,17 @@ class App:
                                  int((cfg.get("storage") or {}).get("keep_days", 30)))
         self.scheduler = Scheduler(self.advisor, self.store, cfg)
         self.started_at = time.time()
+        self.auth_token = (cfg.get("auth") or {}).get("token") or ""
+        self.log_file = cfg.get("log_file") or ""
+
+    def authorized(self, hdrs) -> bool:
+        """Bearer token 或 X-Iabot-Token 请求头 == 配置里的 token 才算通过。"""
+        if not self.auth_token:
+            return True
+        token = (hdrs.get("Authorization") or "")[len("Bearer "):]
+        if token == self.auth_token:
+            return True
+        return hdrs.get("X-Iabot-Token") == self.auth_token
 
     def start(self) -> None:
         if (self.cfg.get("schedule") or {}).get("enabled"):
@@ -94,7 +105,17 @@ def make_handler(app: App):
 
         # ---------------- 基础工具 ----------------
         def log_message(self, fmt, *args):
-            pass  # 静音访问日志
+            # 访问日志：默认静音；配置了 log_file 才写（按天滚动，避免无限膨胀）
+            f = app.log_file
+            if not f:
+                return
+            try:
+                line = "%s - %s" % (self.address_string(),
+                                    fmt % args) + "\n"
+                with open(f, "a", encoding="utf-8") as fh:
+                    fh.write(line)
+            except Exception:
+                pass
 
         def handle_one_request(self):
             # 浏览器关标签页 / 前端断开 SSE 时连接会被直接掐断，
@@ -147,6 +168,8 @@ def make_handler(app: App):
         def do_GET(self):
             u = urlparse(self.path)
             path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
+            if path.startswith("/api/") and not app.authorized(self.headers):
+                return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
             try:
                 if path in ("/", "/index.html"):
                     return self._static("index.html")
@@ -312,6 +335,8 @@ def make_handler(app: App):
         def do_POST(self):
             u = urlparse(self.path)
             path = u.path
+            if path.startswith("/api/") and not app.authorized(self.headers):
+                return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
             body = self._body()
             try:
                 if path == "/api/schedule":

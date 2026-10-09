@@ -49,10 +49,32 @@
       "BTC-USDT"
     ],
     "run_on_start": true,
-    "only_on_signal": false
+    "only_on_signal": false,
+    "dedupe": {
+      "cooldown_sec": 3600,
+      "score_delta": 5.0
+    },
+    "verify": {
+      "enabled": true,
+      "min_age_sec": 900,
+      "max_per_run": 50
+    }
   },
   "storage": {
     "db_file": "data/signals.db",
     "keep_days": 30
+  },
+  "auth": {
+    "token": ""
+  },
+  "log_file": "",
+  "notify": {
+    "enabled": false,
+    "min_abs_score": 45.0,
+    "on_direction_change": true,
+    "timeout_sec": 8.0,
+    "webhook": {},
+    "telegram": {},
+    "bark": {}
   }
 }

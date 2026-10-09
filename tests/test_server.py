@@ -122,5 +122,83 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(b["sentiment"], "偏多")
 
 
+class TestServerAuth(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["open_browser"] = False
+        cfg["rest_bases"] = []
+        cfg["storage"] = {"db_file": str(Path(self.tmp.name) / "signals.db"),
+                          "keep_days": 30}
+        cfg["auth"] = {"token": "s3cret"}
+        self.app = make_app(cfg)
+        self.srv = build_server(self.app, "127.0.0.1", 0)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever,
+                         kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.app.stop()
+        self.tmp.cleanup()
+
+    def _get(self, path, token=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        hdrs = {"Authorization": "Bearer " + token} if token else {}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=hdrs),
+                                        timeout=5) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8")
+
+    def test_without_token_is_401(self):
+        code, _ = self._get("/api/meta")
+        self.assertEqual(code, 401)
+
+    def test_wrong_token_is_401(self):
+        code, _ = self._get("/api/meta", token="nope")
+        self.assertEqual(code, 401)
+
+    def test_correct_token_ok(self):
+        code, body = self._get("/api/meta", token="s3cret")
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["ok"])
+
+    def test_static_files_need_no_token(self):
+        # 静态前端不校验 token（否则浏览器拿不到页面），API 才校验
+        code, _ = self._get("/")
+        self.assertEqual(code, 200)
+
+    def test_post_requires_token(self):
+        import urllib.request as ur
+        req = ur.Request(f"http://127.0.0.1:{self.port}/api/schedule",
+                         data=b'{}', method="POST")
+        try:
+            with ur.urlopen(req, timeout=5) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        self.assertEqual(code, 401)
+
+    def test_breadth_aggregates(self):
+        from iabot.server import market_breadth
+        plans = [
+            {"symbol": "BTC-USDT", "direction": "long", "score": 60.0},
+            {"symbol": "ETH-USDT", "direction": "long", "score": 35.0},
+            {"symbol": "SOL-USDT", "direction": "short", "score": -55.0},
+            {"symbol": "XRP-USDT", "direction": "wait", "score": 10.0},
+        ]
+        b = market_breadth(plans)
+        self.assertEqual(b["scanned"], 4)
+        self.assertEqual(b["longs"], 2)
+        self.assertEqual(b["shorts"], 1)
+        self.assertEqual(b["waits"], 1)
+        self.assertAlmostEqual(b["bull_ratio"], 2 / 3, places=2)
+        self.assertAlmostEqual(b["bear_ratio"], 1 / 3, places=2)
+        self.assertEqual(b["sentiment"], "偏多")
+
+
 if __name__ == "__main__":
     unittest.main()
