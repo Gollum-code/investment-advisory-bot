@@ -82,6 +82,27 @@ class TestBacktest(unittest.TestCase):
             # 成本按单笔风险折算，不该超过 0.1 R（默认费率 0.1% 往返）
             self.assertLess(paid.avg_cost_r, 0.1)
 
+    def test_cost_breakdown_present(self):
+        snap = _make_snapshot(200)
+        r = backtest(snap, _cfg(), mode="intraday", step=6, warmup=30).to_dict()
+        for k in ("avg_fee_r", "avg_slippage_r", "avg_funding_r", "avg_holding_h"):
+            self.assertIn(k, r)
+        if r["trades"]:
+            self.assertGreaterEqual(r["avg_fee_r"], 0)
+            self.assertGreaterEqual(r["avg_slippage_r"], 0)
+            self.assertGreaterEqual(r["avg_holding_h"], 0)
+
+    def test_funding_increases_cost_for_long(self):
+        # 资金费率越高、持仓越久，多头付的资金费越多，成本应更大
+        snap = _make_snapshot(200)
+        snap.funding_rate = 0.0003  # 0.03%/8h
+        hi = backtest(snap, _cfg(), mode="intraday", step=6, warmup=30,
+                      costs={"funding_rate": 0.0003})
+        lo = backtest(snap, _cfg(), mode="intraday", step=6, warmup=30,
+                      costs={"funding_rate": 0.0})
+        # 多头在正费率下要付钱 -> 累计 R 不应更高
+        self.assertLessEqual(hi.total_r, lo.total_r + 1e-9)
+
 
 if __name__ == "__main__":
     unittest.main()

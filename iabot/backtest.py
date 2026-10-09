@@ -18,6 +18,9 @@ from .market import Candle, period_seconds, Snapshot
 from .outcomes import evaluate_outcome
 from .signals import build_plan
 
+# 成本模型默认值（bps = 万分之一）。一次往返 = 开仓一次 + 平仓一次。
+DEFAULT_COSTS = {"taker_fee_bps": 5.0, "slippage_bps": 2.0, "funding_rate": 0.0}
+
 
 @dataclass
 class BacktestResult:
@@ -33,7 +36,11 @@ class BacktestResult:
     avg_loss_r: float
     win_rate: float
     expectancy_r: float         # 每笔期望 R = total_r / trades（已扣成本）
-    avg_cost_r: float           # 每笔平均成本（手续费+资金费，折算成 R）
+    avg_cost_r: float           # 每笔平均成本（手续费+滑点+资金费，折算成 R）
+    avg_fee_r: float
+    avg_slippage_r: float
+    avg_funding_r: float
+    avg_holding_h: float        # 平均持仓时长（小时）
     max_mfe: float
     max_mae: float
     equity_curve: list[float]   # 以 1R 为单位累加（实际风险由 sizing 控制）
@@ -48,6 +55,10 @@ class BacktestResult:
             "avg_win_r": round(self.avg_win_r, 3),
             "avg_loss_r": round(self.avg_loss_r, 3),
             "avg_cost_r": round(self.avg_cost_r, 3),
+            "avg_fee_r": round(self.avg_fee_r, 4),
+            "avg_slippage_r": round(self.avg_slippage_r, 4),
+            "avg_funding_r": round(self.avg_funding_r, 4),
+            "avg_holding_h": round(self.avg_holding_h, 2),
             "total_r": round(self.total_r, 2),
             "max_mfe": round(self.max_mfe, 3),
             "max_mae": round(self.max_mae, 3),
@@ -74,21 +85,32 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
 
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
-             apply_costs: bool = True) -> BacktestResult:
+             apply_costs: bool = True, costs: dict | None = None) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
     base: 已经 fetch 好的完整快照（含各周期 K 线），由调用方从接口拿。
     step:  每隔多少根主周期 K 线构造一个建仓点（越小越密、越慢）。
     warmup: 前多少根跳过，保证指标有足够数据。
-    apply_costs: 每笔交易扣除手续费+资金费（从 sizing 的 fee_estimate 折算成 R）。
-                 之前期望 R 偏高估；开了成本才接近真实可预期收益。
+    apply_costs: 每笔交易扣除真实成本（手续费 + 滑点 + 按持仓时长的资金费）。
+    costs:  覆盖默认成本参数；资金费率从 base.funding_rate 取（作为近似）。
     """
+    C = dict(DEFAULT_COSTS)
+    if costs:
+        C.update({k: float(v) for k, v in costs.items() if k in C})
     m_period = "15min" if mode == "intraday" else "1day"
+    m_period_sec = period_seconds(m_period)
+    funding_period_h = 8.0  # 永续每 8 小时结算一次资金费
+    # 资金费率：优先用配置传入，否则取快照当前费率
+    funding_rate = float(C.get("funding_rate") or 0.0) or float(base.funding_rate or 0.0)
     main = base.klines.get(m_period) or []
     n = len(main)
     if n < warmup + step + 30:
-        return BacktestResult(base.symbol, mode, n, 0, 0, 0, n, 0.0, 0.0, 0.0,
-                              0.0, 0.0, 0.0, 0.0, [])
+        return BacktestResult(
+            symbol=base.symbol, mode=mode, bars=n, trades=0, wins=0, losses=0,
+            timeouts=n, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
+            avg_cost_r=0.0, avg_fee_r=0.0, avg_slippage_r=0.0, avg_funding_r=0.0,
+            avg_holding_h=0.0, win_rate=0.0, expectancy_r=0.0,
+            max_mfe=0.0, max_mae=0.0, equity_curve=[])
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -118,6 +140,10 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     cum_r = 0.0
     trades = 0
     cost_rs: list[float] = []
+    fee_rs: list[float] = []
+    slip_rs: list[float] = []
+    fund_rs: list[float] = []
+    holding_hs: list[float] = []
 
     start = warmup
     end = n - 5  # 留出后续判定空间
@@ -143,30 +169,42 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         # 关键：把"信号时间"改成该建仓点的历史时间 ts，否则 evaluate_outcome
         # 会把所有历史 K 线当成"信号之前"而跳过，永远判不出结果
         plan.generated_at = float(ts)
-        trades += 1
-
-        # 成本折算：sizing.fee_estimate 是"开平各一次的往返手续费"，
-        # 把它占单笔风险的比例当成本 R（每次交易都要付，胜与负都扣）。
-        cost_r = 0.0
-        if apply_costs:
-            sz = plan.sizing or {}
-            risk_usd = sz.get("risk_amount_usdt") or 0
-            fee_usd = sz.get("fee_estimate_usdt") or 0
-            if risk_usd > 0 and fee_usd > 0:
-                cost_r = fee_usd / risk_usd
-        if cost_r > 0:
-            cost_rs.append(cost_r)
 
         res = evaluate_outcome(plan.to_dict(), future)
         if not res:
-            # 后续 K 线不足以判定窗口，跳过（不算交易）
-            trades -= 1
-            if cost_r > 0:
-                cost_rs.pop()
-            continue
+            continue  # 后续 K 线不足以判定窗口，跳过（不算交易）
+        trades += 1
         outcome = res["outcome"]
         mfes.append(res["mfe_pct"])
         maes.append(res["mae_pct"])
+
+        # 持仓时长（用于资金费累计）
+        holding_h = res["bars"] * m_period_sec / 3600.0
+        holding_hs.append(holding_h)
+
+        # ---- 真实成本（折算成 R：成本占单笔风险的比例）----
+        # 成本 = 手续费 + 滑点（都与名义价值成正比，再按 名义/风险 转 R）
+        #      + 资金费（与名义×持仓时长成正比；多头付、空头收，随费率正负）
+        cost_r = fee_r = slip_r = fund_r = 0.0
+        if apply_costs:
+            sz = plan.sizing or {}
+            risk_usd = sz.get("risk_amount_usdt") or 0
+            notional = sz.get("notional_usdt") or 0
+            if risk_usd > 0 and notional > 0:
+                nr = notional / risk_usd  # 名义 / 风险
+                fee_r = (C["taker_fee_bps"] / 10000.0) * 2 * nr   # 开平各一次
+                slip_r = (C["slippage_bps"] / 10000.0) * 2 * nr   # 开平各一次
+                if funding_rate:
+                    periods = holding_h / funding_period_h
+                    sign = 1.0 if plan.direction == "long" else -1.0
+                    # 费率为正时多头付、空头收；对 R 的影响取反号
+                    fund_r = -sign * funding_rate * periods * nr
+            cost_r = fee_r + slip_r + fund_r
+            fee_rs.append(fee_r)
+            slip_rs.append(slip_r)
+            fund_rs.append(fund_r)
+            cost_rs.append(cost_r)
+
         if outcome.startswith("tp"):
             r = (res["rr"] if res["rr"] is not None else 1.0) - cost_r
             wins += 1
@@ -186,13 +224,18 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     resolved = wins + losses
     win_rate = wins / resolved if resolved else 0.0
     expectancy = total_r / trades if trades else 0.0
+    mean = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
     return BacktestResult(
         symbol=base.symbol, mode=mode, bars=n, trades=trades,
         wins=wins, losses=losses, timeouts=timeouts,
         total_r=total_r,
-        avg_win_r=(sum(win_rs) / len(win_rs)) if win_rs else 0.0,
-        avg_loss_r=(sum(loss_rs) / len(loss_rs)) if loss_rs else 0.0,
-        avg_cost_r=(sum(cost_rs) / len(cost_rs)) if cost_rs else 0.0,
+        avg_win_r=mean(win_rs),
+        avg_loss_r=mean(loss_rs),
+        avg_cost_r=mean(cost_rs),
+        avg_fee_r=mean(fee_rs),
+        avg_slippage_r=mean(slip_rs),
+        avg_funding_r=mean(fund_rs),
+        avg_holding_h=mean(holding_hs),
         win_rate=win_rate, expectancy_r=expectancy,
         max_mfe=(max(mfes) if mfes else 0.0),
         max_mae=(min(maes) if maes else 0.0),

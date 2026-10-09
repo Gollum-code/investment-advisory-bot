@@ -55,8 +55,15 @@ DEFAULTS: dict[str, Any] = {
         # 不填用内置默认；网页上可调并保存到这里
         "factor_weights": {},
         # 多周期共振因子（可选第 11 因子，默认关闭）：日线偏置 × 1h 偏置，
-        # 同向共振加分、周期背离减分。开启后评分口径与默认 10 因子模型略有不同。
         "resonance": {"enabled": False, "weight": 0.06},
+        # 回测成本模型（更贴近真实：手续费 + 滑点 + 按持仓时长的资金费）
+        "backtest": {
+            "enabled": True,
+            "taker_fee_bps": 5.0,      # 单边手续费 0.05%（开平各一次）
+            "slippage_bps": 2.0,       # 单边滑点 0.02%（开平各一次）
+            "funding": True,           # 按持仓时长累计资金费
+            "funding_period_sec": 28800,  # 8 小时一次结算
+        },
     },
 
     # 定时任务

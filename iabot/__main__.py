@@ -329,8 +329,11 @@ def cmd_backtest(args) -> int:
           f"（{res.timeouts} 根窗口内未了结）")
     print(f"  胜率         : {res.win_rate * 100:.1f}%")
     print(f"  期望值       : {res.expectancy_r:+.3f} R/笔"
-          f"（正 = 长期按规则做有优势；已扣手续费 {res.avg_cost_r:.3f} R/笔）")
+          f"（已扣成本，正 = 长期按规则做有优势）")
     print(f"  平均盈亏 R   : 胜 {res.avg_win_r:.2f} / 负 {res.avg_loss_r:.2f}")
+    print(f"  成本明细     : 手续费 {res.avg_fee_r:.3f} + 滑点 {res.avg_slippage_r:.3f}"
+          f" + 资金费 {res.avg_funding_r:.3f} = {res.avg_cost_r:.3f} R/笔")
+    print(f"  平均持仓     : {res.avg_holding_h:.1f} 小时")
     print(f"  最大浮盈/浮亏: {res.max_mfe:+.2f}% / {res.max_mae:+.2f}%")
     print(f"  累计 R       : {res.total_r:+.1f}（按 1R 单笔计算，曲线见 --json）")
     print("=" * 66)
