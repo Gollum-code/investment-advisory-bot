@@ -86,6 +86,24 @@ class TestServerAPI(unittest.TestCase):
             code = e.code
         self.assertEqual(code, 400)
 
+    def test_win_stats_empty_ok(self):
+        code, body = self._get("/api/win-stats")
+        self.assertEqual(code, 200)
+        d = json.loads(body)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["win"]["resolved"], 0)
+
+    def test_win_stats_reports_filled_outcome(self):
+        rid = self.app.store.save({"symbol": "ETH-USDT", "mode": "intraday",
+                                   "direction": "long", "score": 65.0,
+                                   "confidence": "中", "generated_at": 1.0})
+        self.app.store.set_outcome(rid, "tp1", rr=2.0, mfe=2.0, mae=-0.5)
+        code, body = self._get("/api/win-stats")
+        self.assertEqual(code, 200)
+        win = json.loads(body)["win"]
+        self.assertEqual(win["resolved"], 1)
+        self.assertEqual(win["wins"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

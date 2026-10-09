@@ -78,6 +78,16 @@
     return { long: '做多', short: '做空', wait: '观望' }[d] || d;
   }
 
+  function outcomeLabel(o) {
+    return {
+      tp1: { label: '命中 TP1', good: true },
+      tp2: { label: '命中 TP2', good: true },
+      tp3: { label: '命中 TP3', good: true },
+      stopped: { label: '触发止损', good: false },
+      timeout: { label: '到期未了结', good: false },
+    }[o] || { label: o, good: false };
+  }
+
   function toast(title, body, kind, ms) {
     const wrap = $('toast-wrap');
     const el = document.createElement('div');
@@ -142,6 +152,7 @@
       loadHealth();
       loadHistory();
       loadSchedule();
+      loadWinStats();
       analyze(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
@@ -177,6 +188,7 @@
     });
     $('equity').onchange = $('leverage').onchange = $('risk').onchange = () => analyze(true);
     $('btn-run').onclick = runNow;
+    $('win-days').onchange = () => loadWinStats();
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -707,8 +719,82 @@
     try {
       await api('/api/history/clear', { method: 'POST' });
       loadHistory();
+      loadWinStats();
       toast('已清空', '', 'ok');
     } catch (err) { toast('清空失败', err.message, 'err'); }
+  }
+
+  // ---------------------------------------------------------------- 胜率统计
+  async function loadWinStats() {
+    const days = $('win-days').value;
+    const q = new URLSearchParams();
+    if (days) q.set('days', days);
+    try {
+      const d = await api('/api/win-stats?' + q.toString());
+      renderWinStats(d.win || {}, d.outcomes || {});
+    } catch (e) {
+      $('win').innerHTML = '<div class="empty">胜率统计加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function _pct(v) { return v == null ? '--' : (v * 100).toFixed(1) + '%'; }
+
+  function _winBars(g) {
+    const n = g.n || 0;
+    if (!n) return '<div class="win-empty">无</div>';
+    const w = g.wins || 0;
+    return '<div class="win-bar" title="胜 ' + w + ' / 负 ' + (g.losses || 0) + '">' +
+      '<i class="w" style="width:' + Math.round((w / n) * 100) + '%"></i>' +
+      '<i class="l" style="width:' + Math.round(((g.losses || 0) / n) * 100) + '%"></i>' +
+      '</div>';
+  }
+
+  function renderWinStats(win, outcomes) {
+    const resolved = win.resolved || 0;
+    const pending = (outcomes && !Object.keys(outcomes).length)
+      ? '' : '';
+    const sum = $('win');
+    if (!resolved) {
+      const done = Object.keys(outcomes || {}).reduce((a, k) => a + outcomes[k], 0);
+      sum.innerHTML = '<div class="empty">还没有已判定的信号结果' +
+        (done ? '（已回填 ' + done + ' 条）' : '') +
+        '。开启定时任务并等待行情推进后，这里会显示胜率。</div>';
+      return;
+    }
+    const wr = win.win_rate != null ? (win.win_rate * 100).toFixed(1) + '%' : '--';
+    const wrCls = win.win_rate == null ? '' : (win.win_rate >= 0.5 ? 'good' : 'bad');
+
+    let html = '<div class="win-kpis">' +
+      '<div class="kpi"><div class="v ' + wrCls + '">' + wr + '</div><div class="k">胜率</div></div>' +
+      '<div class="kpi"><div class="v">' + (win.wins || 0) + '</div><div class="k">到达目标</div></div>' +
+      '<div class="kpi"><div class="v bad">' + (win.losses || 0) + '</div><div class="k">触发止损</div></div>' +
+      '<div class="kpi"><div class="v">' + (win.resolved || 0) + '</div><div class="k">已判定</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_r, 2) + '</div><div class="k">平均 R</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_mfe_pct, 2) + '%</div><div class="k">平均最大浮盈</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_mae_pct, 2) + '%</div><div class="k">平均最大浮亏</div></div>' +
+      '</div>';
+
+    function group(title, obj) {
+      const keys = Object.keys(obj || {});
+      if (!keys.length) return '';
+      return '<div class="win-group"><div class="sub-title">' + title + '</div><table class="win-table">' +
+        keys.map((k) => {
+          const g = obj[k];
+          return '<tr><td class="k">' + esc(k) + '</td><td>' + _winBars(g) + '</td>' +
+            '<td class="n">' + (g.n || 0) + '</td>' +
+            '<td class="n ' + (g.win_rate == null ? '' : (g.win_rate >= 0.5 ? 'good' : 'bad')) + '">' +
+            _pct(g.win_rate) + '</td>' +
+            '<td class="n">' + fmtNum(g.avg_r, 2) + '</td></tr>';
+        }).join('') + '</table></div>';
+    }
+
+    html += '<div class="win-groups">' +
+      group('按 |评分| 分档', win.by_score) +
+      group('按模式', win.by_mode) +
+      group('按置信度', win.by_confidence) +
+      group('按币种', win.by_symbol) +
+      '</div>';
+    sum.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- 日志 / SSE
@@ -744,8 +830,15 @@
           (p.rr != null ? ' RR ' + fmtNum(p.rr, 2) : ''));
         loadHistory();
       } else if (d.type === 'run_done') {
-        logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's');
+        logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's' +
+          (d.verified ? '，回填 ' + d.verified + ' 条' : ''));
         loadSchedule();
+      } else if (d.type === 'outcome') {
+        const oc = outcomeLabel(d.outcome);
+        logLine(oc.good ? 'ok' : 'err', d.symbol + ' ' + oc.label +
+          (d.mfe_pct != null ? ' 最大浮盈 ' + fmtNum(d.mfe_pct, 2) + '%' : ''));
+        loadWinStats();
+        loadHistory();
       } else if (d.type === 'skip') {
         logLine('warn', '跳过：' + (d.reason || ''));
       } else if (d.type === 'error') {

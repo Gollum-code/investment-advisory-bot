@@ -110,6 +110,24 @@
     </div>
   </div>
 
+  <!-- 信号胜率统计 -->
+  <section class="card">
+    <h2>信号胜率
+      <span class="hint">依据已回填结果的信号统计（先碰止损还是先到目标）</span>
+      <label class="fld narrow right"><span>统计天数</span>
+        <select id="win-days">
+          <option value="7">近 7 天</option>
+          <option value="30" selected>近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="">全部</option>
+        </select>
+      </label>
+    </h2>
+    <div id="win" class="win-wrap">
+      <div class="empty">还没有已回填结果的信号。开启定时任务后会自动统计。</div>
+    </div>
+  </section>
+
   <!-- 定时任务 -->
   <section class="card">
     <h2>定时任务
