@@ -215,6 +215,7 @@
     $('btn-weights-reset').onclick = () => saveWeights(true);
     $('btn-prof-save').onclick = saveProfile;
     $('btn-pos-open').onclick = openPosition;
+    $('btn-report').onclick = openReport;
     $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
@@ -939,6 +940,36 @@
       toast('保存失败', err.message, 'err');
     } finally {
       $('btn-weights-save').disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 导出报告
+  async function openReport() {
+    const btn = $('btn-report');
+    btn.disabled = true;
+    try {
+      const q = new URLSearchParams({ symbol: $('symbol').value, mode: $('mode').value });
+      const token = localStorage.getItem('iabot_token');
+      const hdrs = {};
+      if (token) hdrs['Authorization'] = 'Bearer ' + token;
+      const res = await fetch('/api/report?' + q.toString(), { headers: hdrs });
+      if (!res.ok) {
+        // 未授权时走一次 api() 的弹窗 token 流程后重试
+        if (res.status === 401) {
+          const again = await askToken();
+          if (again) return openReport();
+        }
+        throw new Error('HTTP ' + res.status);
+      }
+      const html = await res.text();
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      toast('导出报告失败', err.message, 'err');
+    } finally {
+      btn.disabled = false;
     }
   }
 

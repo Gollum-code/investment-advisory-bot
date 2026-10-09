@@ -130,6 +130,34 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(len(d["weights"]), len(d["defaults"]))
         self.assertFalse(d["customized"])
 
+    def test_report_returns_html(self):
+        # 打桩 full_payload 避免联网，验证 /api/report 返回整页 HTML
+        from iabot.market import Candle
+
+        def fake_full_payload(sym, mode="intraday", force=False, account=None):
+            base = 1_700_000_000
+            k = [Candle(ts=base + i * 900, open=100, high=102, low=99,
+                        close=101, volume=10) for i in range(40)]
+            plan = {"symbol": sym, "mode": mode, "direction": "long", "score": 55.0,
+                    "confidence": "高", "price": 100.0, "entry_low": 99.0,
+                    "entry_high": 100.0, "stop": 97.0, "stop_pct": 3.0, "rr": 1.5,
+                    "targets": [{"price": 105.0, "rr": 1.5, "label": "TP1"}],
+                    "factors": [], "market": {}, "warnings": []}
+            return {"plan": plan,
+                    "snapshot": {"symbol": sym, "klines": {"15min": [c.to_dict() for c in k]}}}
+
+        self.app.advisor.full_payload = fake_full_payload
+        url = f"http://127.0.0.1:{self.port}/api/report?symbol=BTC-USDT&mode=intraday"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                body = r.read().decode("utf-8")
+                self.assertEqual(r.status, 200)
+                self.assertIn("text/html", r.headers.get("Content-Type", ""))
+        except urllib.error.HTTPError as e:
+            self.fail(f"report endpoint returned {e.code}: {e.read().decode()}")
+        self.assertIn("BTC-USDT", body)
+        self.assertIn("<svg", body)
+
 
 class TestServerAuth(unittest.TestCase):
     def setUp(self):

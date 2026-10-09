@@ -330,6 +330,30 @@ def make_handler(app: App):
                     r["mark_price"] = marks.get(r["symbol"])
                 return self._json({"ok": True, "positions": rows, "count": len(rows)})
 
+            if path == "/api/report":
+                from .report import render_report
+                sym = q.get("symbol") or "BTC-USDT"
+                mode = q.get("mode") or "intraday"
+                try:
+                    payload = app.advisor.full_payload(sym, mode=mode)
+                except Exception as exc:
+                    return self._err(f"分析失败: {exc}", 502)
+                plan = payload["plan"]
+                snap = payload["snapshot"]
+                candles = (snap.get("klines") or {}).get("15min" if mode == "intraday" else "1day") or []
+                win = app.store.win_stats(days=30)
+                html_text = render_report(plan, snap, candles, symbol=sym, mode=mode,
+                                          win_stats=win)
+                data = html_text.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition",
+                                 f'inline; filename="report-{sym}.html"')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
             if path == "/api/schedule":
                 return self._json({"ok": True, "schedule": app.scheduler.status()})
 
