@@ -32,7 +32,8 @@ class BacktestResult:
     avg_win_r: float
     avg_loss_r: float
     win_rate: float
-    expectancy_r: float         # 每笔期望 R = total_r / trades
+    expectancy_r: float         # 每笔期望 R = total_r / trades（已扣成本）
+    avg_cost_r: float           # 每笔平均成本（手续费+资金费，折算成 R）
     max_mfe: float
     max_mae: float
     equity_curve: list[float]   # 以 1R 为单位累加（实际风险由 sizing 控制）
@@ -46,6 +47,7 @@ class BacktestResult:
             "expectancy_r": round(self.expectancy_r, 3),
             "avg_win_r": round(self.avg_win_r, 3),
             "avg_loss_r": round(self.avg_loss_r, 3),
+            "avg_cost_r": round(self.avg_cost_r, 3),
             "total_r": round(self.total_r, 2),
             "max_mfe": round(self.max_mfe, 3),
             "max_mae": round(self.max_mae, 3),
@@ -71,13 +73,15 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
 
 
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
-             step: int = 10, warmup: int = 60, max_points: int = 400) -> BacktestResult:
+             step: int = 10, warmup: int = 60, max_points: int = 400,
+             apply_costs: bool = True) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
     base: 已经 fetch 好的完整快照（含各周期 K 线），由调用方从接口拿。
     step:  每隔多少根主周期 K 线构造一个建仓点（越小越密、越慢）。
     warmup: 前多少根跳过，保证指标有足够数据。
-    max_points: 最多构造多少个建仓点（防跑太久）。
+    apply_costs: 每笔交易扣除手续费+资金费（从 sizing 的 fee_estimate 折算成 R）。
+                 之前期望 R 偏高估；开了成本才接近真实可预期收益。
     """
     m_period = "15min" if mode == "intraday" else "1day"
     main = base.klines.get(m_period) or []
@@ -113,6 +117,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     curve: list[float] = []
     cum_r = 0.0
     trades = 0
+    cost_rs: list[float] = []
 
     start = warmup
     end = n - 5  # 留出后续判定空间
@@ -140,25 +145,40 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         plan.generated_at = float(ts)
         trades += 1
 
+        # 成本折算：sizing.fee_estimate 是"开平各一次的往返手续费"，
+        # 把它占单笔风险的比例当成本 R（每次交易都要付，胜与负都扣）。
+        cost_r = 0.0
+        if apply_costs:
+            sz = plan.sizing or {}
+            risk_usd = sz.get("risk_amount_usdt") or 0
+            fee_usd = sz.get("fee_estimate_usdt") or 0
+            if risk_usd > 0 and fee_usd > 0:
+                cost_r = fee_usd / risk_usd
+        if cost_r > 0:
+            cost_rs.append(cost_r)
+
         res = evaluate_outcome(plan.to_dict(), future)
         if not res:
             # 后续 K 线不足以判定窗口，跳过（不算交易）
             trades -= 1
+            if cost_r > 0:
+                cost_rs.pop()
             continue
         outcome = res["outcome"]
         mfes.append(res["mfe_pct"])
         maes.append(res["mae_pct"])
         if outcome.startswith("tp"):
-            r = res["rr"] if res["rr"] is not None else 1.0
+            r = (res["rr"] if res["rr"] is not None else 1.0) - cost_r
             wins += 1
             total_r += r
             cum_r += r
             win_rs.append(r)
         elif outcome == "stopped":
+            r = -1.0 - cost_r
             losses += 1
-            total_r += -1.0
-            cum_r += -1.0
-            loss_rs.append(-1.0)
+            total_r += r
+            cum_r += r
+            loss_rs.append(r)
         else:  # timeout
             timeouts += 1
         curve.append(cum_r)
@@ -172,6 +192,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         total_r=total_r,
         avg_win_r=(sum(win_rs) / len(win_rs)) if win_rs else 0.0,
         avg_loss_r=(sum(loss_rs) / len(loss_rs)) if loss_rs else 0.0,
+        avg_cost_r=(sum(cost_rs) / len(cost_rs)) if cost_rs else 0.0,
         win_rate=win_rate, expectancy_r=expectancy,
         max_mfe=(max(mfes) if mfes else 0.0),
         max_mae=(min(maes) if maes else 0.0),

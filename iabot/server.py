@@ -59,16 +59,25 @@ class App:
         self.auth_token = (cfg.get("auth") or {}).get("token") or ""
         self.log_file = cfg.get("log_file") or ""
 
-    def authorized(self, hdrs) -> bool:
-        """Bearer token 或 X-Iabot-Token 请求头 == 配置里的 token 才算通过。"""
+    def authorized(self, hdrs, token_hint: str | None = None) -> bool:
+        """Bearer token / X-Iabot-Token 请求头 == 配置里的 token 才算通过。
+
+        token_hint 给 SSE 用：EventSource 不能带请求头，只能把 token 放 query。
+        """
         if not self.auth_token:
             return True
         token = (hdrs.get("Authorization") or "")[len("Bearer "):]
         if token == self.auth_token:
             return True
-        return hdrs.get("X-Iabot-Token") == self.auth_token
+        if hdrs.get("X-Iabot-Token") == self.auth_token:
+            return True
+        return token_hint == self.auth_token
 
     def start(self) -> None:
+        try:
+            self.store.purge_old()
+        except Exception:
+            pass
         if (self.cfg.get("schedule") or {}).get("enabled"):
             self.scheduler.start()
         # 后台把行情域名先探一遍：串行探测遇上连不通的域名要等一个超时，
@@ -168,8 +177,11 @@ def make_handler(app: App):
         def do_GET(self):
             u = urlparse(self.path)
             path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
-            if path.startswith("/api/") and not app.authorized(self.headers):
-                return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
+            if path.startswith("/api/"):
+                # SSE 只能通过 query 带 token（EventSource 发不了请求头）
+                hint = q.get("token") if path == "/api/stream" else None
+                if not app.authorized(self.headers, hint):
+                    return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
             try:
                 if path in ("/", "/index.html"):
                     return self._static("index.html")
@@ -195,6 +207,7 @@ def make_handler(app: App):
                     "symbols": sym_mod.catalog_payload(),
                     "watchlist": app.cfg.get("symbols") or [],
                     "periods": ["1min", "5min", "15min", "30min", "60min", "4hour", "1day"],
+                    "auth_required": bool(app.auth_token),
                     "defaults": {
                         "account": app.cfg.get("account"),
                         "analysis": app.cfg.get("analysis"),
@@ -255,7 +268,8 @@ def make_handler(app: App):
             if path == "/api/history":
                 lim = min(500, int(q.get("limit") or 100))
                 rows = app.store.query(symbol=q.get("symbol"), mode=q.get("mode"),
-                                       direction=q.get("direction"), limit=lim)
+                                       direction=q.get("direction"), limit=lim,
+                                       with_meta=True)
                 return self._json({"ok": True, "rows": rows, "count": len(rows)})
 
             if path == "/api/history/export":

@@ -174,9 +174,13 @@ class Scheduler:
                                 "error": self.last_error})
             self.run_count += 1
             self.last_run = time.time()
+            try:
+                purged = self.store.purge_old()  # 按 keep_days 清理过期历史
+            except Exception:
+                purged = 0
             self._emit({"type": "run_done", "ts": self.last_run,
                         "elapsed": round(self.last_run - t0, 2), "count": len(results),
-                        "verified": verified,
+                        "verified": verified, "purged": purged,
                         "signals": [{"symbol": p["symbol"], "direction": p["direction"],
                                      "score": p["score"]} for p in results]})
             return results

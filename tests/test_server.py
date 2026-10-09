@@ -180,6 +180,16 @@ class TestServerAuth(unittest.TestCase):
         code, _ = self._get("/")
         self.assertEqual(code, 200)
 
+    def test_meta_reports_auth_required(self):
+        code, body = self._get("/api/meta", token="s3cret")
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["auth_required"])
+
+    def test_stream_accepts_query_token(self):
+        # EventSource 不能带请求头，SSE 允许 ?token= 走鉴权
+        code, _ = self._get("/api/stream?token=wrong")  # 错误 token -> 401
+        self.assertEqual(code, 401)
+
     def test_post_requires_token(self):
         import urllib.request as ur
         req = ur.Request(f"http://127.0.0.1:{self.port}/api/schedule",

@@ -88,6 +88,10 @@ class TestArgParsing(unittest.TestCase):
         args = cli.build_parser().parse_args(["scan", "BTC-USDT,ETH-USDT"])
         self.assertEqual(args.symbols, "BTC-USDT,ETH-USDT")
 
+    def test_scan_save_flag_parses(self):
+        args = cli.build_parser().parse_args(["scan", "BTC-USDT,ETH-USDT", "--save"])
+        self.assertTrue(args.save)
+
     def test_bad_mode_is_rejected(self):
         with self.assertRaises(SystemExit):
             cli.build_parser().parse_args(["analyze", "BTC-USDT", "--mode", "scalp"])

@@ -89,6 +89,26 @@ class TestSignalStore(unittest.TestCase):
         self.assertEqual(self.store.pending(before=time.time() + 1, limit=10), [])
         self.assertEqual(self.store.outcome_counts().get("tp1"), 1)
 
+    def test_query_with_meta_includes_outcome(self):
+        plan = self._plan()
+        rid = self.store.save(plan)
+        self.store.set_outcome(rid, "tp1", ts=plan["generated_at"] + 60, rr=2.0)
+        rows = self.store.query(limit=10, with_meta=True)
+        self.assertEqual(rows[0]["outcome"], "tp1")
+        self.assertEqual(rows[0]["outcome_rr"], 2.0)
+        # 不带 with_meta 时保持旧行为（payload 纯净）
+        plain = self.store.query(limit=10)
+        self.assertNotIn("outcome", plain[0])
+
+    def test_purge_old_uses_keep_days(self):
+        plan = self._plan()
+        self.store.save(plan)
+        with self.store._lock:
+            self.store._conn.execute("UPDATE signals SET ts = ?",
+                                     (time.time() - 365 * 86400,))
+            self.store._conn.commit()
+        self.assertEqual(self.store.purge_old(), 1)
+
     def test_win_stats_aggregates(self):
         good = self._plan()
         good["score"] = 70.0

@@ -178,8 +178,9 @@ class SignalStore:
 
     def query(self, *, symbol: str | None = None, mode: str | None = None,
               direction: str | None = None, limit: int = 100,
-              since: float | None = None) -> list[dict]:
-        sql = "SELECT payload FROM signals WHERE 1=1"
+              since: float | None = None, with_meta: bool = False) -> list[dict]:
+        sql = ("SELECT payload, outcome, outcome_ts, outcome_price, outcome_rr,"
+               " mfe_pct, mae_pct FROM signals WHERE 1=1")
         args: list[Any] = []
         if symbol:
             sql += " AND symbol = ?"
@@ -197,7 +198,17 @@ class SignalStore:
         args.append(int(limit))
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
-        return [json.loads(r["payload"]) for r in rows]
+        out = []
+        for r in rows:
+            p = json.loads(r["payload"])
+            if with_meta:
+                p["outcome"] = r["outcome"]
+                p["outcome_ts"] = r["outcome_ts"]
+                p["outcome_rr"] = r["outcome_rr"]
+                p["mfe_pct"] = r["mfe_pct"]
+                p["mae_pct"] = r["mae_pct"]
+            out.append(p)
+        return out
 
     def latest_per_symbol(self, mode: str | None = None) -> list[dict]:
         mode_sql = "AND mode = ?" if mode else ""
@@ -307,6 +318,10 @@ class SignalStore:
             cur = self._conn.execute("DELETE FROM signals WHERE ts < ?", (cutoff,))
             self._conn.commit()
             return cur.rowcount
+
+    def purge_old(self) -> int:
+        """按配置的 keep_days 清理过期记录（启动与定时任务每轮调用）。"""
+        return self.purge(self.keep_days)
 
     def clear(self) -> None:
         with self._lock:

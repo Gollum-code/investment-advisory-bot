@@ -69,6 +69,19 @@ class TestBacktest(unittest.TestCase):
         res = backtest(snap, _cfg(), mode="intraday", step=4, warmup=30)
         self.assertEqual(len(res.equity_curve), res.trades)
 
+    def test_costs_reduce_total_r(self):
+        snap = _make_snapshot(220)
+        free = backtest(snap, _cfg(), mode="intraday", step=4, warmup=30,
+                        apply_costs=False)
+        paid = backtest(snap, _cfg(), mode="intraday", step=4, warmup=30,
+                        apply_costs=True)
+        self.assertEqual(free.trades, paid.trades)
+        self.assertLessEqual(paid.total_r, free.total_r + 1e-9)
+        if paid.trades:
+            self.assertGreater(paid.avg_cost_r, 0)
+            # 成本按单笔风险折算，不该超过 0.1 R（默认费率 0.1% 往返）
+            self.assertLess(paid.avg_cost_r, 0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,13 +112,31 @@
   }
 
   async function api(path, opts) {
-    const res = await fetch(path, opts);
+    opts = opts || {};
+    const token = localStorage.getItem('iabot_token');
+    const hdrs = Object.assign({}, opts.headers || {});
+    if (token) hdrs['Authorization'] = 'Bearer ' + token;
+    if (opts.body && !hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
+    const res = await fetch(path, Object.assign({}, opts, { headers: hdrs }));
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
+    if (res.status === 401 && data && data.error && /token|令牌/.test(data.error)) {
+      const again = await askToken();
+      if (again) return api(path, opts);  // 填入 token 后重试
+    }
     if (!res.ok || !data || data.ok === false) {
       throw new Error((data && data.error) || ('HTTP ' + res.status));
     }
     return data;
+  }
+
+  // 服务器要求访问令牌时让用户填一次，记到 localStorage，之后自动带
+  async function askToken() {
+    const cur = localStorage.getItem('iabot_token') || '';
+    const tok = window.prompt('本服务设置了访问令牌，请输入（仅保存在本机浏览器）：', cur);
+    if (tok === null) return false;
+    localStorage.setItem('iabot_token', tok.trim());
+    return true;
   }
 
   function loading(el, text) {
@@ -738,13 +756,21 @@
       const rows = d.rows || [];
       $('hist-hint').textContent = rows.length + ' 条';
       if (!rows.length) { $('history').innerHTML = '<div class="empty">还没有落库的信号。</div>'; return; }
-      $('history').innerHTML = rows.map((p) =>
-        '<div class="h-item" data-sym="' + esc(p.symbol) + '">' +
+      $('history').innerHTML = rows.map((p) => {
+        let oc = '';
+        if (p.outcome) {
+          const o = outcomeLabel(p.outcome);
+          oc = '<span class="oc ' + (p.outcome === 'stopped' ? 'bad' : (p.outcome === 'timeout' ? 'warn' : 'good')) +
+            '">' + esc(o.label) + '</span>';
+        }
+        return '<div class="h-item" data-sym="' + esc(p.symbol) + '">' +
         '<span class="sym">' + esc(p.symbol) + '</span>' +
         '<span class="dir ' + p.direction + '">' + dirLabel(p.direction) + '</span>' +
         '<span class="sc ' + cls(p.score) + '">' + signed(p.score) + '</span>' +
+        oc +
         '<span class="tm">' + esc(modeLabel(p.mode)) + ' · ' + fmtTime(p.generated_at, true) + '</span>' +
-        '</div>').join('');
+        '</div>';
+      }).join('');
       $('history').onclick = (e) => {
         const it = e.target.closest('.h-item');
         if (!it) return;
@@ -915,7 +941,8 @@
 
   function connectSSE() {
     if (!window.EventSource) { setPill('pill-sse', '实时流 不支持', 'bad'); return; }
-    const es = new EventSource('/api/stream');
+    const tok = localStorage.getItem('iabot_token');
+    const es = new EventSource('/api/stream' + (tok ? ('?token=' + encodeURIComponent(tok)) : ''));
     state.es = es;
     es.onopen = () => setPill('pill-sse', '实时流 已连接', 'ok');
     es.onerror = () => setPill('pill-sse', '实时流 重连中…', 'warn');

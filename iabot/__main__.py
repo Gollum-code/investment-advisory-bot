@@ -149,6 +149,22 @@ def _account_from(args) -> dict:
     return acc
 
 
+def _save_plans(cfg: dict, plans: list[dict]) -> int:
+    """把一批计划写进信号历史库（只写有明确方向的），返回条数。"""
+    from .store import SignalStore
+    st = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                     int((cfg.get("storage") or {}).get("keep_days", 30)))
+    n = 0
+    try:
+        for p in plans:
+            if p.get("direction") in ("long", "short"):
+                if st.save(p, only_on_signal=True) is not None:
+                    n += 1
+    finally:
+        st.close()
+    return n
+
+
 def cmd_analyze(args) -> int:
     cfg = load_config()
     adv = Advisor(cfg)
@@ -196,6 +212,9 @@ def cmd_scan(args) -> int:
             errs.append(f"{sym}: {exc}")
             print(f"  [!!] {sym:<12} {type(exc).__name__}: {exc}", file=sys.stderr)
     plans.sort(key=lambda p: -abs(p.get("score") or 0))
+    if getattr(args, "save", False):
+        saved = _save_plans(cfg, plans)
+        print(f"[已保存] {saved} 条有方向的信号写入历史库", file=sys.stderr)
     if args.json:
         print(json.dumps({"plans": plans, "errors": errs}, ensure_ascii=False, indent=2))
         return 0
@@ -245,11 +264,26 @@ def cmd_check(args) -> int:
         ok = False
         print(f"[行情] 失败: {type(exc).__name__}: {exc}")
 
+    # ---- 配置体检 ----
+    print("[配置] 基本设置")
+    auth = (cfg.get("auth") or {}).get("token")
+    ntf = cfg.get("notify") or {}
+    keep = (cfg.get("storage") or {}).get("keep_days", 30)
+    host = cfg.get("host", "127.0.0.1")
+    print(f"  监听 {host}  鉴权 {'Bearer 令牌' if auth else '本机免登录'}")
+    if host not in ("127.0.0.1", "localhost", "::1") and not auth:
+        print("  ! 非本机监听且未设 auth.token，局域网可访问")
+    print(f"  历史保留 {keep} 天（自动清理）")
+    print(f"  通知 {'开启' if ntf.get('enabled') else '关闭'}"
+          f"（min|评分|>= {ntf.get('min_abs_score', 45)}）")
+    nch = {k: ntf.get(k) for k in ("webhook", "telegram", "bark") if (ntf.get(k) or {}).get("url") or (ntf.get(k) or {}).get("token")}
+    print(f"  通知渠道 {', '.join(nch) if nch else '未配置'}")
+    if ntf.get("enabled") and not nch:
+        print("  ! 通知已开启但未配置任何渠道，不会发出消息")
+
     print()
     print("诊断结果:", "全部通过 [OK]" if ok else "存在告警 [!]（见上方说明）")
     return 0 if ok else 1
-
-
 def cmd_backtest(args) -> int:
     from .backtest import backtest
     from .market import period_seconds
@@ -295,7 +329,7 @@ def cmd_backtest(args) -> int:
           f"（{res.timeouts} 根窗口内未了结）")
     print(f"  胜率         : {res.win_rate * 100:.1f}%")
     print(f"  期望值       : {res.expectancy_r:+.3f} R/笔"
-          f"（正 = 长期按规则做有优势）")
+          f"（正 = 长期按规则做有优势；已扣手续费 {res.avg_cost_r:.3f} R/笔）")
     print(f"  平均盈亏 R   : 胜 {res.avg_win_r:.2f} / 负 {res.avg_loss_r:.2f}")
     print(f"  最大浮盈/浮亏: {res.max_mfe:+.2f}% / {res.max_mae:+.2f}%")
     print(f"  累计 R       : {res.total_r:+.1f}（按 1R 单笔计算，曲线见 --json）")
@@ -398,6 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc.add_argument("--leverage", type=int)
     p_sc.add_argument("--risk", type=float)
     p_sc.add_argument("--json", action="store_true")
+    p_sc.add_argument("--save", action="store_true",
+                      help="把有方向的信号写入历史库（默认 data/signals.db）")
 
     p_ck = sub.add_parser("check", help="网络 / 证书 / 行情接口自检")
     p_ck.add_argument("--symbol", help="用哪个合约做行情测试，默认取配置里第一个")
