@@ -251,6 +251,19 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .oc.bad{color:#fecaca;border-color:#6b2020;background:#2a0f0f}
 .oc.warn{color:#fde68a;border-color:#6b5619;background:#2a230c}
 
+/* ---------------- 参数方案 ---------------- */
+.prof-save{display:flex;gap:10px;margin-bottom:12px;align-items:center}
+.prof-save input{flex:1;max-width:280px}
+.profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.prof{background:#0e1730;border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+.prof.active{border-color:var(--accent);box-shadow:0 0 0 1px rgba(59,130,246,.25) inset}
+.prof-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.prof-head .nm{font-weight:600;color:#dbe7ff}
+.prof-head .meta{color:var(--dim);font-size:11.5px;margin-left:auto}
+.prof .note{color:var(--dim);font-size:11.5px;margin:5px 0}
+.prof-acts{display:flex;gap:7px;margin-top:8px}
+.thr{margin-bottom:12px;max-width:180px}
+
 /* ---------------- 因子权重调参 ---------------- */
 .weights{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px 20px}
 .w-row{display:flex;align-items:center;gap:10px;margin-bottom:2px}

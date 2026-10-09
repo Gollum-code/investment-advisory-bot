@@ -172,6 +172,7 @@
       loadSchedule();
       loadWinStats();
       loadWeights();
+      loadProfiles();
       analyze(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
@@ -211,6 +212,7 @@
     $('win-days').onchange = () => loadWinStats();
     $('btn-weights-save').onclick = () => saveWeights(false);
     $('btn-weights-reset').onclick = () => saveWeights(true);
+    $('btn-prof-save').onclick = saveProfile;
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -875,10 +877,12 @@
         open_interest: '持仓量', elite: '大户持仓', orderbook: '盘口深度',
         volatility: '波动率',
       };
+      const def = d.defaults || {};
+      if (def['score_threshold'] !== undefined) $('score-threshold').value = def['score_threshold'];
+      state.threshold = def['score_threshold'] ?? 30;
       $('weights').innerHTML = Object.keys(d.weights).map((k) => {
-        const def = d.defaults[k];
         const cur = d.weights[k];
-        const isCustom = Math.abs(cur - def) > 1e-9;
+        const isCustom = Math.abs(cur - def[k]) > 1e-9;
         return '<label class="w-row" title="' + esc(k) + '">' +
           '<span class="k">' + esc(names[k] || k) + '</span>' +
           '<input type="range" min="0" max="0.5" step="0.01" value="' + cur +
@@ -911,13 +915,16 @@
     $('btn-weights-save').disabled = true;
     try {
       const data = reset ? {} : (state.weights || {});
+      const thr = reset ? 30 : parseInt($('score-threshold').value || '30', 10);
       await api('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ analysis: { factor_weights: data } }),
+        body: JSON.stringify({ analysis: { factor_weights: data, score_threshold: thr } }),
       });
-      setWeightsMsg(reset ? '已恢复默认权重' : '权重已保存', 'ok');
+      state.threshold = thr;
+      setWeightsMsg(reset ? '已恢复默认权重与阈值' : '权重与阈值已保存', 'ok');
       await loadWeights();
+      await loadProfiles();
       toast('权重' + (reset ? '已重置' : '已保存'), '', 'ok');
     } catch (err) {
       setWeightsMsg('保存失败：' + err.message, 'err');
@@ -925,6 +932,102 @@
     } finally {
       $('btn-weights-save').disabled = false;
     }
+  }
+
+  // ---------------------------------------------------------------- 参数方案
+  async function loadProfiles() {
+    try {
+      const d = await api('/api/profiles');
+      renderProfiles(d.profiles || [], d.active || '', d.current || {});
+    } catch (e) {
+      $('profiles').innerHTML = '<div class="empty">方案加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderProfiles(list, active, current) {
+    const el = $('profiles');
+    if (!list.length) {
+      el.innerHTML = '<div class="empty">还没有方案。调好权重后点"保存当前为方案"。</div>';
+      return;
+    }
+    el.innerHTML = list.map((p) => {
+      return '<div class="prof' + (p.active ? ' active' : '') + '">' +
+        '<div class="prof-head"><span class="nm">' + esc(p.name) + '</span>' +
+        (p.active ? '<span class="tag on">生效中</span>' : '') +
+        '<span class="meta">' + esc(p.mode) + ' · 阈值 ' + p.score_threshold +
+        (p.custom ? ' · ' + p.custom + ' 项权重自定义' : '') + '</span></div>' +
+        (p.note ? '<div class="note">' + esc(p.note) + '</div>' : '') +
+        '<div class="prof-acts">' +
+        '<button class="ghost tiny" data-act="apply" data-name="' + esc(p.name) + '">应用</button>' +
+        '<button class="ghost tiny" data-act="bt" data-name="' + esc(p.name) + '">回测</button>' +
+        '<button class="ghost tiny" data-act="del" data-name="' + esc(p.name) + '">删除</button>' +
+        '</div></div>';
+    }).join('');
+    el.onclick = (e) => {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      const act = b.dataset.act, name = b.dataset.name;
+      if (act === 'apply') applyProfile(name);
+      else if (act === 'del') deleteProfile(name);
+      else if (act === 'bt') backtestProfile(name);
+    };
+  }
+
+  async function saveProfile() {
+    const name = ($('prof-name').value || '').trim();
+    if (!name) { toast('请填方案名', '', 'warn'); return; }
+    try {
+      await api('/api/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save', name,
+          factor_weights: state.weights || {},
+          score_threshold: parseInt($('score-threshold').value || '30', 10),
+          mode: $('mode').value,
+        }),
+      });
+      $('prof-name').value = '';
+      await loadProfiles();
+      toast('方案已保存', name, 'ok');
+    } catch (err) { toast('保存失败', err.message, 'err'); }
+  }
+
+  async function applyProfile(name) {
+    try {
+      await api('/api/profiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'apply', name }),
+      });
+      await loadProfiles();
+      await loadWeights();
+      toast('已应用方案', name, 'ok');
+    } catch (err) { toast('应用失败', err.message, 'err'); }
+  }
+
+  async function deleteProfile(name) {
+    if (!confirm('删除方案 ' + name + '？')) return;
+    try {
+      await api('/api/profiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', name }),
+      });
+      await loadProfiles();
+      toast('已删除', name, 'ok');
+    } catch (err) { toast('删除失败', err.message, 'err'); }
+  }
+
+  async function backtestProfile(name) {
+    try {
+      const d = await api('/api/profiles/backtest', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 300, step: 10 }),
+      });
+      const r = d.result || {};
+      const wr = (r.win_rate * 100).toFixed(1);
+      toast('回测 ' + name, '胜率 ' + wr + '% · 期望 ' + (r.expectancy_r >= 0 ? '+' : '') +
+        r.expectancy_r + ' R/笔', r.expectancy_r >= 0 ? 'ok' : 'warn', 6000);
+    } catch (err) { toast('回测失败', err.message, 'err'); }
   }
 
   // ---------------------------------------------------------------- 日志 / SSE

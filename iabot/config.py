@@ -56,6 +56,10 @@ DEFAULTS: dict[str, Any] = {
         "factor_weights": {},
     },
 
+    # 参数方案：命名打包"权重+阈值+模式"，可回测对比后一键应用
+    "profiles": {},
+    "active_profile": "",
+
     # 定时任务
     "schedule": {
         "enabled": False,
@@ -172,6 +176,10 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(out.get("symbols"), list):
         out["symbols"] = list(DEFAULTS["symbols"])
+    if not isinstance(out.get("profiles"), dict):
+        out["profiles"] = {}
+    if not isinstance(out.get("active_profile"), str):
+        out["active_profile"] = ""
     sc = out.setdefault("schedule", {})
     sc["interval_sec"] = _coerce_int(sc.get("interval_sec"), "schedule.interval_sec",
                                      30, 86400, 300)

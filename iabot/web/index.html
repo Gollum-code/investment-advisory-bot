@@ -110,13 +110,28 @@
     </div>
   </div>
 
-  <!-- 因子权重调参 -->
+  <!-- 参数方案 -->
+  <section class="card">
+    <h2>参数方案
+      <span class="hint">把权重+阈值+模式打包成方案，回测对比后一键应用到实盘</span>
+    </h2>
+    <div class="prof-save">
+      <input id="prof-name" type="text" placeholder="方案名，如 稳健/进取" spellcheck="false">
+      <button id="btn-prof-save" class="primary">保存当前为方案</button>
+    </div>
+    <div id="profiles" class="profiles"></div>
+  </section>
+
+<!-- 因子权重调参 -->
   <section class="card">
     <h2>因子权重调参
-      <span class="hint">调整 10 个因子的权重，立即重算并保存到 config.json</span>
+      <span class="hint">调整 10 个因子的权重与评分阈值，立即重算并保存到 config.json</span>
       <button id="btn-weights-reset" class="ghost right tiny">恢复默认</button>
       <button id="btn-weights-save" class="primary right">保存权重</button>
     </h2>
+    <label class="fld narrow thr"><span>评分阈值 |score|（达到才给方向）</span>
+      <input id="score-threshold" type="number" min="0" max="100" step="1" value="30">
+    </label>
     <div id="weights" class="weights"></div>
     <div class="msg" id="weights-msg"></div>
   </section>

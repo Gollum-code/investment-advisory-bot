@@ -17,6 +17,7 @@ from .advisor import Advisor
 from .config import load_config, save_config
 from .scheduler import Scheduler
 from .signals import FACTOR_DEFAULTS, MODES
+from .profiles import ProfileStore, cfg_with_profile
 from .store import SignalStore
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -296,10 +297,17 @@ def make_handler(app: App):
                     "outcomes": app.store.outcome_counts()})
 
             if path == "/api/weights":
-                cur = (app.cfg.get("analysis") or {}).get("factor_weights") or {}
+                an = app.cfg.get("analysis") or {}
+                cur = an.get("factor_weights") or {}
                 merged = {name: float(cur.get(name, w)) for name, w in FACTOR_DEFAULTS.items()}
                 return self._json({"ok": True, "defaults": FACTOR_DEFAULTS,
-                                   "weights": merged, "customized": bool(cur)})
+                                   "weights": merged, "customized": bool(cur),
+                                   "score_threshold": float(an.get("score_threshold") or 30)})
+
+            if path == "/api/profiles":
+                ps = ProfileStore(app.cfg)
+                return self._json({"ok": True, "profiles": ps.list(),
+                                   "active": ps.active, "current": ps.current_params()})
 
             if path == "/api/schedule":
                 return self._json({"ok": True, "schedule": app.scheduler.status()})
@@ -351,6 +359,62 @@ def make_handler(app: App):
             self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
             self.wfile.flush()
 
+        # ---------------- POST handlers ----------------
+        def _handle_profiles(self, body: dict):
+            ps = ProfileStore(app.cfg)
+            action = (body.get("action") or "").strip()
+            name = (body.get("name") or "").strip()
+            if action == "save":
+                p = ps.save(name,
+                            factor_weights=body.get("factor_weights") or {},
+                            score_threshold=body.get("score_threshold") or 30,
+                            mode=body.get("mode") or "intraday",
+                            note=body.get("note") or "")
+                # 手动保存当前参数 -> 缓存里的旧计划按旧权重算的，全部作废
+                app.advisor.invalidate()
+                save_config(app.cfg)
+                return self._json({"ok": True, "profile": p})
+            if action == "delete":
+                ok = ps.delete(name)
+                save_config(app.cfg)
+                return self._json({"ok": True, "deleted": ok})
+            if action == "apply":
+                p = ps.apply(name)
+                app.advisor.invalidate()
+                save_config(app.cfg)
+                return self._json({"ok": True, "profile": p,
+                                   "applied": True})
+            return self._err("action 必须是 save/delete/apply", 400)
+
+        def _profiles_backtest(self, body: dict):
+            from .backtest import backtest
+            from .symbols import to_contract as _to_contract
+
+            ps = ProfileStore(app.cfg)
+            name = (body.get("name") or "").strip() or None
+            if name:
+                profile = ps.get(name)
+                if not profile:
+                    return self._err(f"方案不存在: {name}", 404)
+            else:
+                profile = None  # 用当前运行时参数
+            symbol = _to_contract(body.get("symbol") or "BTC-USDT")
+            mode = body.get("mode") or (profile or {}).get("mode") or "intraday"
+            bars = max(120, min(500, int(body.get("bars") or 300)))
+            step = max(1, min(50, int(body.get("step") or 10)))
+            prof_cfg = cfg_with_profile(app.cfg, profile)
+            periods = (app.cfg.get("analysis") or {}).get("tf_periods") or ["60min", "1day"]
+            try:
+                snap = app.advisor.client.snapshot(symbol, periods=periods,
+                                                   kline_size=bars)
+            except Exception as exc:
+                return self._err(f"拉取历史失败: {exc}", 502)
+            import time as _t
+            t0 = _t.time()
+            res = backtest(snap, prof_cfg, mode=mode, step=step, max_points=2000)
+            return self._json({"ok": True, "name": name, "profile": profile,
+                               "result": res.to_dict(), "ms": round((_t.time() - t0) * 1000)})
+
         # ---------------- POST ----------------
         def do_POST(self):
             u = urlparse(self.path)
@@ -384,6 +448,12 @@ def make_handler(app: App):
                                                     "这是一条测试消息。\n配置正确的话你应该已经收到了。")
                     return self._json({"ok": True, "sent": n,
                                        "status": app.scheduler.notifier.status()})
+
+                if path == "/api/profiles":
+                    return self._handle_profiles(body)
+
+                if path == "/api/profiles/backtest":
+                    return self._profiles_backtest(body)
 
                 if path == "/api/config":
                     acc = body.get("account")
