@@ -173,6 +173,7 @@
       loadWinStats();
       loadWeights();
       loadProfiles();
+      loadPositions();
       analyze(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
@@ -213,6 +214,8 @@
     $('btn-weights-save').onclick = () => saveWeights(false);
     $('btn-weights-reset').onclick = () => saveWeights(true);
     $('btn-prof-save').onclick = saveProfile;
+    $('btn-pos-open').onclick = openPosition;
+    $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -937,6 +940,95 @@
     } finally {
       $('btn-weights-save').disabled = false;
     }
+  }
+
+  // ---------------------------------------------------------------- 模拟盘持仓
+  function fillMarkPrice() {
+    const p = state.plan || state.snapshot;
+    const price = (p && (p.price != null ? p.price : (state.snapshot && state.snapshot.price)));
+    if (price) $('pos-entry').value = price;
+  }
+
+  async function openPosition() {
+    const body = {
+      action: 'open',
+      symbol: $('pos-sym').value,
+      direction: $('pos-dir').value,
+      entry_price: parseFloat($('pos-entry').value),
+      size_coin: parseFloat($('pos-size').value),
+      leverage: parseFloat($('pos-lev').value || '1'),
+      stop: $('pos-stop').value ? parseFloat($('pos-stop').value) : null,
+      tp1: $('pos-tp1').value ? parseFloat($('pos-tp1').value) : null,
+    };
+    if (!(body.entry_price > 0) || !(body.size_coin > 0)) {
+      toast('请填写开仓价和数量', '', 'warn'); return;
+    }
+    try {
+      await api('/api/positions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      toast('已开仓', body.symbol + ' ' + body.direction, 'ok');
+      loadPositions();
+    } catch (err) { toast('开仓失败', err.message, 'err'); }
+  }
+
+  async function loadPositions() {
+    try {
+      const d = await api('/api/positions');
+      renderPositions(d.positions || []);
+    } catch (e) {
+      $('positions').innerHTML = '<div class="empty">持仓加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderPositions(rows) {
+    const el = $('positions');
+    if (!rows.length) { el.innerHTML = '<div class="empty">还没有模拟持仓。</div>'; return; }
+    el.innerHTML = rows.map((p) => {
+      const pnl = p.pnl || {};
+      const up = (pnl.unrealized_pnl_usdt || 0) >= 0;
+      const cls = p.status === 'open' ? (up ? 'up' : 'down') : 'closed';
+      const mark = p.mark_price != null ? fmtPrice(p.mark_price, digitsFor(p.entry_price)) : '--';
+      return '<div class="pos ' + cls + '">' +
+        '<div class="pos-head"><span class="sym">' + esc(p.symbol) + '</span>' +
+        '<span class="dir ' + p.direction + '">' + dirLabel(p.direction) + '</span>' +
+        (p.status === 'open' ? '' : '<span class="tag closed">' + esc(p.close_reason || '已平') + '</span>') +
+        (p.leverage > 1 ? '<span class="lev">' + p.leverage + 'x</span>' : '') +
+        '<span class="pnl ' + (up ? 'up' : 'down') + '">' +
+        (p.status === 'open'
+          ? (up ? '+' : '') + fmtNum(pnl.unrealized_pnl_usdt, 2) + ' U (' + fmtNum(pnl.pnl_of_margin_pct, 1) + '%)'
+          : (p.close_price ? '@ ' + fmtPrice(p.close_price, digitsFor(p.entry_price)) : '')) +
+        '</span></div>' +
+        '<div class="pos-meta">' +
+        '<span>开仓 <b>' + fmtPrice(p.entry_price, digitsFor(p.entry_price)) + '</b></span>' +
+        '<span>现价 <b>' + mark + '</b></span>' +
+        '<span>数量 <b>' + fmtNum(p.size_coin, 4) + '</b></span>' +
+        '<span>保证金 <b>' + fmtNum(pnl.margin_usdt, 2) + ' U</b></span>' +
+        (p.stop ? '<span>止损 <b>' + fmtPrice(p.stop, digitsFor(p.entry_price)) + '</b></span>' : '') +
+        (p.tp1 ? '<span>止盈 <b>' + fmtPrice(p.tp1, digitsFor(p.entry_price)) + '</b></span>' : '') +
+        '</div>' +
+        (p.status === 'open'
+          ? '<button class="ghost tiny pos-close" data-id="' + p.id + '">平仓</button>'
+          : '') +
+        '</div>';
+    }).join('');
+    el.querySelectorAll('.pos-close').forEach((b) => {
+      b.onclick = () => closePosition(b.dataset.id);
+    });
+  }
+
+  async function closePosition(id) {
+    const price = state.plan && state.plan.price;
+    if (!confirm('按现价 ' + (price || '') + ' 平仓该模拟持仓？')) return;
+    try {
+      await api('/api/positions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'close', id, close_price: price, reason: 'manual' }),
+      });
+      toast('已平仓', '', 'ok');
+      loadPositions();
+    } catch (err) { toast('平仓失败', err.message, 'err'); }
   }
 
   // ---------------------------------------------------------------- 参数方案

@@ -48,6 +48,28 @@ CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_sym ON signals(symbol, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_dir ON signals(direction, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(outcome, ts) WHERE outcome IS NULL;
+
+-- 模拟盘持仓：手动录入、程序只负责跟踪浮动盈亏与止损/止盈（不下单）
+CREATE TABLE IF NOT EXISTS positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at     REAL    NOT NULL,
+    closed_at     REAL,
+    symbol        TEXT    NOT NULL,
+    direction     TEXT    NOT NULL,        -- long | short
+    entry_price   REAL    NOT NULL,
+    size_coin     REAL    NOT NULL,        -- 仓位大小（币）
+    leverage      REAL    NOT NULL DEFAULT 1,
+    stop          REAL,
+    tp1           REAL,
+    tp2           REAL,
+    tp3           REAL,
+    status        TEXT    NOT NULL DEFAULT 'open',  -- open | closed
+    close_price   REAL,
+    close_reason  TEXT,                    -- stop | tp1 | tp2 | tp3 | manual
+    note          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol, opened_at DESC);
 """
 
 # 老库（加结果回填之前建的）没有这些列，启动时补齐
@@ -322,6 +344,61 @@ class SignalStore:
     def purge_old(self) -> int:
         """按配置的 keep_days 清理过期记录（启动与定时任务每轮调用）。"""
         return self.purge(self.keep_days)
+
+    # ------------------------------------------------------------------
+    # 模拟盘持仓（positions 表）
+    # ------------------------------------------------------------------
+    def open_position(self, *, symbol: str, direction: str, entry_price: float,
+                      size_coin: float, leverage: float = 1.0,
+                      stop: float | None = None, tp1: float | None = None,
+                      tp2: float | None = None, tp3: float | None = None,
+                      note: str = "", opened_at: float | None = None) -> int:
+        direction = direction if direction in ("long", "short") else "long"
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO positions (opened_at, symbol, direction, entry_price,
+                       size_coin, leverage, stop, tp1, tp2, tp3, status, note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                (opened_at or time.time(), symbol, direction, entry_price,
+                 size_coin, leverage, stop, tp1, tp2, tp3, note))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def close_position(self, pos_id: int, *, price: float, reason: str = "manual",
+                       closed_at: float | None = None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE positions SET status='closed', close_price=?, close_reason=?,"
+                " closed_at=? WHERE id=? AND status='open'",
+                (price, reason, closed_at or time.time(), pos_id))
+            self._conn.commit()
+
+    def positions(self, *, status: str | None = None, symbol: str | None = None,
+                  limit: int = 200) -> list[dict]:
+        sql = "SELECT * FROM positions WHERE 1=1"
+        args: list[Any] = []
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        if symbol:
+            sql += " AND symbol = ?"
+            args.append(symbol)
+        sql += " ORDER BY opened_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [{k: r[k] for k in r.keys()} for r in rows]
+
+    def position(self, pos_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
+        return {k: r[k] for k in r.keys()} if r else None
+
+    def delete_position(self, pos_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM positions WHERE id=?", (pos_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def clear(self) -> None:
         with self._lock:

@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .advisor import Advisor
 from .notify import Notifier
 from .outcomes import evaluate_outcome, window_atr_period
+from .paper import check_exit
 from .store import SignalStore
 
 
@@ -111,6 +112,36 @@ class Scheduler:
             self._run_once()
         self.next_run = None
 
+    def _check_positions(self) -> int:
+        """跟踪模拟盘持仓：一旦被止损/止盈打掉就自动平仓（记结果）。"""
+        opens = self.store.positions(status="open")
+        if not opens:
+            return 0
+        closed = 0
+        for pos in opens:
+            sym = pos.get("symbol")
+            if not sym:
+                continue
+            period = "60min"
+            try:
+                candles = self.advisor.client.kline(sym, period, 100)
+            except Exception as exc:
+                self.last_error = f"position {sym}: {type(exc).__name__}: {exc}"
+                continue
+            hit = check_exit(pos, candles or [])
+            if not hit:
+                continue
+            reason = hit["reason"]
+            close_reason = "stop" if reason == "stop" else f"tp{hit.get('tp_index', 1)}"
+            self.store.close_position(pos["id"], price=hit["price"],
+                                       reason=close_reason, closed_at=hit.get("ts"))
+            closed += 1
+            self.notifier.notify_outcome(sym, close_reason)
+            self._emit({"type": "position_closed", "ts": hit.get("ts"),
+                        "symbol": sym, "position_id": pos["id"],
+                        "reason": close_reason, "price": hit["price"]})
+        return closed
+
     def _verify_pending(self) -> int:
         """回填上一轮留下、尚未判定结局的信号（用后续 K 线判断先到止损还是先到目标）。"""
         if not self.verify_enabled:
@@ -151,8 +182,9 @@ class Scheduler:
         try:
             t0 = time.time()
             verified = self._verify_pending()
+            closed = self._check_positions()
             self._emit({"type": "run_start", "ts": t0, "symbols": list(self.symbols),
-                        "mode": self.mode, "verified": verified})
+                        "mode": self.mode, "verified": verified, "closed": closed})
             results: list[dict] = []
             for sym in list(self.symbols):
                 if self._stop.is_set():
@@ -180,7 +212,7 @@ class Scheduler:
                 purged = 0
             self._emit({"type": "run_done", "ts": self.last_run,
                         "elapsed": round(self.last_run - t0, 2), "count": len(results),
-                        "verified": verified, "purged": purged,
+                        "verified": verified, "closed": closed, "purged": purged,
                         "signals": [{"symbol": p["symbol"], "direction": p["direction"],
                                      "score": p["score"]} for p in results]})
             return results

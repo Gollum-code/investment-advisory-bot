@@ -110,6 +110,31 @@
     </div>
   </div>
 
+  <!-- 模拟盘持仓 -->
+  <section class="card">
+    <h2>模拟盘持仓
+      <span class="hint">手动录入模拟仓位，自动跟踪浮动盈亏与止损/止盈（不下单、不动真钱）</span>
+    </h2>
+    <div class="pos-form">
+      <label class="fld narrow"><span>合约</span>
+        <input id="pos-sym" type="text" value="BTC-USDT" spellcheck="false"></label>
+      <label class="fld narrow"><span>方向</span>
+        <select id="pos-dir"><option value="long">做多</option><option value="short">做空</option></select></label>
+      <label class="fld narrow"><span>开仓价</span>
+        <input id="pos-entry" type="number" min="0" step="0.01"></label>
+      <label class="fld narrow"><span>数量（币）</span>
+        <input id="pos-size" type="number" min="0" step="0.0001"></label>
+      <label class="fld narrow"><span>杠杆</span>
+        <input id="pos-lev" type="number" min="1" max="125" value="1"></label>
+      <label class="fld narrow"><span>止损</span>
+        <input id="pos-stop" type="number" min="0" step="0.01"></label>
+      <label class="fld narrow"><span>止盈1</span>
+        <input id="pos-tp1" type="number" min="0" step="0.01"></label>
+      <button id="btn-pos-open" class="primary">开仓</button>
+    </div>
+    <div id="positions" class="positions"></div>
+  </section>
+
   <!-- 参数方案 -->
   <section class="card">
     <h2>参数方案

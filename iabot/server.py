@@ -310,6 +310,26 @@ def make_handler(app: App):
                 return self._json({"ok": True, "profiles": ps.list(),
                                    "active": ps.active, "current": ps.current_params()})
 
+            if path == "/api/positions":
+                from .paper import pnl_of
+                sym = q.get("symbol")
+                want = q.get("status") or None
+                rows = app.store.positions(status=want, symbol=sym)
+                # 用当前价补浮动盈亏（现价拿不到就只返回原始记录）
+                marks = {}
+                for r in rows:
+                    marks.setdefault(r["symbol"], None)
+                for s in list(marks):
+                    try:
+                        snap = app.advisor.fetch(s, force=False)
+                        marks[s] = snap.price
+                    except Exception:
+                        marks[s] = None
+                for r in rows:
+                    r["pnl"] = pnl_of(r, marks.get(r["symbol"]))
+                    r["mark_price"] = marks.get(r["symbol"])
+                return self._json({"ok": True, "positions": rows, "count": len(rows)})
+
             if path == "/api/schedule":
                 return self._json({"ok": True, "schedule": app.scheduler.status()})
 
@@ -416,6 +436,41 @@ def make_handler(app: App):
             return self._json({"ok": True, "name": name, "profile": profile,
                                "result": res.to_dict(), "ms": round((_t.time() - t0) * 1000)})
 
+        def _handle_position(self, body: dict):
+            from .paper import pnl_of
+            from .symbols import to_contract as _tc
+
+            action = (body.get("action") or "").strip()
+            if action == "open":
+                sym = _tc(body.get("symbol") or "BTC-USDT")
+                direction = body.get("direction") or "long"
+                entry = float(body.get("entry_price") or 0)
+                size = float(body.get("size_coin") or 0)
+                if entry <= 0 or size <= 0:
+                    return self._err("entry_price 与 size_coin 必须 > 0", 400)
+                lev = float(body.get("leverage") or 1.0)
+                pos_id = app.store.open_position(
+                    symbol=sym, direction=direction, entry_price=entry,
+                    size_coin=size, leverage=lev,
+                    stop=body.get("stop"), tp1=body.get("tp1"),
+                    tp2=body.get("tp2"), tp3=body.get("tp3"),
+                    note=body.get("note") or "")
+                return self._json({"ok": True, "id": pos_id,
+                                   "position": app.store.position(pos_id)})
+            if action == "close":
+                pos_id = int(body.get("id") or 0)
+                price = float(body.get("close_price") or 0)
+                if price <= 0:
+                    return self._err("close_price 必须 > 0", 400)
+                app.store.close_position(pos_id, price=price,
+                                        reason=body.get("reason") or "manual")
+                return self._json({"ok": True, "position": app.store.position(pos_id)})
+            if action == "delete":
+                pos_id = int(body.get("id") or 0)
+                ok = app.store.delete_position(pos_id)
+                return self._json({"ok": True, "deleted": ok})
+            return self._err("action 必须是 open/close/delete", 400)
+
         # ---------------- POST ----------------
         def do_POST(self):
             u = urlparse(self.path)
@@ -455,6 +510,9 @@ def make_handler(app: App):
 
                 if path == "/api/profiles/backtest":
                     return self._profiles_backtest(body)
+
+                if path == "/api/positions":
+                    return self._handle_position(body)
 
                 if path == "/api/config":
                     acc = body.get("account")
