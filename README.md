@@ -34,6 +34,7 @@ python -m iabot serve --port 9000      :: 换端口
 python -m iabot analyze BTC-USDT       :: 单个合约，终端直接输出计划
 python -m iabot analyze btc --mode swing
 python -m iabot analyze BTC-USDT --json --brief
+python -m iabot analyze BTC-USDT --save     :: 分析后把这条信号写入历史库
 python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT   :: 批量扫描，按信号强度排序
 python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 ```
@@ -48,6 +49,7 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 | `--equity 450` | 账户权益 USDT，覆盖配置 |
 | `--leverage 10` | 杠杆倍数，覆盖配置 |
 | `--risk 2` | 单笔最大亏损占账户百分比 |
+| `--save` | 把本次分析结果写入信号历史库（SQLite，默认 `data/signals.db`） |
 | `--json` / `--brief` | 输出原始 JSON / 不打印因子明细 |
 
 ---

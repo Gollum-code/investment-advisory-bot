@@ -159,6 +159,16 @@ def cmd_analyze(args) -> int:
     except Exception as exc:
         print(f"[错误] 拉取失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
+    if getattr(args, "save", False):
+        from .store import SignalStore
+        st = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                         int((cfg.get("storage") or {}).get("keep_days", 30)))
+        try:
+            rowid = st.save(plan)
+        finally:
+            st.close()
+        print(f"[已保存] 信号已写入历史库" + (f"（第 {rowid} 条）" if rowid else ""),
+              file=sys.stderr)
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
     else:
@@ -320,6 +330,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_an.add_argument("--risk", type=float, help="单笔风险百分比（默认取配置）")
     p_an.add_argument("--json", action="store_true", help="输出原始 JSON")
     p_an.add_argument("--brief", action="store_true", help="不打印因子明细")
+    p_an.add_argument("--save", action="store_true",
+                      help="把本次信号写入历史库（默认 data/signals.db）")
 
     p_sc = sub.add_parser("scan", help="批量扫描多个合约")
     p_sc.add_argument("symbols", help="逗号分隔，如 BTC-USDT,ETH-USDT,SOL-USDT")

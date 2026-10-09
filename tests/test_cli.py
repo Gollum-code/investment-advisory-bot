@@ -76,6 +76,10 @@ class TestArgParsing(unittest.TestCase):
         self.assertEqual(args.mode, "intraday")
         self.assertFalse(args.json)
 
+    def test_analyze_save_flag_parses(self):
+        args = cli.build_parser().parse_args(["analyze", "BTC-USDT", "--save"])
+        self.assertTrue(args.save)
+
     def test_swing_mode(self):
         args = cli.build_parser().parse_args(["analyze", "eth", "--mode", "swing"])
         self.assertEqual(args.mode, "swing")
@@ -163,6 +167,50 @@ class TestAdvisorCache(unittest.TestCase):
         adv.analyze("BTC-USDT")
         adv.invalidate("BTC-USDT")
         adv.analyze("BTC-USDT")
+        self.assertEqual(adv.client.calls, 2)
+
+    def test_plan_cache_keyed_by_account(self):
+        """账户参数不同 -> 必须重算，不能复用另一个账户算出的张数。
+
+        行情快照仍然走缓存（calls 仍是 1），只有计划按账户重算。
+        """
+        adv = self._advisor(cache_ttl_sec=60, snapshot_ttl_sec=60)
+        a = adv.analyze("BTC-USDT", account={"equity_usdt": 100.0})
+        b = adv.analyze("BTC-USDT", account={"equity_usdt": 1000.0})
+        self.assertIsNot(a, b)
+        self.assertEqual(adv.client.calls, 1)  # 快照复用
+        self.assertGreater(b.sizing["contracts"], a.sizing["contracts"])
+
+    def test_plan_cache_default_account_is_reused(self):
+        adv = self._advisor(cache_ttl_sec=60, snapshot_ttl_sec=60)
+        a = adv.analyze("BTC-USDT")
+        b = adv.analyze("BTC-USDT")
+        self.assertIs(a, b)
+        self.assertEqual(adv.client.calls, 1)
+
+
+class TestFullPayload(unittest.TestCase):
+    def _advisor(self, **analysis):
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["analysis"].update(analysis)
+        adv = Advisor(cfg)
+        adv.client = FakeClient(UP)
+        return adv
+
+    def test_plan_and_snapshot_share_one_source(self):
+        adv = self._advisor(cache_ttl_sec=60, snapshot_ttl_sec=60)
+        p1 = adv.full_payload("BTC-USDT")
+        p2 = adv.full_payload("BTC-USDT")
+        self.assertEqual(adv.client.calls, 1)
+        self.assertEqual(p1["snapshot"]["fetched_at"], p2["snapshot"]["fetched_at"])
+        self.assertEqual(p1["plan"]["generated_at"], p2["plan"]["generated_at"])
+
+    def test_stale_snapshot_rebuilds_plan(self):
+        adv = self._advisor(cache_ttl_sec=0.001, snapshot_ttl_sec=0.001)
+        adv.full_payload("BTC-USDT")
+        import time
+        time.sleep(0.02)
+        adv.full_payload("BTC-USDT")
         self.assertEqual(adv.client.calls, 2)
 
 

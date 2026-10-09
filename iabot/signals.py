@@ -17,9 +17,9 @@ import time as _time
 from dataclasses import dataclass, field
 
 from . import indicators as ind
-from .levels import (Level, atr_stop_buffer, fib_levels, merge_levels,
-                     moving_average_levels, orderbook_walls, price_ladder,
-                     round_number_levels, swing_points, top_volume_nodes)
+from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
+                     orderbook_walls, price_ladder, round_number_levels,
+                     swing_points, top_volume_nodes)
 from .market import Snapshot, bars_per_year
 
 # tanh 归一化尺度：加权均值除以它之后过 tanh。
@@ -325,15 +325,20 @@ def _f_volatility(snap: Snapshot) -> Factor:
     return Factor("volatility", "波动率", score, 0.05, "；".join(detail) or "无数据")
 
 
-FACTOR_FNS = [_f_trend, _f_intraday, _f_momentum, _f_structure, _f_vwap,
-              _f_funding, _f_oi, _f_elite, _f_orderbook, _f_volatility]
+# (因子函数, 是否需要现价)。只有盘口因子额外要一个 price 参数，
+# 显式写在这里，比在调用处做 `fn is _f_orderbook` 的标识比较更不容易出错。
+FACTOR_FNS = [
+    (_f_trend, False), (_f_intraday, False), (_f_momentum, False),
+    (_f_structure, False), (_f_vwap, False), (_f_funding, False),
+    (_f_oi, False), (_f_elite, False), (_f_orderbook, True), (_f_volatility, False),
+]
 
 
 def compute_factors(snap: Snapshot) -> list[Factor]:
     out: list[Factor] = []
-    for fn in FACTOR_FNS:
+    for fn, needs_price in FACTOR_FNS:
         try:
-            out.append(fn(snap, snap.price) if fn is _f_orderbook else fn(snap))
+            out.append(fn(snap, snap.price) if needs_price else fn(snap))
         except Exception as exc:
             out.append(Factor(fn.__name__.replace("_f_", ""), "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))

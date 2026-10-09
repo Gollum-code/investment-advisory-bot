@@ -147,13 +147,18 @@ class SignalStore:
             self._conn.execute("DELETE FROM signals")
             self._conn.commit()
 
+    def dump_jsonl(self, *, symbol: str | None = None, mode: str | None = None,
+                   direction: str | None = None, limit: int = 5000) -> str:
+        """把信号历史序列化成 JSON Lines 文本（供 API 导出）。"""
+        rows = self.query(symbol=symbol, mode=mode, direction=direction, limit=limit)
+        return "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+
     def export_jsonl(self, path: str, limit: int = 5000) -> int:
-        rows = self.query(limit=limit)
         p = data_path(path)
+        text = self.dump_jsonl(limit=limit)
         with p.open("w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        return len(rows)
+            f.write(text)
+        return len(text.splitlines())
 
     def close(self) -> None:
         with self._lock:

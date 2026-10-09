@@ -129,6 +129,9 @@ def make_handler(app: App):
                 if path.startswith("/api/"):
                     return self._api_get(path, q)
                 return self._err("not found", 404)
+            except ValueError as exc:
+                # 查询参数解析失败（比如 limit=abc）是客户端的问题，不该打 500
+                return self._err(f"参数错误: {exc}", 400)
             except BrokenPipeError:
                 pass
             except Exception as exc:
@@ -191,6 +194,19 @@ def make_handler(app: App):
                 rows = app.store.query(symbol=q.get("symbol"), mode=q.get("mode"),
                                        direction=q.get("direction"), limit=lim)
                 return self._json({"ok": True, "rows": rows, "count": len(rows)})
+
+            if path == "/api/history/export":
+                lim = min(5000, int(q.get("limit") or 5000))
+                text = app.store.dump_jsonl(symbol=q.get("symbol"), mode=q.get("mode"),
+                                            direction=q.get("direction"), limit=lim)
+                data = text.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="signals.jsonl"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
 
             if path == "/api/stats":
                 return self._json({"ok": True, "stats": app.store.stats(
@@ -291,6 +307,8 @@ def make_handler(app: App):
                     return self._json({"ok": True, "deleted": n})
 
                 return self._err("unknown api", 404)
+            except ValueError as exc:
+                return self._err(f"参数错误: {exc}", 400)
             except BrokenPipeError:
                 pass
             except Exception as exc:
