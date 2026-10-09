@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>合约行情分析与投资建议</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>📈</text></svg>">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">📈</span>
+    <div>
+      <h1>火币合约行情分析 · 投资建议</h1>
+      <div class="sub">USDT 本位永续 · 多因子打分 · 自动仓位 · 只读行情不下单</div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <span class="pill" id="pill-base">行情域名 --</span>
+    <span class="pill" id="pill-sse">实时流 --</span>
+    <span class="pill" id="pill-sched">定时任务 --</span>
+    <span class="pill" id="pill-cert">证书 --</span>
+  </div>
+</header>
+
+<main>
+  <!-- 控制台 -->
+  <section class="card composer">
+    <div class="ctrls">
+      <label class="fld">
+        <span>合约</span>
+        <input id="symbol" list="sym-list" autocomplete="off" spellcheck="false" value="BTC-USDT">
+        <datalist id="sym-list"></datalist>
+      </label>
+      <label class="fld">
+        <span>模式</span>
+        <select id="mode">
+          <option value="intraday">日内（持仓数小时）</option>
+          <option value="swing">波段（持仓数天~数周）</option>
+        </select>
+      </label>
+      <label class="fld narrow">
+        <span>账户 (U)</span>
+        <input id="equity" type="number" min="1" step="10" value="450">
+      </label>
+      <label class="fld narrow">
+        <span>杠杆</span>
+        <input id="leverage" type="number" min="1" max="125" step="1" value="10">
+      </label>
+      <label class="fld narrow">
+        <span>单笔风险 %</span>
+        <input id="risk" type="number" min="0.1" max="20" step="0.1" value="2">
+      </label>
+      <div class="btns">
+        <button id="btn-go" class="primary">分析</button>
+        <button id="btn-refresh" class="ghost">强制刷新</button>
+      </div>
+    </div>
+    <div class="chips" id="quick">
+      <span class="chip" data-sym="BTC-USDT">BTC</span>
+      <span class="chip" data-sym="ETH-USDT">ETH</span>
+      <span class="chip" data-sym="SOL-USDT">SOL</span>
+      <span class="chip" data-sym="DOGE-USDT">DOGE</span>
+      <span class="chip" data-sym="XRP-USDT">XRP</span>
+      <span class="chip" data-sym="AVAX-USDT">AVAX</span>
+      <span class="chip" data-sym="SUI-USDT">SUI</span>
+    </div>
+    <div id="msg" class="msg"></div>
+  </section>
+
+  <div class="grid">
+    <!-- 左列 -->
+    <div class="col">
+      <section class="card">
+        <h2>行情与关键位
+          <span class="hint" id="quote"></span>
+          <span class="right seg" id="tf-seg"></span>
+        </h2>
+        <canvas id="chart" height="360"></canvas>
+        <div class="legend" id="chart-legend"></div>
+      </section>
+
+      <section class="card">
+        <h2>关键价位阶梯</h2>
+        <div class="ladder">
+          <div class="lad-col">
+            <div class="lad-title dn">阻力（上方）</div>
+            <div id="res-list"></div>
+          </div>
+          <div class="lad-col">
+            <div class="lad-title up">支撑（下方）</div>
+            <div id="sup-list"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 右列 -->
+    <div class="col">
+      <section class="card" id="card-advice">
+        <h2>交易建议</h2>
+        <div id="advice"></div>
+      </section>
+
+      <section class="card">
+        <h2>因子明细 <span class="hint" id="factor-hint"></span></h2>
+        <div id="factors" class="factors"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- 定时任务 -->
+  <section class="card">
+    <h2>定时任务
+      <span class="hint" id="sched-hint"></span>
+      <button id="btn-run" class="ghost right">立即执行一轮</button>
+    </h2>
+    <div class="sched-row">
+      <label class="line"><input type="checkbox" id="sc-enabled"> 启用循环执行</label>
+      <label class="fld narrow"><span>间隔（秒）</span>
+        <input id="sc-interval" type="number" min="30" step="30" value="300">
+      </label>
+      <label class="fld"><span>循环合约（逗号分隔）</span>
+        <input id="sc-symbols" type="text" value="BTC-USDT" spellcheck="false">
+      </label>
+      <label class="line"><input type="checkbox" id="sc-onlysig"> 只在有方向时落库</label>
+      <button id="btn-save-sched" class="primary">保存任务</button>
+    </div>
+    <div class="two-col">
+      <div>
+        <div class="sub-title">运行日志</div>
+        <div id="sched-log" class="log"></div>
+      </div>
+      <div>
+        <div class="sub-title">历史信号 <span class="hint" id="hist-hint"></span>
+          <button id="btn-clear-hist" class="ghost right tiny">清空</button></div>
+        <div id="history" class="hist"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 多币种速览 -->
+  <section class="card">
+    <h2>多币种速览
+      <span class="hint">批量扫描当前关注列表，按信号强度排序</span>
+      <button id="btn-scan" class="ghost right">扫描全部</button>
+    </h2>
+    <div id="scan" class="scan"></div>
+  </section>
+</main>
+
+<div id="toast-wrap"></div>
+<script src="/app.js"></script>
+</body>
+</html>

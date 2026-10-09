@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时数据（信号历史库）
+data/
+
+# 本地配置（由 config.example.json 生成）
+config.json
+
+# 临时脚本（一次性分析用，不进仓库）
+.tmp-*
+tmp/
+*.local.*
