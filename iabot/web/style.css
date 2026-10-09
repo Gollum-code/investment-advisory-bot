@@ -131,6 +131,9 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .tp-row .rr{color:var(--dim);font-size:11.5px}
 .tp-row .gain{margin-left:auto;color:var(--up);font-weight:700;font-variant-numeric:tabular-nums}
 .tp-row .src{color:var(--dim);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gate{background:#101a35;border:1px solid #2c3f6b;border-left:3px solid var(--accent);
+  border-radius:9px;padding:9px 11px;font-size:12.5px;color:#cbd5e1;margin-bottom:11px;line-height:1.55}
+.gate b{color:#9fc1ff}
 .warnbox{background:#241d0d;border:1px solid #6b5619;border-radius:9px;padding:9px 11px;
   font-size:12px;color:#fde68a;white-space:pre-wrap}
 .warnbox.ok{background:#0c2a1c;border-color:#1c5b3a;color:#bbf7d0}

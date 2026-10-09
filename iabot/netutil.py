@@ -187,6 +187,20 @@ def http_json(
     return json.loads(raw) if raw.strip() else {}
 
 
+def encode_path(path: str) -> str:
+    """把 path 里的非 ASCII 字符做百分号编码。
+
+    火币有些合约的代码本身就是中文（如 `牛来-USDT`、`哈基米-USDT`），
+    直接拼进 URL 会让 urllib 抛 UnicodeEncodeError。纯 ASCII 的 path
+    原样返回，既有行为零变化。
+    """
+    try:
+        path.encode("ascii")
+        return path
+    except UnicodeEncodeError:
+        return urllib.parse.quote(path, safe="/?&=%:+,$-_.~")
+
+
 class BasePool:
     """行情域名池：探测出可用的 base，之后固定用它；挂了自动换下一个。"""
 
@@ -275,7 +289,7 @@ class BasePool:
         timeout = timeout or self._timeout
         errors: list[str] = []
         for base in self.candidates():
-            url = base + path
+            url = base + encode_path(path)
             for attempt in range(self._retries):
                 try:
                     d = http_json(url, timeout=timeout, verify=self._verify)

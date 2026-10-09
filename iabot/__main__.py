@@ -79,6 +79,16 @@ def render_plan(plan: dict, *, verbose: bool = True) -> str:
             out.append(f"    {t['label']:<4}: {_num(t['price'], d)}  RR {_num(t.get('rr'), 2)}"
                        f"   {t.get('source', '')}")
         out.append(f"  失效条件  : {plan.get('invalidation', '--')}")
+    gate = plan.get("gate") or {}
+    if gate.get("blocked"):
+        cn = "做多" if gate.get("would_be") == "long" else "做空"
+        why = ("前方没有像样的空间（价格卡在关键位中间）"
+               if gate.get("reason") == "no_target"
+               else f"第一目标盈亏比只有 {_num(gate.get('rr'), 2)}，低于 {_num(gate.get('need'), 1)}")
+        out.append("")
+        out.append(f"  !! 评分 {gate.get('score', 0):+.1f} 其实指向{cn}，但{why} → 转为观望。")
+        out.append("     评分只决定方向多强，盈亏比决定这个位置值不值得进。")
+
     if plan.get("entry_note"):
         out.append("")
         out.append(f"  说明      : {plan['entry_note']}")

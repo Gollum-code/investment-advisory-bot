@@ -444,6 +444,18 @@
       '<span class="adv-meta">' + esc(plan.symbol) + ' · ' + esc(modeLabel(plan.mode)) +
       ' · ' + fmtTime(plan.generated_at, true) + '</span></div>';
 
+    // 评分给了方向、却被风控闸门拦下时，把“为什么”直接写出来
+    const gate = plan.gate || {};
+    if (dir === "wait" && gate.blocked) {
+      const cn = gate.would_be === "long" ? "做多" : "做空";
+      const why = gate.reason === "no_target"
+        ? "前方没有像样的空间（价格卡在关键位中间）"
+        : "第一目标盈亏比只有 " + fmtNum(gate.rr, 2) + "，低于 " + fmtNum(gate.need, 1);
+      h += '<div class="gate"><b>评分 ' + signed(gate.score) + " 其实指向" + cn +
+        "</b>，但" + esc(why) + "，所以按规则转为观望。" +
+        "评分只决定方向多强，盈亏比决定这个位置值不值得进。</div>";
+    }
+
     const w = Math.abs(Math.max(-100, Math.min(100, plan.score))) / 100 * 50;
     h += '<div class="gauge"><i style="left:' + (plan.score >= 0 ? 50 : 50 - w) + '%;width:' + w + '%"></i>' +
       '<div class="mid"></div></div>' +

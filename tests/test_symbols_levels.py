@@ -2,6 +2,7 @@
 
 import unittest
 
+from iabot import netutil
 from iabot import symbols as sym
 from iabot.levels import Level, merge_levels, price_ladder, swing_points
 from iabot.market import Candle
@@ -24,6 +25,12 @@ class TestToContract(unittest.TestCase):
     def test_whitespace_and_empty(self):
         self.assertEqual(sym.to_contract("  btc  "), "BTC-USDT")
         self.assertEqual(sym.to_contract(""), "")
+
+    def test_chinese_contract_code(self):
+        # 火币确实有合约代码本身就是中文的：牛来 / 哈基米 / 币安人生 / 龙虾
+        self.assertEqual(sym.to_contract("牛来-USDT"), "牛来-USDT")
+        self.assertEqual(sym.to_contract("牛来"), "牛来-USDT")
+        self.assertEqual(sym.base_of("牛来-USDT"), "牛来")
 
     def test_base_of(self):
         self.assertEqual(sym.base_of("BTC-USDT"), "BTC")
@@ -111,6 +118,22 @@ class TestPriceLadder(unittest.TestCase):
         many = [Level(100.0 + i, "resistance", 1.0 - i * 0.01, f"r{i}") for i in range(1, 20)]
         self.assertLessEqual(len(price_ladder(100.0, many, min_dist=0.5,
                                               max_dist=50.0, max_each=3)), 3)
+
+
+class TestEncodePath(unittest.TestCase):
+    """URL 里出现中文合约代码时不能再抛 UnicodeEncodeError。"""
+
+    def test_ascii_path_untouched(self):
+        p = "/linear-swap-ex/market/depth?contract_code=BTC-USDT&type=step0"
+        self.assertEqual(netutil.encode_path(p), p)
+
+    def test_chinese_code_is_percent_encoded(self):
+        p = "/linear-swap-api/v1/swap_contract_info?contract_code=牛来-USDT"
+        out = netutil.encode_path(p)
+        self.assertTrue(out.isascii())
+        self.assertIn("%E7%89%9B%E6%9D%A5-USDT", out)
+        self.assertTrue(out.startswith(
+            "/linear-swap-api/v1/swap_contract_info?contract_code="))
 
 
 if __name__ == "__main__":

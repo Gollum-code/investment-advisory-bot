@@ -11,7 +11,7 @@ from iabot.signals import build_plan
 try:  # `discover -s tests` 和 `discover -t .` 两种跑法都要能用
     from .test_signals import DOWN_INTRADAY, RANGE, UP, cfg_with, make_snapshot
 except ImportError:
-    from test_signals import DOWN_INTRADAY, RANGE, UP, cfg_with, make_snapshot
+    from test_signals import DOWN_INTRADAY, NO_ROOM, RANGE, UP, cfg_with, make_snapshot
 
 
 class TestHeadline(unittest.TestCase):
@@ -55,6 +55,13 @@ class TestRenderPlan(unittest.TestCase):
         wait = cli.render_plan(build_plan(make_snapshot(**RANGE), cfg_with(),
                                           mode="intraday").to_dict())
         self.assertIn("不给", wait)
+
+    def test_explains_why_a_high_score_still_waits(self):
+        plan = build_plan(make_snapshot(**NO_ROOM), cfg_with(), mode="intraday")
+        text = cli.render_plan(plan.to_dict())
+        self.assertIn("其实指向做多", text)
+        self.assertIn("盈亏比", text)
+        self.assertIn("转为观望", text)
 
     def test_missing_price_does_not_crash(self):
         snap = make_snapshot(**UP)

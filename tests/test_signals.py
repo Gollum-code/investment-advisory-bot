@@ -37,6 +37,8 @@ UP = dict(net_pct=8.0, tail_pct=-0.2)          # 日内 + 波段都给多头
 DOWN_INTRADAY = dict(net_pct=-8.0, tail_pct=-1.2)   # 日内给空头
 DOWN_SWING = dict(net_pct=-8.0, tail_pct=-0.2)      # 波段给空头
 RANGE = dict(chop_pct=0.6, cycles=4.0)              # 没有净方向 -> 观望
+# 评分够（+55），但头顶阻力太近，止损放不下 -> 被盈亏比闸门拦下
+NO_ROOM = dict(net_pct=10.0, tail_pct=-0.2)
 
 
 def _trend_profile(n, start, net_pct, tail_pct, ts_step, wiggle_pct=0.15):
@@ -137,6 +139,29 @@ class TestDirection(unittest.TestCase):
         self.assertEqual(plan.direction, "wait")
         self.assertEqual(plan.confidence, "低")
         self.assertLess(abs(plan.score), 30.0)
+
+    def test_score_ok_but_no_room_is_blocked_by_gate(self):
+        """评分指向做多，但第一目标盈亏比 < 1.0 时必须降级，并把原因写清楚。"""
+        plan = plan_for(NO_ROOM, "intraday")
+        self.assertEqual(plan.direction, "wait")
+        self.assertGreater(plan.score, 30.0, "前提是评分确实过了阈值")
+        gate = plan.gate
+        self.assertTrue(gate.get("blocked"))
+        self.assertEqual(gate.get("reason"), "rr")
+        self.assertEqual(gate.get("would_be"), "long")
+        self.assertLess(gate.get("rr"), 1.0)
+        self.assertEqual(gate.get("need"), 1.0)
+        self.assertAlmostEqual(gate.get("score"), plan.score, places=1)
+
+    def test_plain_wait_has_no_gate(self):
+        """单纯评分不够只是观望，不算被闸门拦下。"""
+        plan = plan_for(RANGE, "intraday")
+        self.assertEqual(plan.direction, "wait")
+        self.assertEqual(plan.gate, {})
+        self.assertLess(abs(plan.score), 30.0)
+
+    def test_passing_signal_has_no_gate(self):
+        self.assertEqual(plan_for(UP).gate, {})
 
     def test_missing_price_gives_wait_with_note(self):
         snap = make_snapshot(**UP)

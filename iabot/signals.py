@@ -89,6 +89,8 @@ class Plan:
     levels: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 被风控闸门拦下来时的解释：评分给了方向，但位置不划算
+    gate: dict = field(default_factory=dict)
     price: float | None = None
     generated_at: float = 0.0
 
@@ -590,10 +592,14 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     if not plan.targets:
         plan.warnings.append(
             f"{m['label']}级别找不到 ≥0.8 盈亏比的目标位（价格正卡在关键位中间）。")
+        plan.gate = {"blocked": True, "reason": "no_target", "score": plan.score,
+                     "would_be": plan.direction, "rr": None, "need": 0.8}
         return _downgrade(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v,
                           "评分有方向，但前方没有像样的空间，暂不出手。")
     if plan.rr is not None and plan.rr < 1.0:
         plan.warnings.append(f"调整止损后第一目标盈亏比只有 {plan.rr:.2f}（<1.0），风险大于收益。")
+        plan.gate = {"blocked": True, "reason": "rr", "score": plan.score,
+                     "would_be": plan.direction, "rr": round(plan.rr, 2), "need": 1.0}
         return _downgrade(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v,
                           "盈亏比不足 1:1，不出手。")
     if plan.rr is not None and plan.rr < 1.2:
