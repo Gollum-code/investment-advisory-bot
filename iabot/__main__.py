@@ -316,7 +316,9 @@ def cmd_backtest(args) -> int:
         return 2
     t0 = time.time()
     res = backtest(snap, cfg, mode=args.mode, step=args.step,
-                   warmup=args.warmup, max_points=2000)
+                   warmup=args.warmup, max_points=2000,
+                   equity_usdt=_account_from(args).get("equity_usdt"),
+                   risk_pct=_account_from(args).get("risk_pct_per_trade"))
     ms = (time.time() - t0) * 1000
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
@@ -336,6 +338,10 @@ def cmd_backtest(args) -> int:
     print(f"  平均持仓     : {res.avg_holding_h:.1f} 小时")
     print(f"  最大浮盈/浮亏: {res.max_mfe:+.2f}% / {res.max_mae:+.2f}%")
     print(f"  累计 R       : {res.total_r:+.1f}（按 1R 单笔计算，曲线见 --json）")
+    if res.equity_usdt:
+        pnl_usdt = res.total_r * res.risk_amount_usdt
+        print(f"  金额换算     : 初始 {res.equity_usdt:.0f} U / 单笔风险 {res.risk_amount_usdt:.1f} U"
+              f" -> 期末约 {res.equity_usdt + pnl_usdt:.0f} U（{(pnl_usdt / res.equity_usdt) * 100:+.1f}%）")
     print("=" * 66)
     return 0
 
@@ -448,7 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="每隔多少根主周期 K 线构造一个建仓点（默认 10）")
     p_bk.add_argument("--warmup", type=int, default=60, help="跳过前多少根（指标预热）")
     p_bk.add_argument("--bars", type=int, default=300,
-                      help="取多少根主周期 K 线做历史（日内 15min / 波断 1day）")
+                      help="取多少根主周期 K 线做历史（日内 15min / 波段 1day）")
+    p_bk.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置，用于金额换算）")
+    p_bk.add_argument("--risk", type=float, help="单笔风险 %（默认取配置，用于金额换算）")
     p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")
 
     return ap

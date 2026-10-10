@@ -44,6 +44,10 @@ class BacktestResult:
     max_mfe: float
     max_mae: float
     equity_curve: list[float]   # 以 1R 为单位累加（实际风险由 sizing 控制）
+    equity_usdt: float          # 初始权益（用于把 R 折算成金额）
+    risk_pct: float             # 单笔风险占权益 %
+    risk_amount_usdt: float     # 单笔风险金额
+    equity_curve_usdt: list[float]  # 累计权益曲线（按单笔风险金额折算成 U）
 
     def to_dict(self) -> dict:
         return {
@@ -60,9 +64,15 @@ class BacktestResult:
             "avg_funding_r": round(self.avg_funding_r, 4),
             "avg_holding_h": round(self.avg_holding_h, 2),
             "total_r": round(self.total_r, 2),
+            "equity_usdt": round(self.equity_usdt, 2),
+            "risk_amount_usdt": round(self.risk_amount_usdt, 2),
+            "final_equity_usdt": round(self.equity_usdt + self.total_r * self.risk_amount_usdt, 2),
+            "return_pct": round(self.total_r * self.risk_amount_usdt / self.equity_usdt * 100, 2)
+            if self.equity_usdt else 0.0,
             "max_mfe": round(self.max_mfe, 3),
             "max_mae": round(self.max_mae, 3),
             "equity_curve": [round(x, 3) for x in self.equity_curve],
+            "equity_curve_usdt": [round(x, 2) for x in self.equity_curve_usdt],
         }
 
 
@@ -85,7 +95,8 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
 
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
-             apply_costs: bool = True, costs: dict | None = None) -> BacktestResult:
+             apply_costs: bool = True, costs: dict | None = None,
+             equity_usdt: float | None = None, risk_pct: float | None = None) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
     base: 已经 fetch 好的完整快照（含各周期 K 线），由调用方从接口拿。
@@ -93,7 +104,13 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     warmup: 前多少根跳过，保证指标有足够数据。
     apply_costs: 每笔交易扣除真实成本（手续费 + 滑点 + 按持仓时长的资金费）。
     costs:  覆盖默认成本参数；资金费率从 base.funding_rate 取（作为近似）。
+    equity_usdt / risk_pct: 用于把 R 折算成金额（默认取 cfg.account）。
     """
+    acc = cfg.get("account") or {}
+    eq = float(equity_usdt if equity_usdt is not None else (acc.get("equity_usdt") or 450))
+    rp = float(risk_pct if risk_pct is not None else (acc.get("risk_pct_per_trade") or 2.0))
+    risk_amount = eq * rp / 100.0
+
     C = dict(DEFAULT_COSTS)
     if costs:
         C.update({k: float(v) for k, v in costs.items() if k in C})
@@ -110,7 +127,9 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             timeouts=n, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
             avg_cost_r=0.0, avg_fee_r=0.0, avg_slippage_r=0.0, avg_funding_r=0.0,
             avg_holding_h=0.0, win_rate=0.0, expectancy_r=0.0,
-            max_mfe=0.0, max_mae=0.0, equity_curve=[])
+            max_mfe=0.0, max_mae=0.0, equity_curve=[],
+            equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
+            equity_curve_usdt=[])
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -137,6 +156,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     mfes: list[float] = []
     maes: list[float] = []
     curve: list[float] = []
+    curve_usdt: list[float] = []
     cum_r = 0.0
     trades = 0
     cost_rs: list[float] = []
@@ -220,6 +240,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         else:  # timeout
             timeouts += 1
         curve.append(cum_r)
+        curve_usdt.append(cum_r * risk_amount)
 
     resolved = wins + losses
     win_rate = wins / resolved if resolved else 0.0
@@ -240,4 +261,6 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         max_mfe=(max(mfes) if mfes else 0.0),
         max_mae=(min(maes) if maes else 0.0),
         equity_curve=curve,
+        equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
+        equity_curve_usdt=curve_usdt,
     )

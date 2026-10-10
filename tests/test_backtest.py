@@ -103,6 +103,22 @@ class TestBacktest(unittest.TestCase):
         # 多头在正费率下要付钱 -> 累计 R 不应更高
         self.assertLessEqual(hi.total_r, lo.total_r + 1e-9)
 
+    def test_equity_usdt_conversion(self):
+        snap = _make_snapshot(200)
+        cfg = _cfg()
+        cfg["account"]["equity_usdt"] = 1000.0
+        cfg["account"]["risk_pct_per_trade"] = 2.0
+        r = backtest(snap, cfg, mode="intraday", step=6, warmup=30).to_dict()
+        # 单笔风险 = 1000 × 2% = 20 U
+        self.assertAlmostEqual(r["risk_amount_usdt"], 20.0, places=2)
+        self.assertAlmostEqual(r["equity_usdt"], 1000.0, places=2)
+        # 金额曲线长度与 R 曲线一致
+        self.assertEqual(len(r["equity_curve_usdt"]), len(r["equity_curve"]))
+        if r["trades"]:
+            # 期末 = 初始 + 累计R × 单笔风险
+            self.assertAlmostEqual(r["final_equity_usdt"],
+                                   1000.0 + r["total_r"] * 20.0, places=0)
+
 
 if __name__ == "__main__":
     unittest.main()
