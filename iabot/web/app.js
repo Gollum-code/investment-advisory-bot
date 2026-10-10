@@ -1011,6 +1011,58 @@
     } catch (e) {
       $('positions').innerHTML = '<div class="empty">持仓加载失败：' + esc(e.message) + '</div>';
     }
+    loadPnl();
+  }
+
+  async function loadPnl() {
+    try {
+      const d = await api('/api/pnl');
+      renderPnl(d.pnl || {});
+    } catch (e) { /* 利润簿加载失败不打断 */ }
+  }
+
+  function renderPnl(p) {
+    const el = $('pnl-book');
+    if (!p || !p.closed_count) {
+      el.innerHTML = '<div class="sub-title">利润簿（已平仓）</div>' +
+        '<div class="empty">还没有平仓记录。平掉一笔模拟仓后这里显示利润簿。</div>';
+      return;
+    }
+    const cls = (v) => (v >= 0 ? 'up' : 'down');
+    const pct = (v) => (v == null ? '--' : (v >= 0 ? '+' : '') + fmtNum(v, 1) + '%');
+    const kpi = [
+      ['总净盈亏', p.total_net_usdt, ' U', cls(p.total_net_usdt)],
+      ['本月', p.month_net_usdt, ' U', cls(p.month_net_usdt)],
+      ['本周', p.week_net_usdt, ' U', cls(p.week_net_usdt)],
+      ['胜率', p.win_rate * 100, '%', cls(p.win_rate - 0.5)],
+      ['已平仓', p.closed_count, ' 笔', ''],
+      ['均盈 / 均亏', p.avg_win_usdt + ' / ' + p.avg_loss_usdt, ' U', ''],
+    ];
+    const kpis = kpi.map(([k, v, u, c]) =>
+      '<div class="kpi"><div class="v ' + c + '">' + (typeof v === 'number' ? fmtNum(v, 1) : v) + u + '</div>' +
+      '<div class="k">' + k + '</div></div>').join('');
+    const curve = (p.equity_curve || []).map((pt) => pt.cum);
+    let svg = '';
+    if (curve.length > 1) {
+      const W = 900, H = 120;
+      const mn = Math.min(0, ...curve), mx = Math.max(...curve);
+      const rng = (mx - mn) || 1;
+      const pts = curve.map((c, i) => {
+        const x = (i / (curve.length - 1)) * W;
+        const y = H - ((c - mn) / rng) * (H - 8) - 4;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      const last = curve[curve.length - 1];
+      svg = '<svg viewBox="0 0 900 120" class="pnl-curve" xmlns="http://www.w3.org/2000/svg">' +
+        '<line x1="0" y1="' + (H - ((0 - mn) / rng) * (H - 8) - 4) + '" x2="900" y2="' +
+        (H - ((0 - mn) / rng) * (H - 8) - 4) + '" stroke="#243055" stroke-dasharray="4 4"/>' +
+        '<polyline points="' + pts + '" fill="none" stroke="' +
+        (last >= 0 ? '#22c55e' : '#ef4444') + '" stroke-width="2"/>' +
+        '<text x="4" y="14" fill="#8f9cbb" font-size="11">累计净盈亏 ' +
+        (last >= 0 ? '+' : '') + fmtNum(last, 1) + ' U</text></svg>';
+    }
+    el.innerHTML = '<div class="sub-title">利润簿（已平仓，扣往返手续费）</div>' +
+      '<div class="win-kpis">' + kpis + '</div>' + svg;
   }
 
   function renderPositions(rows) {

@@ -11,6 +11,39 @@ from __future__ import annotations
 
 from typing import Any
 
+# 模拟盘口径的往返手续费（单边 5bps，开平各一次）
+ROUND_TRIP_FEE_BPS = 10.0
+
+
+def realized_pnl_of(pos: dict) -> dict:
+    """已平仓持仓的已实现盈亏（扣往返手续费）。
+
+    返回 {realized_pnl_usdt, fee_usdt, net_pnl_usdt, pnl_pct_of_margin, bars, holding_h}。
+    """
+    entry = pos.get("entry_price")
+    close = pos.get("close_price")
+    size = pos.get("size_coin") or 0.0
+    direction = pos.get("direction")
+    notional = (entry or 0) * size
+    fee = notional * ROUND_TRIP_FEE_BPS / 10000.0
+    gross = 0.0
+    if entry and close and size:
+        if direction == "long":
+            gross = (close - entry) * size
+        elif direction == "short":
+            gross = (entry - close) * size
+    margin = notional / max(1.0, (pos.get("leverage") or 1.0))
+    opened = pos.get("opened_at") or 0
+    closed = pos.get("closed_at") or 0
+    holding_h = (closed - opened) / 3600.0 if closed > opened else 0.0
+    return {
+        "realized_pnl_usdt": round(gross, 2),
+        "fee_usdt": round(fee, 3),
+        "net_pnl_usdt": round(gross - fee, 2),
+        "pnl_pct_of_margin": round((gross - fee) / margin * 100, 2) if margin else 0.0,
+        "holding_h": round(holding_h, 2),
+    }
+
 
 def pnl_of(pos: dict, price: float | None, fee_bps: float = 5.0) -> dict:
     """给定现价，算某持仓的浮动盈亏与关键位状态。"""

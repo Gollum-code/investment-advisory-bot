@@ -400,6 +400,54 @@ class SignalStore:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def pnl_summary(self) -> dict:
+        """模拟盘利润簿：已平仓的已实现盈亏汇总 + 权益曲线。"""
+        from .paper import realized_pnl_of
+        closed = self.positions(status="closed", limit=5000)
+        now = time.time()
+        week_ago = now - 7 * 86400
+        month_ago = now - 30 * 86400
+
+        curve: list[dict] = []          # [{ts, cum}] 权益曲线（净已实现累加）
+        cum = 0.0
+        total_net = week_net = month_net = 0.0
+        wins = losses = 0
+        win_nets: list[float] = []
+        loss_nets: list[float] = []
+        rows = sorted(closed, key=lambda p: (p.get("closed_at") or 0))
+        for p in rows:
+            r = realized_pnl_of(p)
+            net = r["net_pnl_usdt"]
+            total_net += net
+            ct = p.get("closed_at") or 0
+            if ct >= week_ago:
+                week_net += net
+            if ct >= month_ago:
+                month_net += net
+            if net > 0:
+                wins += 1
+                win_nets.append(net)
+            else:
+                losses += 1
+                loss_nets.append(net)
+            cum += net
+            curve.append({"ts": ct, "cum": round(cum, 2)})
+
+        total_trades = wins + losses
+        return {
+            "closed_count": len(closed),
+            "open_count": len(self.positions(status="open")),
+            "total_net_usdt": round(total_net, 2),
+            "week_net_usdt": round(week_net, 2),
+            "month_net_usdt": round(month_net, 2),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / total_trades, 3) if total_trades else 0.0,
+            "avg_win_usdt": round(sum(win_nets) / len(win_nets), 2) if win_nets else 0.0,
+            "avg_loss_usdt": round(sum(loss_nets) / len(loss_nets), 2) if loss_nets else 0.0,
+            "equity_curve": curve,
+        }
+
     def clear(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM signals")

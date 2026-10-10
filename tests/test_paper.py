@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from iabot.market import Candle
-from iabot.paper import check_exit, pnl_of
+from iabot.paper import check_exit, pnl_of, realized_pnl_of
 from iabot.store import SignalStore
 
 BASE = 1_700_000_000
@@ -95,6 +95,26 @@ class TestCheckExit(unittest.TestCase):
         self.assertIsNone(check_exit(pos, candles))
 
 
+class TestRealizedPnl(unittest.TestCase):
+    def test_long_close_profit_minus_fee(self):
+        pos = {"direction": "long", "entry_price": 100, "close_price": 105,
+               "size_coin": 2, "leverage": 10, "opened_at": BASE,
+               "closed_at": BASE + 3600}
+        r = realized_pnl_of(pos)
+        # 毛利 (105-100)*2=10；手续费 = 名义 200 × 0.1% = 0.2
+        self.assertAlmostEqual(r["realized_pnl_usdt"], 10.0)
+        self.assertAlmostEqual(r["fee_usdt"], 0.2)
+        self.assertAlmostEqual(r["net_pnl_usdt"], 9.8)
+        self.assertAlmostEqual(r["holding_h"], 1.0)
+
+    def test_short_loss(self):
+        pos = {"direction": "short", "entry_price": 100, "close_price": 103,
+               "size_coin": 1, "leverage": 1, "opened_at": BASE, "closed_at": BASE + 900}
+        r = realized_pnl_of(pos)
+        self.assertAlmostEqual(r["realized_pnl_usdt"], -3.0)
+        self.assertAlmostEqual(r["net_pnl_usdt"], -3.1)
+
+
 class TestPositionStore(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -121,6 +141,24 @@ class TestPositionStore(unittest.TestCase):
                                       entry_price=200, size_coin=1)
         self.assertTrue(self.store.delete_position(pid))
         self.assertIsNone(self.store.position(pid))
+
+    def test_pnl_summary(self):
+        p1 = self.store.open_position(symbol="BTC-USDT", direction="long",
+                                      entry_price=100, size_coin=2, leverage=10,
+                                      opened_at=time.time() - 7200)
+        p2 = self.store.open_position(symbol="ETH-USDT", direction="long",
+                                      entry_price=100, size_coin=2, leverage=10,
+                                      opened_at=time.time() - 7200)
+        self.store.close_position(p1, price=105, reason="tp1")   # +9.8 净
+        self.store.close_position(p2, price=98, reason="stop")   # -4.2 净
+        s = self.store.pnl_summary()
+        self.assertEqual(s["closed_count"], 2)
+        self.assertEqual(s["open_count"], 0)
+        self.assertAlmostEqual(s["total_net_usdt"], 9.8 - 4.2, places=1)
+        self.assertEqual(s["wins"], 1)
+        self.assertEqual(s["losses"], 1)
+        self.assertAlmostEqual(s["win_rate"], 0.5)
+        self.assertEqual(len(s["equity_curve"]), 2)
 
 
 if __name__ == "__main__":

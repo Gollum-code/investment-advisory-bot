@@ -330,6 +330,9 @@ def make_handler(app: App):
                     r["mark_price"] = marks.get(r["symbol"])
                 return self._json({"ok": True, "positions": rows, "count": len(rows)})
 
+            if path == "/api/pnl":
+                return self._json({"ok": True, "pnl": app.store.pnl_summary()})
+
             if path == "/api/report":
                 from .report import render_report
                 sym = q.get("symbol") or "BTC-USDT"
