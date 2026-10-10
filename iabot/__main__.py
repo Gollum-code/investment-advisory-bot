@@ -219,11 +219,28 @@ def cmd_scan(args) -> int:
         print(json.dumps({"plans": plans, "errors": errs}, ensure_ascii=False, indent=2))
         return 0
     print()
+    print(_scan_breadth(plans))
     for p in plans:
         print(render_plan(p, verbose=False))
     if errs:
         print("失败:", "; ".join(errs), file=sys.stderr)
     return 0
+
+
+def _scan_breadth(plans: list[dict]) -> str:
+    """批量扫描结果顶部的市场情绪一行（与网页口径一致）。"""
+    longs = sum(1 for p in plans if p.get("direction") == "long")
+    shorts = sum(1 for p in plans if p.get("direction") == "short")
+    waits = sum(1 for p in plans if p.get("direction") == "wait")
+    n_ls = longs + shorts
+    if n_ls:
+        senti = "偏多" if longs / n_ls >= 0.6 else ("偏空" if shorts / n_ls >= 0.6 else "中性")
+    else:
+        senti = "中性"
+    scores = [p.get("score") or 0 for p in plans]
+    avg = sum(abs(s) for s in scores) / len(scores) if scores else 0
+    return (f"市场情绪: {senti}   {longs}多 / {shorts}空 / {waits}观望"
+            f"   平均|评分| {avg:.1f}")
 
 
 def cmd_check(args) -> int:

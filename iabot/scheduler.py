@@ -109,15 +109,24 @@ class Scheduler:
     # ------------------------------------------------------------------
     def _loop(self) -> None:
         if (self.cfg.get("schedule") or {}).get("run_on_start", True):
-            self._run_once()
+            self._safe_run_once()
         while not self._stop.is_set():
             self.next_run = time.time() + self.interval
             self._wake.wait(self.interval)
             self._wake.clear()
             if self._stop.is_set():
                 break
-            self._run_once()
+            self._safe_run_once()
         self.next_run = None
+
+    def _safe_run_once(self) -> None:
+        """后台循环里跑一轮：任何未预期异常都记录后继续，绝不让线程静默死掉。"""
+        try:
+            self._run_once()
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self._emit({"type": "error", "ts": time.time(),
+                        "error": f"本轮执行异常（已跳过，等待下一轮）: {self.last_error}"})
 
     def _check_positions(self) -> int:
         """跟踪模拟盘持仓：一旦被止损/止盈打掉就自动平仓（记结果）。"""

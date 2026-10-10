@@ -550,7 +550,8 @@
     if (plan.direction === 'long' || plan.direction === 'short') {
       h += '<div class="adv-cta">' +
         '<button class="ghost open-paper" data-act="open">以本计划开模拟仓</button>' +
-        '<span class="hint">按现价成交，仅记录模拟仓位，不下单</span></div>';
+        '<button class="ghost copy-paper" data-act="copy">复制计划</button>' +
+        '<span class="hint">复制计划方便手动下单；仅记录模拟仓位，不下单</span></div>';
     }
 
     if (plan.invalidation) h += '<div class="adv-note">失效条件：' + esc(plan.invalidation) + '</div>';
@@ -563,6 +564,42 @@
     $('card-advice').className = 'card dir-' + dir;
     const cta = el.querySelector('.open-paper');
     if (cta) cta.onclick = () => openFromPlan(plan);
+    const cp = el.querySelector('.copy-paper');
+    if (cp) cp.onclick = () => copyPlan(plan);
+  }
+
+  async function copyPlan(plan) {
+    const d = digitsFor(plan.price);
+    const s = plan.sizing || {};
+    const lines = [
+      plan.symbol + ' ' + dirLabel(plan.direction) +
+        '（评分 ' + signed(plan.score) + '，置信度' + plan.confidence + '）',
+      '入场区间 ' + fmtPrice(plan.entry_low, d) + ' - ' + fmtPrice(plan.entry_high, d),
+      '止损 ' + fmtPrice(plan.stop, d) + '（' + fmtNum(plan.stop_pct, 2) + '%）',
+      '盈亏比 ' + fmtNum(plan.rr, 2),
+    ];
+    (plan.targets || []).forEach((t) => {
+      lines.push(t.label + ' ' + fmtPrice(t.price, d) + '（RR ' + fmtNum(t.rr, 2) + '）');
+    });
+    if (s.applicable) {
+      lines.push('仓位 ' + s.contracts + ' 张 / 名义 ' + fmtNum(s.notional_usdt, 0) +
+        ' U / 保证金 ' + fmtNum(s.margin_usdt, 2) + ' U / 止损亏 ' +
+        fmtNum(s.loss_if_stopped_usdt, 2) + ' U');
+    }
+    if (plan.entry_note) lines.push('说明 ' + plan.entry_note);
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('已复制', '交易计划已复制到剪贴板', 'ok');
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      toast('已复制', '交易计划已复制到剪贴板', 'ok');
+    }
   }
 
   async function openFromPlan(plan) {
