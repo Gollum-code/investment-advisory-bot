@@ -149,7 +149,9 @@ class MarketClient:
                 return hit[1]
         val = fn()
         with self._lock:
-            self._cache[key] = (now, val)
+            # 以抓取完成时刻计时，而不是开始时刻：并发抓 K 线时单次可能要好几秒，
+            # 按开始时刻算会让条目一落地就"过期大半"。
+            self._cache[key] = (time.time(), val)
         return val
 
     def _get(self, path: str):
@@ -308,7 +310,6 @@ class MarketClient:
 
         if with_extra:
             # 这几个接口也互相独立，一起并发
-            extra = {}
             jobs = {
                 "funding": lambda: self.funding(symbol),
                 "funding_history": lambda: self.funding_history(symbol, 90),
@@ -317,6 +318,7 @@ class MarketClient:
                 "elite_account": lambda: self.elite_account(symbol, "1day"),
                 "elite_position": lambda: self.elite_position(symbol, "1day"),
             }
+            extra: dict[str, Any] = {}
             with ThreadPoolExecutor(max_workers=6) as pool:
                 futs = {k: pool.submit(v) for k, v in jobs.items()}
                 for k, fut in futs.items():
@@ -326,7 +328,6 @@ class MarketClient:
                         snap.errors.append(f"{k}: {type(exc).__name__}: {exc}")
                         extra[k] = None
 
-        if with_extra:
             f = extra.get("funding") or {}
             if f.get("funding_rate") not in (None, ""):
                 snap.funding_rate = float(f["funding_rate"])

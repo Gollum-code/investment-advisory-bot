@@ -34,8 +34,11 @@ python -m iabot serve --port 9000      :: 换端口
 python -m iabot analyze BTC-USDT       :: 单个合约，终端直接输出计划
 python -m iabot analyze btc --mode swing
 python -m iabot analyze BTC-USDT --json --brief
+python -m iabot analyze BTC-USDT --save     :: 分析后把这条信号写入历史库
 python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT   :: 批量扫描，按信号强度排序
-python -m iabot check                  :: 网络 / 证书 / 行情接口自检
+python -m iabot scan BTC-USDT,ETH-USDT --save    :: 扫描并把有方向的信号写入历史库
+python -m iabot backtest BTC-USDT --mode swing   :: 历史回测，统计胜率与期望值
+python -m iabot check                  :: 网络 / 证书 / 行情接口 / 配置体检
 ```
 
 `analyze` 也接受简写：`python -m iabot btc`。
@@ -48,7 +51,17 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 | `--equity 450` | 账户权益 USDT，覆盖配置 |
 | `--leverage 10` | 杠杆倍数，覆盖配置 |
 | `--risk 2` | 单笔最大亏损占账户百分比 |
+| `--save` | 把本次分析结果写入信号历史库（SQLite，默认 `data/signals.db`） |
 | `--json` / `--brief` | 输出原始 JSON / 不打印因子明细 |
+
+`backtest` 常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--mode swing` | 回测模式（日内按 15min、波段按 1day 重放） |
+| `--bars 300` | 取多少根主周期 K 线做历史 |
+| `--step 3` | 每隔多少根构造一个建仓点（越小越密越慢） |
+| `--json` | 输出含 R 权益曲线的原始 JSON |
 
 ---
 
@@ -62,9 +75,15 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 - **交易建议**：方向 / 评分 / 置信度 / 入场区间 / 止损 / 止盈列表（含每档预计盈利 U）/ 张数 / 保证金 / 盈亏比 / 风险提示。
 - **因子明细**：10 项因子的得分、权重、贡献和文字依据，评分怎么来的看得见。
 - **定时任务**：勾选"启用循环执行"，填间隔秒数和合约列表，保存后后台线程开始轮询；可随时"立即执行一轮"。运行日志与历史信号通过 SSE 实时推送到页面。
-- **多币种速览**：一键扫描关注列表，按 |评分| 排序，点任意一条跳到该币分析。
+- **多币种速览**：一键扫描关注列表，按 |评分| 排序，点任意一条跳到该币分析。顶部有市场情绪条（多空占比）。
+- **信号胜率**：定时任务跑过的信号会被回填结局（先到目标还是先碰止损），按评分档/模式/置信度/币种/生效方案统计胜率与平均 R。
+- **因子权重调参**：网页上拖动 10 个因子的权重滑块与评分阈值，保存到 `config.json`，配合回测与胜率统计找最优组合；可开启"多周期共振"第 11 因子。
+- **参数方案**：把"权重+阈值+模式"打包成命名方案，对同一段历史逐个回测对比期望 R，一键应用到实盘扫描与定时任务。胜率面板按方案分组，实测验证哪个方案真的准。
+- **模拟盘持仓**：手动录入或从分析结果**一键开模拟仓**（自动填入场/止损/止盈/张数）；自动跟踪浮动盈亏，被止损/止盈打掉时自动平仓记录；现价逼近止损时推送预警。带**利润簿**：已平仓盈亏按周/月/总汇总、胜率、权益曲线（扣手续费）。
+- **通知**：配置 Telegram / Bark / 通用 Webhook 后，方向翻转与强信号实时推送（`config.json` 的 `notify` 块）。
+- **导出报告**："导出报告"按钮打开一页自包含 HTML（内联 SVG K 线 + 建议 + 胜率 + 因子），浏览器打印即可存成 PDF，便于存档分享。
 
-网页上改定时任务会写回 `config.json`，重启后依然生效。
+网页上改定时任务、因子权重和参数方案会写回 `config.json`，重启后依然生效。
 
 ---
 
@@ -85,7 +104,16 @@ python -m iabot check                  :: 网络 / 证书 / 行情接口自检
 | `analysis.score_threshold` | 30 | \|评分\| 达到该值才给方向 |
 | `analysis.cache_ttl_sec` | 20 | 同一合约多少秒内重复查询直接复用结果 |
 | `analysis.snapshot_ttl_sec` | 20 | 行情快照保鲜期；定时任务靠它每轮拿到新数据 |
+| `analysis.factor_weights` | 空 | 因子权重覆盖（网页调参后写入）；空=用内置默认 |
+| `analysis.resonance` | 关闭 / 0.06 | 多周期共振第 11 因子开关与权重（日线×1h 偏置） |
+| `analysis.backtest.*` | 开启 | 回测成本模型：手续费 bps、滑点 bps、是否计资金费 |
+| `profiles` / `active_profile` | 空 / 空 | 参数方案集合与当前生效方案（网页管理） |
 | `schedule.*` | 关闭 / 300 秒 / BTC-USDT | 定时任务 |
+| `schedule.dedupe.*` | 1 小时 / 5 分 | 落库去重：冷却期与评分变化阈值，避免同信号刷屏 |
+| `schedule.verify.*` | 开启 | 信号结果回填：多久后开始回填、每轮最多回填多少 |
+| `storage.keep_days` | 30 | 信号历史保留天数，启动与每轮定时任务自动清理 |
+| `auth.token` | 空 | HTTP 访问令牌；设了之后 /api/* 需带 Bearer token（静态页免鉴权） |
+| `notify.*` | 关闭 | 通知：webhook / telegram / bark 渠道与推送阈值 |
 
 ---
 
@@ -164,12 +192,18 @@ iabot/
   market.py      行情抓取（K线/盘口/资金费率/持仓量，带缓存）
   indicators.py  零依赖技术指标（SMA/EMA/RSI/MACD/ATR/ADX/BOLL/VWAP…）
   levels.py      关键价位（摆动点/成交量密集区/斐波那契/挂单墙/整数关口）
-  signals.py     因子打分 + 交易计划生成
-  advisor.py     编排与缓存
-  store.py       SQLite 信号历史
-  scheduler.py   定时任务后台线程
-  server.py      HTTP 服务（REST + SSE + 静态前端）
-  web/           前端（原生 HTML/CSS/JS，无 CDN）
+signals.py     因子打分 + 交易计划生成
+advisor.py     编排与缓存
+outcomes.py    信号结局判定（先到目标还是先碰止损）
+backtest.py    历史回测（含手续费/滑点/资金费成本模型）
+profiles.py    参数方案（权重+阈值+模式）与对比应用
+paper.py       模拟盘持仓追踪
+store.py       SQLite 信号历史 + 模拟持仓
+notify.py      信号通知（Webhook / Telegram / Bark）
+scheduler.py   定时任务后台线程
+report.py      导出 SVG K 线 + HTML 报告
+server.py      HTTP 服务（REST + SSE + 静态前端）
+web/           前端（原生 HTML/CSS/JS，无 CDN）
 tests/           unittest 单元测试
 ```
 

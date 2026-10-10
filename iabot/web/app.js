@@ -78,6 +78,16 @@
     return { long: '做多', short: '做空', wait: '观望' }[d] || d;
   }
 
+  function outcomeLabel(o) {
+    return {
+      tp1: { label: '命中 TP1', good: true },
+      tp2: { label: '命中 TP2', good: true },
+      tp3: { label: '命中 TP3', good: true },
+      stopped: { label: '触发止损', good: false },
+      timeout: { label: '到期未了结', good: false },
+    }[o] || { label: o, good: false };
+  }
+
   function toast(title, body, kind, ms) {
     const wrap = $('toast-wrap');
     const el = document.createElement('div');
@@ -102,13 +112,31 @@
   }
 
   async function api(path, opts) {
-    const res = await fetch(path, opts);
+    opts = opts || {};
+    const token = localStorage.getItem('iabot_token');
+    const hdrs = Object.assign({}, opts.headers || {});
+    if (token) hdrs['Authorization'] = 'Bearer ' + token;
+    if (opts.body && !hdrs['Content-Type']) hdrs['Content-Type'] = 'application/json';
+    const res = await fetch(path, Object.assign({}, opts, { headers: hdrs }));
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
+    if (res.status === 401 && data && data.error && /token|令牌/.test(data.error)) {
+      const again = await askToken();
+      if (again) return api(path, opts);  // 填入 token 后重试
+    }
     if (!res.ok || !data || data.ok === false) {
       throw new Error((data && data.error) || ('HTTP ' + res.status));
     }
     return data;
+  }
+
+  // 服务器要求访问令牌时让用户填一次，记到 localStorage，之后自动带
+  async function askToken() {
+    const cur = localStorage.getItem('iabot_token') || '';
+    const tok = window.prompt('本服务设置了访问令牌，请输入（仅保存在本机浏览器）：', cur);
+    if (tok === null) return false;
+    localStorage.setItem('iabot_token', tok.trim());
+    return true;
   }
 
   function loading(el, text) {
@@ -142,6 +170,10 @@
       loadHealth();
       loadHistory();
       loadSchedule();
+      loadWinStats();
+      loadWeights();
+      loadProfiles();
+      loadPositions();
       analyze(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
@@ -177,6 +209,15 @@
     });
     $('equity').onchange = $('leverage').onchange = $('risk').onchange = () => analyze(true);
     $('btn-run').onclick = runNow;
+    $('btn-test-notify').onclick = testNotify;
+    $('win-days').onchange = () => loadWinStats();
+    $('btn-weights-save').onclick = () => saveWeights(false);
+    $('btn-weights-reset').onclick = () => saveWeights(true);
+    $('btn-prof-save').onclick = saveProfile;
+    $('btn-prof-cmp').onclick = compareProfiles;
+    $('btn-pos-open').onclick = openPosition;
+    $('btn-report').onclick = openReport;
+    $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -505,6 +546,14 @@
       h += '<div class="adv-note">仓位：' + esc(sizing.note) + '</div>';
     }
 
+    // 一键以本计划开模拟仓：把入场/止损/止盈自动带进模拟盘
+    if (plan.direction === 'long' || plan.direction === 'short') {
+      h += '<div class="adv-cta">' +
+        '<button class="ghost open-paper" data-act="open">以本计划开模拟仓</button>' +
+        '<button class="ghost copy-paper" data-act="copy">复制计划</button>' +
+        '<span class="hint">复制计划方便手动下单；仅记录模拟仓位，不下单</span></div>';
+    }
+
     if (plan.invalidation) h += '<div class="adv-note">失效条件：' + esc(plan.invalidation) + '</div>';
     (plan.warnings || []).forEach((t) => { h += '<div class="warnbox">⚠ ' + esc(t) + '</div>'; });
     (plan.notes || []).forEach((t) => { h += '<div class="adv-note">' + esc(t) + '</div>'; });
@@ -513,6 +562,58 @@
     }
     el.innerHTML = h;
     $('card-advice').className = 'card dir-' + dir;
+    const cta = el.querySelector('.open-paper');
+    if (cta) cta.onclick = () => openFromPlan(plan);
+    const cp = el.querySelector('.copy-paper');
+    if (cp) cp.onclick = () => copyPlan(plan);
+  }
+
+  async function copyPlan(plan) {
+    const d = digitsFor(plan.price);
+    const s = plan.sizing || {};
+    const lines = [
+      plan.symbol + ' ' + dirLabel(plan.direction) +
+        '（评分 ' + signed(plan.score) + '，置信度' + plan.confidence + '）',
+      '入场区间 ' + fmtPrice(plan.entry_low, d) + ' - ' + fmtPrice(plan.entry_high, d),
+      '止损 ' + fmtPrice(plan.stop, d) + '（' + fmtNum(plan.stop_pct, 2) + '%）',
+      '盈亏比 ' + fmtNum(plan.rr, 2),
+    ];
+    (plan.targets || []).forEach((t) => {
+      lines.push(t.label + ' ' + fmtPrice(t.price, d) + '（RR ' + fmtNum(t.rr, 2) + '）');
+    });
+    if (s.applicable) {
+      lines.push('仓位 ' + s.contracts + ' 张 / 名义 ' + fmtNum(s.notional_usdt, 0) +
+        ' U / 保证金 ' + fmtNum(s.margin_usdt, 2) + ' U / 止损亏 ' +
+        fmtNum(s.loss_if_stopped_usdt, 2) + ' U');
+    }
+    if (plan.entry_note) lines.push('说明 ' + plan.entry_note);
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('已复制', '交易计划已复制到剪贴板', 'ok');
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      toast('已复制', '交易计划已复制到剪贴板', 'ok');
+    }
+  }
+
+  async function openFromPlan(plan) {
+    const s = plan.sizing || {};
+    $('pos-sym').value = plan.symbol;
+    $('pos-dir').value = plan.direction;
+    $('pos-entry').value = plan.price;
+    if (s.position_coin) $('pos-size').value = s.position_coin;
+    if (s.leverage) $('pos-lev').value = s.leverage;
+    $('pos-stop').value = plan.stop != null ? plan.stop : '';
+    const tp1 = (plan.targets || [])[0];
+    $('pos-tp1').value = tp1 ? tp1.price : '';
+    $('positions').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await openPosition();
   }
 
   function kv(label, value, kind) {
@@ -560,6 +661,24 @@
   }
 
   // ---------------------------------------------------------------- 扫描
+  // ---------------------------------------------------------------- 市场情绪
+  function renderBreadth(b) {
+    if (!b || !b.scanned) return '';
+    const bull = Math.round((b.bull_ratio || 0) * 100);
+    const bear = Math.round((b.bear_ratio || 0) * 100);
+    const sent = { 偏多: 'good', 偏空: 'bad', 中性: '' }[b.sentiment] || '';
+    return '<div class="breadth">' +
+      '<span class="bd-sent ' + sent + '">' + esc(b.sentiment || '--') + '</span>' +
+      '<div class="bd-bar">' +
+      '<i class="long" style="width:' + bull + '%"></i>' +
+      '<i class="short" style="width:' + bear + '%"></i>' +
+      '</div>' +
+      '<span class="bd-nums">' + (b.longs || 0) + ' 多 / ' + (b.shorts || 0) +
+      ' 空 / ' + (b.waits || 0) + ' 观望' +
+      ' · 平均 |评分| ' + fmtNum(b.avg_abs_score, 1) + '</span>' +
+      '</div>';
+  }
+
   async function scan() {
     const btn = $('btn-scan');
     btn.disabled = true;
@@ -575,7 +694,8 @@
       const d = await api('/api/scan?' + q.toString());
       const plans = d.plans || [];
       if (!plans.length) { $('scan').innerHTML = '<div class="empty">没有结果。</div>'; return; }
-      $('scan').innerHTML = plans.map((p) => {
+      const bd = d.breadth || {};
+      $('scan').innerHTML = renderBreadth(bd) + plans.map((p) => {
         const dd = digitsFor(p.price);
         const s = p.sizing || {};
         return '<div class="scan-row ' + p.direction + '" data-sym="' + esc(p.symbol) + '">' +
@@ -680,19 +800,44 @@
     }
   }
 
+  async function testNotify() {
+    const btn = $('btn-test-notify');
+    btn.disabled = true;
+    try {
+      const d = await api('/api/notify/test', { method: 'POST' });
+      const st = d.status || {};
+      if (!st.enabled) toast('未开启', 'notify.enabled 还是 false', 'warn');
+      else if (!st.configured) toast('未配置', '请在 config.json 填 webhook / telegram / bark', 'warn');
+      else if (d.sent > 0) toast('已发送', '已推送 ' + d.sent + ' 个渠道', 'ok');
+      else toast('发送失败', st.last_error || '未知错误', 'err', 6000);
+    } catch (err) {
+      toast('测试失败', err.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   async function loadHistory() {
     try {
       const d = await api('/api/history?limit=60');
       const rows = d.rows || [];
       $('hist-hint').textContent = rows.length + ' 条';
       if (!rows.length) { $('history').innerHTML = '<div class="empty">还没有落库的信号。</div>'; return; }
-      $('history').innerHTML = rows.map((p) =>
-        '<div class="h-item" data-sym="' + esc(p.symbol) + '">' +
+      $('history').innerHTML = rows.map((p) => {
+        let oc = '';
+        if (p.outcome) {
+          const o = outcomeLabel(p.outcome);
+          oc = '<span class="oc ' + (p.outcome === 'stopped' ? 'bad' : (p.outcome === 'timeout' ? 'warn' : 'good')) +
+            '">' + esc(o.label) + '</span>';
+        }
+        return '<div class="h-item" data-sym="' + esc(p.symbol) + '">' +
         '<span class="sym">' + esc(p.symbol) + '</span>' +
         '<span class="dir ' + p.direction + '">' + dirLabel(p.direction) + '</span>' +
         '<span class="sc ' + cls(p.score) + '">' + signed(p.score) + '</span>' +
+        oc +
         '<span class="tm">' + esc(modeLabel(p.mode)) + ' · ' + fmtTime(p.generated_at, true) + '</span>' +
-        '</div>').join('');
+        '</div>';
+      }).join('');
       $('history').onclick = (e) => {
         const it = e.target.closest('.h-item');
         if (!it) return;
@@ -707,8 +852,470 @@
     try {
       await api('/api/history/clear', { method: 'POST' });
       loadHistory();
+      loadWinStats();
       toast('已清空', '', 'ok');
     } catch (err) { toast('清空失败', err.message, 'err'); }
+  }
+
+  // ---------------------------------------------------------------- 胜率统计
+  async function loadWinStats() {
+    const days = $('win-days').value;
+    const q = new URLSearchParams();
+    if (days) q.set('days', days);
+    try {
+      const d = await api('/api/win-stats?' + q.toString());
+      renderWinStats(d.win || {}, d.outcomes || {});
+    } catch (e) {
+      $('win').innerHTML = '<div class="empty">胜率统计加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function _pct(v) { return v == null ? '--' : (v * 100).toFixed(1) + '%'; }
+
+  function _winBars(g) {
+    const n = g.n || 0;
+    if (!n) return '<div class="win-empty">无</div>';
+    const w = g.wins || 0;
+    return '<div class="win-bar" title="胜 ' + w + ' / 负 ' + (g.losses || 0) + '">' +
+      '<i class="w" style="width:' + Math.round((w / n) * 100) + '%"></i>' +
+      '<i class="l" style="width:' + Math.round(((g.losses || 0) / n) * 100) + '%"></i>' +
+      '</div>';
+  }
+
+  function renderWinStats(win, outcomes) {
+    const resolved = win.resolved || 0;
+    const pending = (outcomes && !Object.keys(outcomes).length)
+      ? '' : '';
+    const sum = $('win');
+    if (!resolved) {
+      const done = Object.keys(outcomes || {}).reduce((a, k) => a + outcomes[k], 0);
+      sum.innerHTML = '<div class="empty">还没有已判定的信号结果' +
+        (done ? '（已回填 ' + done + ' 条）' : '') +
+        '。开启定时任务并等待行情推进后，这里会显示胜率。</div>';
+      return;
+    }
+    const wr = win.win_rate != null ? (win.win_rate * 100).toFixed(1) + '%' : '--';
+    const wrCls = win.win_rate == null ? '' : (win.win_rate >= 0.5 ? 'good' : 'bad');
+
+    let html = '<div class="win-kpis">' +
+      '<div class="kpi"><div class="v ' + wrCls + '">' + wr + '</div><div class="k">胜率</div></div>' +
+      '<div class="kpi"><div class="v">' + (win.wins || 0) + '</div><div class="k">到达目标</div></div>' +
+      '<div class="kpi"><div class="v bad">' + (win.losses || 0) + '</div><div class="k">触发止损</div></div>' +
+      '<div class="kpi"><div class="v">' + (win.resolved || 0) + '</div><div class="k">已判定</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_r, 2) + '</div><div class="k">平均 R</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_mfe_pct, 2) + '%</div><div class="k">平均最大浮盈</div></div>' +
+      '<div class="kpi"><div class="v">' + fmtNum(win.avg_mae_pct, 2) + '%</div><div class="k">平均最大浮亏</div></div>' +
+      '</div>';
+
+    function group(title, obj) {
+      const keys = Object.keys(obj || {});
+      if (!keys.length) return '';
+      return '<div class="win-group"><div class="sub-title">' + title + '</div><table class="win-table">' +
+        keys.map((k) => {
+          const g = obj[k];
+          return '<tr><td class="k">' + esc(k) + '</td><td>' + _winBars(g) + '</td>' +
+            '<td class="n">' + (g.n || 0) + '</td>' +
+            '<td class="n ' + (g.win_rate == null ? '' : (g.win_rate >= 0.5 ? 'good' : 'bad')) + '">' +
+            _pct(g.win_rate) + '</td>' +
+            '<td class="n">' + fmtNum(g.avg_r, 2) + '</td></tr>';
+        }).join('') + '</table></div>';
+    }
+
+    html += '<div class="win-groups">' +
+      group('按 |评分| 分档', win.by_score) +
+      group('按模式', win.by_mode) +
+      group('按方案', win.by_profile) +
+      group('按置信度', win.by_confidence) +
+      group('按币种', win.by_symbol) +
+      '</div>';
+    sum.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------- 因子权重调参
+  async function loadWeights() {
+    try {
+      const d = await api('/api/weights');
+      state.weights = d.weights || {};
+      state.weightsDefaults = d.defaults || {};
+      const names = {
+        trend_daily: '日线趋势', trend_intraday: '1小时趋势', momentum: '动量',
+        structure: '摆动结构', vwap: 'VWAP', funding: '资金费率',
+        open_interest: '持仓量', elite: '大户持仓', orderbook: '盘口深度',
+        volatility: '波动率',
+      };
+      const def = d.defaults || {};
+      if (def['score_threshold'] !== undefined) $('score-threshold').value = def['score_threshold'];
+      state.threshold = def['score_threshold'] ?? 30;
+      $('res-enabled').checked = !!def['resonance_enabled'];
+      $('weights').innerHTML = Object.keys(d.weights).map((k) => {
+        const cur = d.weights[k];
+        const isCustom = Math.abs(cur - def[k]) > 1e-9;
+        return '<label class="w-row" title="' + esc(k) + '">' +
+          '<span class="k">' + esc(names[k] || k) + '</span>' +
+          '<input type="range" min="0" max="0.5" step="0.01" value="' + cur +
+          '" data-name="' + esc(k) + '">' +
+          '<span class="v">' + cur.toFixed(2) + '</span>' +
+          (isCustom ? '<span class="tag">自定义</span>' : '') +
+          '</label>';
+      }).join('');
+      $('weights').oninput = (e) => {
+        const input = e.target.closest('input[type=range]');
+        if (!input) return;
+        const v = parseFloat(input.value);
+        input.closest('.w-row').querySelector('.v').textContent = v.toFixed(2);
+        state.weights[input.dataset.name] = v;
+      };
+      setWeightsMsg(d.customized ? '已加载自定义权重（与默认不同）' : '使用默认权重', d.customized ? '' : 'ok');
+    } catch (e) {
+      $('weights').innerHTML = '<div class="empty">权重加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function setWeightsMsg(text, kind) {
+    const el = $('weights-msg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  async function saveWeights(reset) {
+    $('btn-weights-save').disabled = true;
+    try {
+      const data = reset ? {} : (state.weights || {});
+      const thr = reset ? 30 : parseInt($('score-threshold').value || '30', 10);
+      const res_on = reset ? false : $('res-enabled').checked;
+      await api('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysis: {
+          factor_weights: data, score_threshold: thr,
+          resonance: { enabled: res_on, weight: 0.06 },
+        } }),
+      });
+      state.threshold = thr;
+      setWeightsMsg(reset ? '已恢复默认权重与阈值' : '权重与阈值已保存', 'ok');
+      await loadWeights();
+      await loadProfiles();
+      toast('权重' + (reset ? '已重置' : '已保存'), '', 'ok');
+    } catch (err) {
+      setWeightsMsg('保存失败：' + err.message, 'err');
+      toast('保存失败', err.message, 'err');
+    } finally {
+      $('btn-weights-save').disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 导出报告
+  async function openReport() {
+    const btn = $('btn-report');
+    btn.disabled = true;
+    try {
+      const q = new URLSearchParams({ symbol: $('symbol').value, mode: $('mode').value });
+      const token = localStorage.getItem('iabot_token');
+      const hdrs = {};
+      if (token) hdrs['Authorization'] = 'Bearer ' + token;
+      const res = await fetch('/api/report?' + q.toString(), { headers: hdrs });
+      if (!res.ok) {
+        // 未授权时走一次 api() 的弹窗 token 流程后重试
+        if (res.status === 401) {
+          const again = await askToken();
+          if (again) return openReport();
+        }
+        throw new Error('HTTP ' + res.status);
+      }
+      const html = await res.text();
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      toast('导出报告失败', err.message, 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 模拟盘持仓
+  function fillMarkPrice() {
+    const p = state.plan || state.snapshot;
+    const price = (p && (p.price != null ? p.price : (state.snapshot && state.snapshot.price)));
+    if (price) $('pos-entry').value = price;
+  }
+
+  async function openPosition() {
+    const body = {
+      action: 'open',
+      symbol: $('pos-sym').value,
+      direction: $('pos-dir').value,
+      entry_price: parseFloat($('pos-entry').value),
+      size_coin: parseFloat($('pos-size').value),
+      leverage: parseFloat($('pos-lev').value || '1'),
+      stop: $('pos-stop').value ? parseFloat($('pos-stop').value) : null,
+      tp1: $('pos-tp1').value ? parseFloat($('pos-tp1').value) : null,
+    };
+    if (!(body.entry_price > 0) || !(body.size_coin > 0)) {
+      toast('请填写开仓价和数量', '', 'warn'); return;
+    }
+    try {
+      await api('/api/positions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      toast('已开仓', body.symbol + ' ' + body.direction, 'ok');
+      loadPositions();
+    } catch (err) { toast('开仓失败', err.message, 'err'); }
+  }
+
+  async function loadPositions() {
+    try {
+      const d = await api('/api/positions');
+      renderPositions(d.positions || []);
+    } catch (e) {
+      $('positions').innerHTML = '<div class="empty">持仓加载失败：' + esc(e.message) + '</div>';
+    }
+    loadPnl();
+  }
+
+  async function loadPnl() {
+    try {
+      const d = await api('/api/pnl');
+      renderPnl(d.pnl || {});
+    } catch (e) { /* 利润簿加载失败不打断 */ }
+  }
+
+  function renderPnl(p) {
+    const el = $('pnl-book');
+    if (!p || !p.closed_count) {
+      el.innerHTML = '<div class="sub-title">利润簿（已平仓）</div>' +
+        '<div class="empty">还没有平仓记录。平掉一笔模拟仓后这里显示利润簿。</div>';
+      return;
+    }
+    const cls = (v) => (v >= 0 ? 'up' : 'down');
+    const pct = (v) => (v == null ? '--' : (v >= 0 ? '+' : '') + fmtNum(v, 1) + '%');
+    const kpi = [
+      ['总净盈亏', p.total_net_usdt, ' U', cls(p.total_net_usdt)],
+      ['本月', p.month_net_usdt, ' U', cls(p.month_net_usdt)],
+      ['本周', p.week_net_usdt, ' U', cls(p.week_net_usdt)],
+      ['胜率', p.win_rate * 100, '%', cls(p.win_rate - 0.5)],
+      ['已平仓', p.closed_count, ' 笔', ''],
+      ['均盈 / 均亏', p.avg_win_usdt + ' / ' + p.avg_loss_usdt, ' U', ''],
+    ];
+    const kpis = kpi.map(([k, v, u, c]) =>
+      '<div class="kpi"><div class="v ' + c + '">' + (typeof v === 'number' ? fmtNum(v, 1) : v) + u + '</div>' +
+      '<div class="k">' + k + '</div></div>').join('');
+    const curve = (p.equity_curve || []).map((pt) => pt.cum);
+    let svg = '';
+    if (curve.length > 1) {
+      const W = 900, H = 120;
+      const mn = Math.min(0, ...curve), mx = Math.max(...curve);
+      const rng = (mx - mn) || 1;
+      const pts = curve.map((c, i) => {
+        const x = (i / (curve.length - 1)) * W;
+        const y = H - ((c - mn) / rng) * (H - 8) - 4;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      const last = curve[curve.length - 1];
+      svg = '<svg viewBox="0 0 900 120" class="pnl-curve" xmlns="http://www.w3.org/2000/svg">' +
+        '<line x1="0" y1="' + (H - ((0 - mn) / rng) * (H - 8) - 4) + '" x2="900" y2="' +
+        (H - ((0 - mn) / rng) * (H - 8) - 4) + '" stroke="#243055" stroke-dasharray="4 4"/>' +
+        '<polyline points="' + pts + '" fill="none" stroke="' +
+        (last >= 0 ? '#22c55e' : '#ef4444') + '" stroke-width="2"/>' +
+        '<text x="4" y="14" fill="#8f9cbb" font-size="11">累计净盈亏 ' +
+        (last >= 0 ? '+' : '') + fmtNum(last, 1) + ' U</text></svg>';
+    }
+    el.innerHTML = '<div class="sub-title">利润簿（已平仓，扣往返手续费）</div>' +
+      '<div class="win-kpis">' + kpis + '</div>' + svg;
+  }
+
+  function renderPositions(rows) {
+    const el = $('positions');
+    if (!rows.length) { el.innerHTML = '<div class="empty">还没有模拟持仓。</div>'; return; }
+    el.innerHTML = rows.map((p) => {
+      const pnl = p.pnl || {};
+      const up = (pnl.unrealized_pnl_usdt || 0) >= 0;
+      const cls = p.status === 'open' ? (up ? 'up' : 'down') : 'closed';
+      const mark = p.mark_price != null ? fmtPrice(p.mark_price, digitsFor(p.entry_price)) : '--';
+      return '<div class="pos ' + cls + '">' +
+        '<div class="pos-head"><span class="sym">' + esc(p.symbol) + '</span>' +
+        '<span class="dir ' + p.direction + '">' + dirLabel(p.direction) + '</span>' +
+        (p.status === 'open' ? '' : '<span class="tag closed">' + esc(p.close_reason || '已平') + '</span>') +
+        (p.leverage > 1 ? '<span class="lev">' + p.leverage + 'x</span>' : '') +
+        '<span class="pnl ' + (up ? 'up' : 'down') + '">' +
+        (p.status === 'open'
+          ? (up ? '+' : '') + fmtNum(pnl.unrealized_pnl_usdt, 2) + ' U (' + fmtNum(pnl.pnl_of_margin_pct, 1) + '%)'
+          : (p.close_price ? '@ ' + fmtPrice(p.close_price, digitsFor(p.entry_price)) : '')) +
+        '</span></div>' +
+        '<div class="pos-meta">' +
+        '<span>开仓 <b>' + fmtPrice(p.entry_price, digitsFor(p.entry_price)) + '</b></span>' +
+        '<span>现价 <b>' + mark + '</b></span>' +
+        '<span>数量 <b>' + fmtNum(p.size_coin, 4) + '</b></span>' +
+        '<span>保证金 <b>' + fmtNum(pnl.margin_usdt, 2) + ' U</b></span>' +
+        (p.stop ? '<span>止损 <b>' + fmtPrice(p.stop, digitsFor(p.entry_price)) + '</b></span>' : '') +
+        (p.tp1 ? '<span>止盈 <b>' + fmtPrice(p.tp1, digitsFor(p.entry_price)) + '</b></span>' : '') +
+        '</div>' +
+        (p.status === 'open'
+          ? '<button class="ghost tiny pos-close" data-id="' + p.id + '">平仓</button>'
+          : '') +
+        '</div>';
+    }).join('');
+    el.querySelectorAll('.pos-close').forEach((b) => {
+      b.onclick = () => closePosition(b.dataset.id);
+    });
+  }
+
+  async function closePosition(id) {
+    const price = state.plan && state.plan.price;
+    if (!confirm('按现价 ' + (price || '') + ' 平仓该模拟持仓？')) return;
+    try {
+      await api('/api/positions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'close', id, close_price: price, reason: 'manual' }),
+      });
+      toast('已平仓', '', 'ok');
+      loadPositions();
+    } catch (err) { toast('平仓失败', err.message, 'err'); }
+  }
+
+  // ---------------------------------------------------------------- 参数方案
+  async function loadProfiles() {
+    try {
+      const d = await api('/api/profiles');
+      renderProfiles(d.profiles || [], d.active || '', d.current || {});
+    } catch (e) {
+      $('profiles').innerHTML = '<div class="empty">方案加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderProfiles(list, active, current) {
+    const el = $('profiles');
+    if (!list.length) {
+      el.innerHTML = '<div class="empty">还没有方案。调好权重后点"保存当前为方案"。</div>';
+      return;
+    }
+    el.innerHTML = list.map((p) => {
+      return '<div class="prof' + (p.active ? ' active' : '') + '">' +
+        '<div class="prof-head"><span class="nm">' + esc(p.name) + '</span>' +
+        (p.active ? '<span class="tag on">生效中</span>' : '') +
+        '<span class="meta">' + esc(p.mode) + ' · 阈值 ' + p.score_threshold +
+        (p.custom ? ' · ' + p.custom + ' 项权重自定义' : '') + '</span></div>' +
+        (p.note ? '<div class="note">' + esc(p.note) + '</div>' : '') +
+        '<div class="prof-acts">' +
+        '<button class="ghost tiny" data-act="apply" data-name="' + esc(p.name) + '">应用</button>' +
+        '<button class="ghost tiny" data-act="bt" data-name="' + esc(p.name) + '">回测</button>' +
+        '<button class="ghost tiny" data-act="del" data-name="' + esc(p.name) + '">删除</button>' +
+        '</div></div>';
+    }).join('');
+    el.onclick = (e) => {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      const act = b.dataset.act, name = b.dataset.name;
+      if (act === 'apply') applyProfile(name);
+      else if (act === 'del') deleteProfile(name);
+      else if (act === 'bt') backtestProfile(name);
+    };
+  }
+
+  async function saveProfile() {
+    const name = ($('prof-name').value || '').trim();
+    if (!name) { toast('请填方案名', '', 'warn'); return; }
+    try {
+      await api('/api/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save', name,
+          factor_weights: state.weights || {},
+          score_threshold: parseInt($('score-threshold').value || '30', 10),
+          mode: $('mode').value,
+        }),
+      });
+      $('prof-name').value = '';
+      await loadProfiles();
+      toast('方案已保存', name, 'ok');
+    } catch (err) { toast('保存失败', err.message, 'err'); }
+  }
+
+  async function applyProfile(name) {
+    try {
+      await api('/api/profiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'apply', name }),
+      });
+      await loadProfiles();
+      await loadWeights();
+      toast('已应用方案', name, 'ok');
+    } catch (err) { toast('应用失败', err.message, 'err'); }
+  }
+
+  async function deleteProfile(name) {
+    if (!confirm('删除方案 ' + name + '？')) return;
+    try {
+      await api('/api/profiles', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', name }),
+      });
+      await loadProfiles();
+      toast('已删除', name, 'ok');
+    } catch (err) { toast('删除失败', err.message, 'err'); }
+  }
+
+  async function backtestProfile(name) {
+    try {
+      const d = await api('/api/profiles/backtest', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 300, step: 10 }),
+      });
+      const r = d.result || {};
+      const wr = (r.win_rate * 100).toFixed(1);
+      toast('回测 ' + name, '胜率 ' + wr + '% · 期望 ' + (r.expectancy_r >= 0 ? '+' : '') +
+        r.expectancy_r + ' R/笔', r.expectancy_r >= 0 ? 'ok' : 'warn', 6000);
+    } catch (err) { toast('回测失败', err.message, 'err'); }
+  }
+
+  async function compareProfiles() {
+    const el = $('prof-cmp');
+    const btn = $('btn-prof-cmp');
+    btn.disabled = true;
+    el.innerHTML = '<div class="loading">正在对每个方案跑同一段历史回测，逐个约 1-3 秒…</div>';
+    try {
+      const d = await api('/api/profiles/compare', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: $('symbol').value, bars: 300, step: 10 }),
+      });
+      const rows = d.rows || [];
+      if (!rows.length) { el.innerHTML = '<div class="empty">没有可对比的方案。</div>'; return; }
+      const best = rows[0];
+      el.innerHTML = '<div class="sub-title">回测对比（' + rows.length + ' 个，按期望 R 排序，当前合约 ' +
+        $('symbol').value + '）</div>' +
+        '<table class="cmp-table"><tr>' +
+        '<th>方案</th><th>胜率</th><th>期望 R</th><th>笔数</th><th>平均持仓</th><th>成本 R</th><th></th></tr>' +
+        rows.map((r, i) => {
+          const res = r.result || {};
+          const exp = res.expectancy_r || 0;
+          const active = r.active ? '<span class="tag on">生效中</span>' : '';
+          const top = i === 0 ? '<span class="tag on">最优</span>' : '';
+          return '<tr class="' + (i === 0 ? 'best' : '') + '">' +
+            '<td class="k">' + esc(r.name) + active + ' ' + top + '</td>' +
+            '<td>' + fmtNum((res.win_rate || 0) * 100, 1) + '%</td>' +
+            '<td class="' + (exp >= 0 ? 'good' : 'bad') + '">' + (exp >= 0 ? '+' : '') +
+            fmtNum(exp, 3) + '</td>' +
+            '<td>' + (res.trades || 0) + '</td>' +
+            '<td>' + fmtNum(res.avg_holding_h, 1) + 'h</td>' +
+            '<td>' + fmtNum(res.avg_cost_r, 3) + '</td>' +
+            '<td><button class="ghost tiny" data-act="apply" data-name="' + esc(r.name) +
+            '">应用</button></td></tr>';
+        }).join('') + '</table>';
+      el.querySelectorAll('button[data-act=apply]').forEach((b) => {
+        b.onclick = () => {
+          if (b.dataset.name === '当前参数') { toast('当前参数已在生效', '', 'warn'); return; }
+          applyProfile(b.dataset.name);
+        };
+      });
+    } catch (err) {
+      el.innerHTML = '<div class="empty">对比失败：' + esc(err.message) + '</div>';
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ---------------------------------------------------------------- 日志 / SSE
@@ -725,7 +1332,8 @@
 
   function connectSSE() {
     if (!window.EventSource) { setPill('pill-sse', '实时流 不支持', 'bad'); return; }
-    const es = new EventSource('/api/stream');
+    const tok = localStorage.getItem('iabot_token');
+    const es = new EventSource('/api/stream' + (tok ? ('?token=' + encodeURIComponent(tok)) : ''));
     state.es = es;
     es.onopen = () => setPill('pill-sse', '实时流 已连接', 'ok');
     es.onerror = () => setPill('pill-sse', '实时流 重连中…', 'warn');
@@ -744,8 +1352,15 @@
           (p.rr != null ? ' RR ' + fmtNum(p.rr, 2) : ''));
         loadHistory();
       } else if (d.type === 'run_done') {
-        logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's');
+        logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's' +
+          (d.verified ? '，回填 ' + d.verified + ' 条' : ''));
         loadSchedule();
+      } else if (d.type === 'outcome') {
+        const oc = outcomeLabel(d.outcome);
+        logLine(oc.good ? 'ok' : 'err', d.symbol + ' ' + oc.label +
+          (d.mfe_pct != null ? ' 最大浮盈 ' + fmtNum(d.mfe_pct, 2) + '%' : ''));
+        loadWinStats();
+        loadHistory();
       } else if (d.type === 'skip') {
         logLine('warn', '跳过：' + (d.reason || ''));
       } else if (d.type === 'error') {

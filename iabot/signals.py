@@ -17,9 +17,9 @@ import time as _time
 from dataclasses import dataclass, field
 
 from . import indicators as ind
-from .levels import (Level, atr_stop_buffer, fib_levels, merge_levels,
-                     moving_average_levels, orderbook_walls, price_ladder,
-                     round_number_levels, swing_points, top_volume_nodes)
+from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
+                     orderbook_walls, price_ladder, round_number_levels,
+                     swing_points, top_volume_nodes)
 from .market import Snapshot, bars_per_year
 
 # tanh 归一化尺度：加权均值除以它之后过 tanh。
@@ -75,6 +75,7 @@ class Plan:
     direction: str = "wait"          # long | short | wait
     score: float = 0.0               # -100 .. +100
     confidence: str = "低"
+    confidence_score: float = 0.0    # 0-100 数值置信度（同向因子加权占比 × 评分强度）
     entry_low: float | None = None
     entry_high: float | None = None
     entry_note: str = ""
@@ -93,6 +94,7 @@ class Plan:
     gate: dict = field(default_factory=dict)
     price: float | None = None
     generated_at: float = 0.0
+    profile: str = ""
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "factors"}
@@ -325,17 +327,131 @@ def _f_volatility(snap: Snapshot) -> Factor:
     return Factor("volatility", "波动率", score, 0.05, "；".join(detail) or "无数据")
 
 
-FACTOR_FNS = [_f_trend, _f_intraday, _f_momentum, _f_structure, _f_vwap,
-              _f_funding, _f_oi, _f_elite, _f_orderbook, _f_volatility]
+# (因子函数, 是否需要现价)。只有盘口因子额外要一个 price 参数，
+# 显式写在这里，比在调用处做 `fn is _f_orderbook` 的标识比较更不容易出错。
+FACTOR_FNS = [
+    (_f_trend, False), (_f_intraday, False), (_f_momentum, False),
+    (_f_structure, False), (_f_vwap, False), (_f_funding, False),
+    (_f_oi, False), (_f_elite, False), (_f_orderbook, True), (_f_volatility, False),
+]
+
+# 因子内部硬编码的默认权重；config 的 analysis.factor_weights 可覆盖同名项。
+FACTOR_DEFAULTS = {
+    "trend_daily": 0.20, "trend_intraday": 0.12, "momentum": 0.15,
+    "structure": 0.14, "vwap": 0.08, "funding": 0.10,
+    "open_interest": 0.09, "elite": 0.12, "orderbook": 0.07, "volatility": 0.05,
+}
+
+# 多周期共振因子是可选的第 11 个因子（默认关闭，保持 10 因子模型）。
+# 权重独立于 FACTOR_DEFAULTS，不进权重滑块面板。
+RESONANCE_DEFAULT_WEIGHT = 0.06
 
 
-def compute_factors(snap: Snapshot) -> list[Factor]:
+def _bias_daily(snap: Snapshot) -> float:
+    """日线方向偏置 [-1,1]：现价相对均线/EMA 的位置。"""
+    cs = snap.closes("1day")
+    if len(cs) < 30:
+        return 0.0
+    price = snap.price or cs[-1]
+    pts, w = 0.0, 0.0
+    for v, wt in ((ind.last(ind.sma(cs, 20)), 1.0),
+                  (ind.last(ind.sma(cs, 50)), 1.2),
+                  (ind.last(ind.sma(cs, 200)), 1.5)):
+        if v:
+            pts += wt if price > v else -wt
+            w += wt
+    e12, e26 = ind.last(ind.ema(cs, 12)), ind.last(ind.ema(cs, 26))
+    if e12 and e26:
+        pts += 0.8 if e12 > e26 else -0.8
+        w += 0.8
+    return max(-1.0, min(1.0, pts / w)) if w else 0.0
+
+
+def _bias_intraday(snap: Snapshot) -> float:
+    """60min 方向偏置 [-1,1]。"""
+    cs = snap.closes("60min")
+    if len(cs) < 30:
+        return 0.0
+    price = snap.price or cs[-1]
+    pts, w = 0.0, 0.0
+    for v, wt in ((ind.last(ind.sma(cs, 20)), 1.0), (ind.last(ind.sma(cs, 50)), 1.2)):
+        if v:
+            pts += wt if price > v else -wt
+            w += wt
+    _, _, hist = ind.macd(cs)
+    h = ind.last(hist)
+    if h is not None:
+        pts += 0.9 if h > 0 else -0.9
+        w += 0.9
+    return max(-1.0, min(1.0, pts / w)) if w else 0.0
+
+
+def _f_resonance(snap: Snapshot, weight: float) -> Factor:
+    """多周期共振 = 日线偏置 × 60min 偏置。
+
+    同向（都多或都空）-> 正，表示趋势共振，顺势信号更可靠；
+    背离 -> 负，表示在逆着高周期做，要谨慎。
+    """
+    hi = _bias_daily(snap)
+    lo = _bias_intraday(snap)
+    score = max(-1.0, min(1.0, hi * lo))
+    if hi == 0 or lo == 0:
+        detail = f"共振无法判断（日线偏置 {hi:+.2f} / 1h 偏置 {lo:+.2f}）"
+    else:
+        same = "同向共振" if score > 0 else "周期背离"
+        detail = f"{same}：日线 {hi:+.2f} × 1h {lo:+.2f}"
+    return Factor("resonance", "多周期共振", score, weight, detail)
+
+
+def apply_factor_weights(factors: list[Factor], weights: dict | None = None) -> list[Factor]:
+    """按 config 里的权重覆盖因子的 weight（只覆盖存在且 >0 的项）。"""
+    if not weights:
+        return factors
+    for f in factors:
+        w = weights.get(f.name)
+        if w is not None and float(w) > 0:
+            f.weight = float(w)
+    return factors
+
+
+def _confidence_score(factors: list[Factor], score: float, direction: str, agree: int) -> float:
+    """0-100 置信度。
+
+    两部分相乘：
+    - 一致度 = 与方向同向的因子权重占比（0-1），用权重而非个数，
+      避免一个低权重因子和日线趋势被等同看待；
+    - 强度 = tanh(|score|/70)，把评分饱和到 0-1。
+    一致但评分不强、或评分强但因子打架，都拿不到高置信度。
+    """
+    total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0
+    if direction == "wait":
+        return 0.0
+    long = direction == "long"
+    agree_w = sum(f.weight for f in factors
+                  if abs(f.score) > 0.05 and (f.score > 0) == long)
+    consensus = agree_w / total_w
+    intensity = math.tanh(abs(score) / 70.0)
+    return round(100.0 * consensus * intensity, 1)
+
+
+def _confidence_label(cs: float) -> str:
+    return "高" if cs >= 60 else ("中" if cs >= 40 else "低")
+
+
+def compute_factors(snap: Snapshot, *, resonance: bool = False,
+                    resonance_weight: float = RESONANCE_DEFAULT_WEIGHT) -> list[Factor]:
     out: list[Factor] = []
-    for fn in FACTOR_FNS:
+    for fn, needs_price in FACTOR_FNS:
         try:
-            out.append(fn(snap, snap.price) if fn is _f_orderbook else fn(snap))
+            out.append(fn(snap, snap.price) if needs_price else fn(snap))
         except Exception as exc:
             out.append(Factor(fn.__name__.replace("_f_", ""), "计算异常", 0.0, 0.0,
+                              f"{type(exc).__name__}: {exc}"))
+    if resonance:
+        try:
+            out.append(_f_resonance(snap, resonance_weight))
+        except Exception as exc:
+            out.append(Factor("resonance", "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))
     return out
 
@@ -428,13 +544,21 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     threshold = float((cfg.get("analysis") or {}).get("score_threshold") or 30)
 
     plan = Plan(symbol=snap.symbol, mode=mode, price=snap.price, generated_at=_time.time())
+    # 记录当前生效的参数方案（若有），胜率统计按方案分组时用
+    plan.profile = cfg.get("active_profile") or ""
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
         return plan
 
     price = snap.price
-    factors = compute_factors(snap)
+    an = cfg.get("analysis") or {}
+    res_cfg = an.get("resonance") or {}
+    factors = apply_factor_weights(
+        compute_factors(snap,
+                        resonance=bool(res_cfg.get("enabled")),
+                        resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT)),
+        an.get("factor_weights"))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)
     total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0
@@ -490,6 +614,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
 
     if plan.direction == "wait":
         plan.confidence = "低"
+        plan.confidence_score = 0.0
         plan.entry_note = f"评分 {plan.score:+.0f} 未达到 ±{threshold:.0f} 阈值，方向不明。"
         if dn and up:
             plan.entry_note += f" 关注区间 {dn[0]['price']:,.2f} – {up[0]['price']:,.2f}。"
@@ -608,8 +733,9 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     agree = sum(1 for f in factors
                 if abs(f.score) > 0.1 and (f.score > 0) == (plan.direction == "long"))
     strong = sum(1 for f in factors if abs(f.score) > 0.4)
-    plan.confidence = ("高" if (abs(plan.score) >= 60 and agree >= 6)
-                       else ("中" if abs(plan.score) >= 45 else "低"))
+    conf_score = _confidence_score(factors, plan.score, plan.direction, agree)
+    plan.confidence = _confidence_label(conf_score)
+    plan.confidence_score = conf_score
     plan.notes.append(f"{len(factors)} 个因子中 {agree} 个与方向一致，其中 {strong} 个为强信号。")
     plan.notes.append(f"信号强度：{'很强' if abs(plan.score) >= 70 else ('较强' if abs(plan.score) >= 50 else '一般')}"
                       f"；止损用 {stop_mult}×ATR({m['atr_period']})。")
@@ -685,6 +811,7 @@ def _downgrade(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
     """把计划降级为观望，并清掉会误导人的入场/止损数据。"""
     plan.direction = "wait"
     plan.confidence = "低"
+    plan.confidence_score = 0.0
     plan.entry_note = reason
     plan.entry_low = plan.entry_high = None
     plan.stop = None
