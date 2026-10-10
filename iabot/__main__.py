@@ -315,10 +315,11 @@ def cmd_backtest(args) -> int:
         print(f"[错误] 拉取历史失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     t0 = time.time()
+    bt_acc = _account_from(args)
     res = backtest(snap, cfg, mode=args.mode, step=args.step,
                    warmup=args.warmup, max_points=2000,
-                   equity_usdt=_account_from(args).get("equity_usdt"),
-                   risk_pct=_account_from(args).get("risk_pct_per_trade"))
+                   equity_usdt=bt_acc.get("equity_usdt"),
+                   risk_pct=bt_acc.get("risk_pct_per_trade"))
     ms = (time.time() - t0) * 1000
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))

@@ -52,6 +52,7 @@ class Scheduler:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._last_purge: float = 0.0
         self._subs: list[Callable[[dict], None]] = []
         self._sub_lock = threading.Lock()
         self._run_lock = threading.Lock()
@@ -129,8 +130,12 @@ class Scheduler:
             if not sym:
                 continue
             period = "60min"
+            # K 线窗口按持仓年龄自适应：固定 100 根只覆盖约 4 天，
+            # 波段持仓（数天~数周）中途程序停过会漏判止损，这里多取一些。
+            age_h = (time.time() - (pos.get("opened_at") or time.time())) / 3600.0
+            size = max(100, min(1000, int(age_h / 1.0) + 10))
             try:
-                candles = self.advisor.client.kline(sym, period, 100)
+                candles = self.advisor.client.kline(sym, period, size)
             except Exception as exc:
                 self.last_error = f"position {sym}: {type(exc).__name__}: {exc}"
                 continue
@@ -242,7 +247,11 @@ class Scheduler:
             self.run_count += 1
             self.last_run = time.time()
             try:
-                purged = self.store.purge_old()  # 按 keep_days 清理过期历史
+                # 按 keep_days 清理过期历史：降频到每小时一次，避免每轮都扫表
+                purged = 0
+                if time.time() - self._last_purge > 3600:
+                    purged = self.store.purge_old()
+                    self._last_purge = time.time()
             except Exception:
                 purged = 0
             self._emit({"type": "run_done", "ts": self.last_run,
