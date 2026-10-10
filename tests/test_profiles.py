@@ -4,7 +4,7 @@ import copy
 import unittest
 
 from iabot.config import DEFAULTS
-from iabot.profiles import ProfileStore, cfg_with_profile
+from iabot.profiles import ProfileStore, cfg_with_profile, backtest_all
 from iabot.signals import FACTOR_DEFAULTS
 
 
@@ -68,6 +68,38 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(out["analysis"]["factor_weights"]["trend_daily"], 0.5)
         # 原 cfg 不变
         self.assertEqual(cfg["analysis"]["score_threshold"], 30)
+
+    def test_backtest_all_compares_sorted(self):
+        from iabot.backtest import backtest
+        from iabot.market import Snapshot
+        import random
+
+        # 构造一份小历史快照（只要能跑 backtest 即可）
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["analysis"]["score_threshold"] = 15
+        ps = ProfileStore(cfg)
+        ps.save("进取", factor_weights={"momentum": 0.4}, score_threshold=20,
+                mode="intraday")
+
+        rnd = random.Random(3)
+        closes = [30000.0]
+        for i in range(120):
+            closes.append(closes[-1] * (1 + rnd.uniform(-0.02, 0.02)))
+        k = [__import__("iabot.market", fromlist=["Candle"]).Candle(
+            ts=1_700_000_000 + i * 900, open=c, high=c * 1.01, low=c * 0.99,
+            close=c, volume=1000.0) for i, c in enumerate(closes)]
+        snap = Snapshot(symbol="BTC-USDT", price=closes[-1],
+                        klines={"15min": k, "60min": k, "1day": k},
+                        contract_size=0.001, funding_rate=0.0001)
+
+        rows = backtest_all(cfg, snapshot=snap, symbol="BTC-USDT",
+                            bars=300, step=8)
+        names = [r["name"] for r in rows]
+        self.assertIn("当前参数", names)
+        self.assertIn("进取", names)
+        # 按期望 R 降序
+        exps = [r["result"]["expectancy_r"] for r in rows]
+        self.assertEqual(exps, sorted(exps, reverse=True))
 
 
 if __name__ == "__main__":

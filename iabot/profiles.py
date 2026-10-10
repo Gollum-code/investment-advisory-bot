@@ -121,3 +121,30 @@ def cfg_with_profile(cfg: dict, profile: dict | None) -> dict:
     an["score_threshold"] = float(profile.get("score_threshold") or 30)
     out.setdefault("schedule", {})["mode"] = profile.get("mode") or "intraday"
     return out
+
+
+def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 300,
+                 step: int = 10) -> list[dict]:
+    """对当前参数 + 所有已保存方案，在同一段历史上逐个回测并排序。
+
+    snapshot 复用同一份历史快照（各方案只改权重/阈值/模式），结果可比。
+    """
+    from .backtest import backtest
+
+    ps = ProfileStore(cfg)
+    rows: list[dict] = []
+    base = {"name": "当前参数", "active": True if ps.active else False,
+            "mode": (cfg.get("schedule") or {}).get("mode") or "intraday",
+            "score_threshold": (cfg.get("analysis") or {}).get("score_threshold") or 30,
+            "profile": None}
+    prof_cfg = cfg_with_profile(cfg, None)
+    res = backtest(snapshot, prof_cfg, mode=base["mode"], step=step, max_points=2000)
+    rows.append({**base, "result": res.to_dict()})
+    for p in ps.list():
+        r = backtest(snapshot, cfg_with_profile(cfg, p), mode=p["mode"],
+                     step=step, max_points=2000)
+        rows.append({"name": p["name"], "active": p["active"], "mode": p["mode"],
+                     "score_threshold": p["score_threshold"],
+                     "profile": p, "result": r.to_dict()})
+    rows.sort(key=lambda x: -(x["result"].get("expectancy_r") or -999))
+    return rows

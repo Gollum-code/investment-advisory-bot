@@ -214,6 +214,7 @@
     $('btn-weights-save').onclick = () => saveWeights(false);
     $('btn-weights-reset').onclick = () => saveWeights(true);
     $('btn-prof-save').onclick = saveProfile;
+    $('btn-prof-cmp').onclick = compareProfiles;
     $('btn-pos-open').onclick = openPosition;
     $('btn-report').onclick = openReport;
     $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
@@ -1232,6 +1233,52 @@
       toast('回测 ' + name, '胜率 ' + wr + '% · 期望 ' + (r.expectancy_r >= 0 ? '+' : '') +
         r.expectancy_r + ' R/笔', r.expectancy_r >= 0 ? 'ok' : 'warn', 6000);
     } catch (err) { toast('回测失败', err.message, 'err'); }
+  }
+
+  async function compareProfiles() {
+    const el = $('prof-cmp');
+    const btn = $('btn-prof-cmp');
+    btn.disabled = true;
+    el.innerHTML = '<div class="loading">正在对每个方案跑同一段历史回测，逐个约 1-3 秒…</div>';
+    try {
+      const d = await api('/api/profiles/compare', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: $('symbol').value, bars: 300, step: 10 }),
+      });
+      const rows = d.rows || [];
+      if (!rows.length) { el.innerHTML = '<div class="empty">没有可对比的方案。</div>'; return; }
+      const best = rows[0];
+      el.innerHTML = '<div class="sub-title">回测对比（' + rows.length + ' 个，按期望 R 排序，当前合约 ' +
+        $('symbol').value + '）</div>' +
+        '<table class="cmp-table"><tr>' +
+        '<th>方案</th><th>胜率</th><th>期望 R</th><th>笔数</th><th>平均持仓</th><th>成本 R</th><th></th></tr>' +
+        rows.map((r, i) => {
+          const res = r.result || {};
+          const exp = res.expectancy_r || 0;
+          const active = r.active ? '<span class="tag on">生效中</span>' : '';
+          const top = i === 0 ? '<span class="tag on">最优</span>' : '';
+          return '<tr class="' + (i === 0 ? 'best' : '') + '">' +
+            '<td class="k">' + esc(r.name) + active + ' ' + top + '</td>' +
+            '<td>' + fmtNum((res.win_rate || 0) * 100, 1) + '%</td>' +
+            '<td class="' + (exp >= 0 ? 'good' : 'bad') + '">' + (exp >= 0 ? '+' : '') +
+            fmtNum(exp, 3) + '</td>' +
+            '<td>' + (res.trades || 0) + '</td>' +
+            '<td>' + fmtNum(res.avg_holding_h, 1) + 'h</td>' +
+            '<td>' + fmtNum(res.avg_cost_r, 3) + '</td>' +
+            '<td><button class="ghost tiny" data-act="apply" data-name="' + esc(r.name) +
+            '">应用</button></td></tr>';
+        }).join('') + '</table>';
+      el.querySelectorAll('button[data-act=apply]').forEach((b) => {
+        b.onclick = () => {
+          if (b.dataset.name === '当前参数') { toast('当前参数已在生效', '', 'warn'); return; }
+          applyProfile(b.dataset.name);
+        };
+      });
+    } catch (err) {
+      el.innerHTML = '<div class="empty">对比失败：' + esc(err.message) + '</div>';
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ---------------------------------------------------------------- 日志 / SSE

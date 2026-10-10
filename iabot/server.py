@@ -498,6 +498,26 @@ def make_handler(app: App):
                 return self._json({"ok": True, "deleted": ok})
             return self._err("action 必须是 open/close/delete", 400)
 
+        def _profiles_compare(self, body: dict):
+            from .symbols import to_contract as _to_contract
+            from .profiles import backtest_all
+
+            symbol = _to_contract(body.get("symbol") or "BTC-USDT")
+            bars = max(120, min(500, int(body.get("bars") or 300)))
+            step = max(1, min(50, int(body.get("step") or 10)))
+            periods = (app.cfg.get("analysis") or {}).get("tf_periods") or ["60min", "1day"]
+            try:
+                snap = app.advisor.client.snapshot(symbol, periods=periods,
+                                                   kline_size=bars)
+            except Exception as exc:
+                return self._err(f"拉取历史失败: {exc}", 502)
+            import time as _t
+            t0 = _t.time()
+            rows = backtest_all(app.cfg, snapshot=snap, symbol=symbol,
+                                bars=bars, step=step)
+            return self._json({"ok": True, "rows": rows,
+                               "ms": round((_t.time() - t0) * 1000)})
+
         # ---------------- POST ----------------
         def do_POST(self):
             u = urlparse(self.path)
@@ -537,6 +557,9 @@ def make_handler(app: App):
 
                 if path == "/api/profiles/backtest":
                     return self._profiles_backtest(body)
+
+                if path == "/api/profiles/compare":
+                    return self._profiles_compare(body)
 
                 if path == "/api/positions":
                     return self._handle_position(body)
