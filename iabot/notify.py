@@ -156,6 +156,14 @@ class Notifier:
         title = f"[iabot] {plan.get('symbol')} {score:+.0f}"
         return self.send(title, render_signal(plan))
 
+    def notify_position_warning(self, symbol: str, distance_stop_pct: float,
+                                mark_price: float | None = None,
+                                stop_price: float | None = None) -> int:
+        """持仓逼近关键位的预警（距止损/止盈很近时提醒盯盘）。"""
+        txt = (f"{symbol} 现价 {mark_price} 距止损 {stop_price} 还有 "
+               f"{distance_stop_pct:.2f}%，注意止损风险")
+        return self.send(f"[iabot] {symbol} 接近止损", txt)
+
     def notify_outcome(self, symbol: str, outcome: str, *, mfe_pct=None, mae_pct=None) -> int:
         label = {"tp1": "命中 TP1", "tp2": "命中 TP2", "tp3": "命中 TP3",
                  "stopped": "触发止损", "timeout": "到期未了结"}.get(outcome, outcome)

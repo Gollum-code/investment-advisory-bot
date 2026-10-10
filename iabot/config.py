@@ -84,6 +84,12 @@ DEFAULTS: dict[str, Any] = {
             "min_age_sec": 900,      # 信号生成多久之后才开始回填
             "max_per_run": 50,       # 每轮最多回填多少条
         },
+        # 持仓接近止损预警：现价进入止损附近 pct% 内时推通知（每仓有冷却）
+        "warn_near_stop": {
+            "enabled": True,
+            "pct": 1.5,              # 距止损小于该百分比时预警
+            "cooldown_sec": 1800,    # 同一仓位两次预警的最小间隔
+        },
     },
 
     "storage": {

@@ -70,6 +70,11 @@
       "enabled": true,
       "min_age_sec": 900,
       "max_per_run": 50
+    },
+    "warn_near_stop": {
+      "enabled": true,
+      "pct": 1.5,
+      "cooldown_sec": 1800
     }
   },
   "storage": {

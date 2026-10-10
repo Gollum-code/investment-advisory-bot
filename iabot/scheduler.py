@@ -42,6 +42,12 @@ class Scheduler:
         self.verify_enabled: bool = bool(v.get("enabled", True))
         self.verify_min_age: float = float(v.get("min_age_sec") or 900)
         self.verify_max: int = int(v.get("max_per_run") or 50)
+        # 持仓接近止损预警
+        w = sc.get("warn_near_stop") or {}
+        self.warn_near_stop_enabled: bool = bool(w.get("enabled", True))
+        self.warn_near_stop_pct: float = float(w.get("pct", 1.5))
+        self.warn_cooldown_sec: float = float(w.get("cooldown_sec", 1800))
+        self._warned: dict[int, float] = {}
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -130,17 +136,46 @@ class Scheduler:
                 continue
             hit = check_exit(pos, candles or [])
             if not hit:
+                # 还没被打掉 -> 若现价逼近止损则预警（按 cooldown 去重）
+                self._maybe_warn_near_stop(pos, candles or [])
                 continue
             reason = hit["reason"]
             close_reason = "stop" if reason == "stop" else f"tp{hit.get('tp_index', 1)}"
             self.store.close_position(pos["id"], price=hit["price"],
                                        reason=close_reason, closed_at=hit.get("ts"))
             closed += 1
+            self._warned.pop(pos["id"], None)
             self.notifier.notify_outcome(sym, close_reason)
             self._emit({"type": "position_closed", "ts": hit.get("ts"),
                         "symbol": sym, "position_id": pos["id"],
                         "reason": close_reason, "price": hit["price"]})
         return closed
+
+    def _maybe_warn_near_stop(self, pos: dict, candles: list) -> None:
+        """现价进入止损附近 warn_pct% 内则预警，per-position cooldown 去重。"""
+        if not self.warn_near_stop_enabled or not pos.get("stop") or not candles:
+            return
+        mark = candles[-1].close
+        stop = float(pos["stop"])
+        if not mark or mark <= 0:
+            return
+        if pos.get("direction") == "long":
+            if mark <= stop:
+                return          # 已经被打掉（下一轮 check_exit 会平）
+            dist = (1.0 - stop / mark) * 100.0   # 止损在下方，距离为正
+        else:
+            dist = (stop / mark - 1.0) * 100.0   # 止损在上方，距离为正
+        if dist > self.warn_near_stop_pct:
+            return
+        now = time.time()
+        last = self._warned.get(pos["id"], 0.0)
+        if now - last < self.warn_cooldown_sec:
+            return
+        self._warned[pos["id"]] = now
+        self.notifier.notify_position_warning(
+            pos.get("symbol", "?"), dist, mark_price=mark, stop_price=stop)
+        self._emit({"type": "position_warn", "ts": now, "symbol": pos.get("symbol"),
+                    "position_id": pos["id"], "distance_pct": round(dist, 2)})
 
     def _verify_pending(self) -> int:
         """回填上一轮留下、尚未判定结局的信号（用后续 K 线判断先到止损还是先到目标）。"""

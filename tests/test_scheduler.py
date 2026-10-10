@@ -119,5 +119,48 @@ class TestVerify(SchedulerTestBase):
         self.assertEqual(self.store.outcome_counts(), {})
 
 
+class TestNearStopWarn(SchedulerTestBase):
+    def _open_long_stop95(self, opened_ts):
+        pid = self.store.open_position(symbol="BTC-USDT", direction="long",
+                                       entry_price=100, size_coin=1, stop=95)
+        with self.store._lock:
+            self.store._conn.execute("UPDATE positions SET opened_at=?", (opened_ts,))
+            self.store._conn.commit()
+        return pid
+
+    def test_warns_when_mark_near_stop(self):
+        # 现价 95.5，止损 95 -> 距离 0.52% < 1.5% -> 应预警
+        pid = self._open_long_stop95(time.time() - 3600)
+        sch = self._scheduler(client=FakeClient([_candle(int(time.time()) - 60, 95.5, 96, 95.2, 95.5)]),
+                              warn_near_stop={"enabled": True, "pct": 1.5, "cooldown_sec": 1800})
+        sch._check_positions()
+        # 未被平仓（95.5 > 95），但应进 _warned 去重表
+        self.assertEqual(len(self.store.positions(status="open")), 1)
+        self.assertIn(pid, sch._warned)
+
+    def test_no_warn_when_far_from_stop(self):
+        pid = self._open_long_stop95(time.time() - 3600)
+        sch = self._scheduler(client=FakeClient([_candle(int(time.time()) - 60, 97, 97.5, 96.5, 97)]),
+                              warn_near_stop={"enabled": True, "pct": 1.5})
+        sch._check_positions()
+        self.assertNotIn(pid, sch._warned)
+
+    def test_warn_cooldown(self):
+        pid = self._open_long_stop95(time.time() - 3600)
+        candle = _candle(int(time.time()) - 60, 95.5, 96, 95.2, 95.5)
+        sch = self._scheduler(client=FakeClient([candle]),
+                              warn_near_stop={"enabled": True, "pct": 1.5, "cooldown_sec": 3600})
+        sch._check_positions()
+        sch._check_positions()  # 冷却期内不应重复预警 -> _warned 次数仍为 1
+        self.assertEqual(len([x for x in sch._warned if x == pid]), 1)
+
+    def test_warn_disabled(self):
+        pid = self._open_long_stop95(time.time() - 3600)
+        sch = self._scheduler(client=FakeClient([_candle(int(time.time()) - 60, 95.5, 96, 95.2, 95.5)]),
+                              warn_near_stop={"enabled": False, "pct": 1.5})
+        sch._check_positions()
+        self.assertNotIn(pid, sch._warned)
+
+
 if __name__ == "__main__":
     unittest.main()
