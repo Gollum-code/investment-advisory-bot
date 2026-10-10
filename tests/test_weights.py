@@ -43,6 +43,17 @@ class TestApplyWeights(unittest.TestCase):
         by = {f.name: f.weight for f in plan.factors}
         self.assertEqual(by["trend_daily"], 0.5)
 
+    def test_plan_records_active_profile(self):
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["active_profile"] = "进取"
+        plan = build_plan(make_snapshot(**UP), cfg, mode="intraday")
+        self.assertEqual(plan.profile, "进取")
+        self.assertEqual(plan.to_dict()["profile"], "进取")
+        # 未设置 -> 空字符串
+        cfg["active_profile"] = ""
+        plan2 = build_plan(make_snapshot(**UP), cfg, mode="intraday")
+        self.assertEqual(plan2.profile, "")
+
 
 class TestResonance(unittest.TestCase):
     def test_disabled_by_default(self):

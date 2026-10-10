@@ -94,6 +94,7 @@ class Plan:
     gate: dict = field(default_factory=dict)
     price: float | None = None
     generated_at: float = 0.0
+    profile: str = ""
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "factors"}
@@ -543,6 +544,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     threshold = float((cfg.get("analysis") or {}).get("score_threshold") or 30)
 
     plan = Plan(symbol=snap.symbol, mode=mode, price=snap.price, generated_at=_time.time())
+    # 记录当前生效的参数方案（若有），胜率统计按方案分组时用
+    plan.profile = cfg.get("active_profile") or ""
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)

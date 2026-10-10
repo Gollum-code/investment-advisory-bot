@@ -886,6 +886,7 @@
     html += '<div class="win-groups">' +
       group('按 |评分| 分档', win.by_score) +
       group('按模式', win.by_mode) +
+      group('按方案', win.by_profile) +
       group('按置信度', win.by_confidence) +
       group('按币种', win.by_symbol) +
       '</div>';

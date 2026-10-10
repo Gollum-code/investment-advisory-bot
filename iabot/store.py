@@ -270,9 +270,9 @@ class SignalStore:
         }
 
     def win_stats(self, *, days: int | None = None, limit: int = 20000) -> dict:
-        """已回填信号的胜率统计：总体 + 按模式/币种/评分档/置信度。"""
+        """已回填信号的胜率统计：总体 + 按模式/币种/评分档/置信度/方案。"""
         sql = ("SELECT symbol, mode, direction, score, confidence,"
-               " outcome, outcome_rr, mfe_pct, mae_pct, ts FROM signals"
+               " outcome, outcome_rr, mfe_pct, mae_pct, ts, payload FROM signals"
                " WHERE outcome IS NOT NULL AND outcome != ''")
         args: list[Any] = []
         if days:
@@ -282,6 +282,20 @@ class SignalStore:
         args.append(int(limit))
         with self._lock:
             rows = self._conn.execute(sql, args).fetchall()
+
+        def _profile_of(row):
+            try:
+                return (json.loads(row["payload"]).get("profile") or "默认")
+            except Exception:
+                return "默认"
+
+        def _rich(row) -> dict:
+            d = {k: row[k] for k in ("symbol", "mode", "direction", "score",
+                                     "confidence", "outcome", "outcome_rr",
+                                     "mfe_pct", "mae_pct", "ts")}
+            d["profile"] = _profile_of(row)
+            return d
+        rows = [_rich(r) for r in rows]
 
         resolved = [r for r in rows if r["outcome"] != "timeout"]
         wins = [r for r in resolved if (r["outcome"] or "").startswith("tp")]
@@ -327,6 +341,7 @@ class SignalStore:
             "by_symbol": _group(lambda r: r["symbol"]),
             "by_confidence": _group(lambda r: r["confidence"] or "低"),
             "by_score": {k: _agg(v) for k, v in sorted(by_score.items())},
+            "by_profile": _group(lambda r: r["profile"]),
         }
 
     def _count(self) -> int:

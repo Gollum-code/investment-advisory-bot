@@ -129,6 +129,26 @@ class TestSignalStore(unittest.TestCase):
         self.assertIn("60-80", st["by_score"])   # score=70 落在 60-80 档
         self.assertIn("<40", st["by_score"])      # score=-30 落在 <40 档
 
+    def test_win_stats_groups_by_profile(self):
+        good = self._plan()
+        good["profile"] = "进取"
+        bad = self._plan(RANGE)
+        bad["direction"] = "short"
+        bad["profile"] = "稳健"
+        r1 = self.store.save(good)
+        r2 = self.store.save(bad)
+        self.store.set_outcome(r1, "tp1", rr=2.0)
+        self.store.set_outcome(r2, "stopped", rr=-1.0)
+        st = self.store.win_stats()
+        self.assertIn("进取", st["by_profile"])
+        self.assertIn("稳健", st["by_profile"])
+        self.assertEqual(st["by_profile"]["进取"]["n"], 1)
+        # 没有 profile 字段的老数据归到"默认"
+        r3 = self.store.save({**self._plan(), "symbol": "XRP-USDT"})
+        self.store.set_outcome(r3, "timeout")
+        st = self.store.win_stats()
+        self.assertIn("默认", st["by_profile"])
+
 
 if __name__ == "__main__":
     unittest.main()
