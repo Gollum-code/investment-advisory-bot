@@ -545,6 +545,13 @@
       h += '<div class="adv-note">仓位：' + esc(sizing.note) + '</div>';
     }
 
+    // 一键以本计划开模拟仓：把入场/止损/止盈自动带进模拟盘
+    if (plan.direction === 'long' || plan.direction === 'short') {
+      h += '<div class="adv-cta">' +
+        '<button class="ghost open-paper" data-act="open">以本计划开模拟仓</button>' +
+        '<span class="hint">按现价成交，仅记录模拟仓位，不下单</span></div>';
+    }
+
     if (plan.invalidation) h += '<div class="adv-note">失效条件：' + esc(plan.invalidation) + '</div>';
     (plan.warnings || []).forEach((t) => { h += '<div class="warnbox">⚠ ' + esc(t) + '</div>'; });
     (plan.notes || []).forEach((t) => { h += '<div class="adv-note">' + esc(t) + '</div>'; });
@@ -553,6 +560,22 @@
     }
     el.innerHTML = h;
     $('card-advice').className = 'card dir-' + dir;
+    const cta = el.querySelector('.open-paper');
+    if (cta) cta.onclick = () => openFromPlan(plan);
+  }
+
+  async function openFromPlan(plan) {
+    const s = plan.sizing || {};
+    $('pos-sym').value = plan.symbol;
+    $('pos-dir').value = plan.direction;
+    $('pos-entry').value = plan.price;
+    if (s.position_coin) $('pos-size').value = s.position_coin;
+    if (s.leverage) $('pos-lev').value = s.leverage;
+    $('pos-stop').value = plan.stop != null ? plan.stop : '';
+    const tp1 = (plan.targets || [])[0];
+    $('pos-tp1').value = tp1 ? tp1.price : '';
+    $('positions').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await openPosition();
   }
 
   function kv(label, value, kind) {
