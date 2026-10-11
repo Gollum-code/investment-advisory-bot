@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import math
+from typing import Optional
 
-Num = float | None
+# 用 Optional 而不是 `float | None`：类型别名是运行时求值的模块级赋值，
+# PEP 604 联合类型要 3.10+，而 `from __future__ import annotations` 只保护注解，
+# 保护不了这里。写 Optional 才能在 3.9 上跑（见 CI 的 3.9 matrix）。
+Num = Optional[float]
 
 
 def sma(values: list[float], n: int) -> list[Num]:

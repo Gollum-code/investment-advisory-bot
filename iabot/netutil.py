@@ -213,7 +213,11 @@ class BasePool:
         self._current: str | None = None
         self._lock = threading.Lock()
         self._probe_lock = threading.Lock()
-        self._probe_cache: dict[str, tuple[bool, float, str]] = {}
+        # base -> (ok, ms, error, 探测时间)
+        self._probe_cache: dict[str, tuple[bool, float, str, float]] = {}
+        # 探测结果保鲜期。之前探测一次就永久记住，域名恢复后也不会切回来；
+        # 现在过期的条目会重新探测，坏掉的域名也能自愈。
+        self._probe_ttl = 300.0
         self._errors: list[str] = []
 
     @property
@@ -244,7 +248,10 @@ class BasePool:
         （实测国内网络下 api.hbdm.vip 要 8 秒才超时）。
         """
         with self._probe_lock:
-            missing = [b for b in self._bases if b not in self._probe_cache]
+            now = time.time()
+            missing = [b for b in self._bases
+                       if b not in self._probe_cache
+                       or now - self._probe_cache[b][3] > self._probe_ttl]
             if not missing:
                 return
             with ThreadPoolExecutor(max_workers=min(8, len(missing))) as pool:
@@ -252,9 +259,10 @@ class BasePool:
                 for fut in as_completed(futs):
                     base = futs[fut]
                     try:
-                        self._probe_cache[base] = fut.result()
+                        ok, ms, err = fut.result()
                     except Exception as exc:
-                        self._probe_cache[base] = (False, 0.0, f"{type(exc).__name__}: {exc}")
+                        ok, ms, err = False, 0.0, f"{type(exc).__name__}: {exc}"
+                    self._probe_cache[base] = (ok, ms, err, time.time())
 
     def candidates(self, force: bool = False) -> list[str]:
         """按探测结果排序的可用域名列表。"""
@@ -267,7 +275,7 @@ class BasePool:
         for b in self._bases:
             if b in order:
                 continue
-            ok, _ms, _err = self._probe_cache.get(b, (False, 0.0, ""))
+            ok, _ms, _err, _ts = self._probe_cache.get(b, (False, 0.0, "", 0.0))
             if ok:
                 order.append(b)
         for b in self._bases:          # 全挂时仍然按原顺序试一遍
@@ -279,7 +287,7 @@ class BasePool:
         self.probe_all()
         out = []
         for b in self._bases:
-            ok, ms, err = self._probe_cache.get(b, (False, 0.0, ""))
+            ok, ms, err, _ts = self._probe_cache.get(b, (False, 0.0, "", 0.0))
             out.append({"base": b, "ok": ok, "ms": round(ms), "error": err,
                         "current": b == self._current})
         return out
@@ -295,7 +303,7 @@ class BasePool:
                     d = http_json(url, timeout=timeout, verify=self._verify)
                     with self._lock:
                         self._current = base
-                        self._probe_cache[base] = (True, 0.0, "")
+                        self._probe_cache[base] = (True, 0.0, "", time.time())
                     self._errors = errors
                     return d
                 except Exception as exc:
@@ -303,7 +311,8 @@ class BasePool:
                     if attempt + 1 < self._retries:
                         time.sleep(0.4 * (attempt + 1))
             with self._lock:          # 这个域名不行了，标记掉换下一个
-                self._probe_cache[base] = (False, 0.0, errors[-1] if errors else "failed")
+                self._probe_cache[base] = (False, 0.0, errors[-1] if errors else "failed",
+                                           time.time())
                 if self._current == base:
                     self._current = None
         self._errors = errors
