@@ -476,6 +476,17 @@ def make_handler(app: App):
                 if entry <= 0 or size <= 0:
                     return self._err("entry_price 与 size_coin 必须 > 0", 400)
                 lev = float(body.get("leverage") or 1.0)
+                stop = body.get("stop")
+                # 开仓前校验止损是否会先被强平触发（高杠杆常见坑）
+                if stop is not None and lev > 1:
+                    from .risk import safe_max_leverage, stop_is_effective
+                    eff, liq = stop_is_effective(entry, float(stop), lev, direction)
+                    if not eff:
+                        stop_pct = abs(entry - float(stop)) / entry * 100 if entry else 0
+                        safe = int(safe_max_leverage(stop_pct, direction))
+                        return self._err(
+                            f"{lev:g}x 杠杆下强平价 {liq:,.6g} 比止损 {float(stop):,.6g} 更靠近入场，"
+                            f"止损不会被执行。请把杠杆降到 {safe}x 或把止损放宽。", 400)
                 pos_id = app.store.open_position(
                     symbol=sym, direction=direction, entry_price=entry,
                     size_coin=size, leverage=lev,

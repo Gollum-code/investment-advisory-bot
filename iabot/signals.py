@@ -21,6 +21,7 @@ from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
                      orderbook_walls, price_ladder, round_number_levels,
                      swing_points, top_volume_nodes)
 from .market import Snapshot, bars_per_year
+from .risk import DEFAULT_MMR, liquidation_price, safe_max_leverage, stop_is_effective
 
 # tanh 归一化尺度：加权均值除以它之后过 tanh。
 # 0.40 => 加权均值 ±0.40 约对应 ±76 分；±0.20 约对应 ±46 分。
@@ -783,6 +784,23 @@ def _attach_sizing(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
                     "profit_pct_of_equity": round(gain / equity * 100, 2),
                     "rr": t["rr"]})
 
+    # ---- 强平价校验：杠杆高到止损形同虚设时自动降杠杆并告警 ----
+    liq = liquidation_price(mid, leverage, plan.direction)
+    stop_pct_eff = abs(mid - plan.stop) / mid * 100 if mid else 0.0
+    lev_capped = False
+    if leverage > 1 and liq is not None:
+        ok, _ = stop_is_effective(mid, plan.stop, leverage, plan.direction)
+        if not ok:
+            safe = int(safe_max_leverage(stop_pct_eff, plan.direction))
+            safe = max(1, min(leverage - 1, safe))
+            if safe < leverage:
+                lev_capped = True
+                plan.warnings.append(
+                    f"{leverage}x 杠杆下强平价 {liq:,.4f} 比止损 {plan.stop:,.4f} 更靠近入场，"
+                    f"止损不会被执行。已自动降到 {safe}x（如需原杠杆，请把止损放宽或降杠杆）。")
+                leverage = safe
+                margin = notional / leverage
+
     plan.sizing = {
         "applicable": True,
         "equity_usdt": equity,
@@ -793,6 +811,8 @@ def _attach_sizing(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
         "position_coin": round(contracts * cs, 8),
         "notional_usdt": round(notional, 2),
         "leverage": leverage,
+        "leverage_capped": lev_capped,
+        "liquidation_price": round(liq, 8) if liq else None,
         "margin_usdt": round(margin, 2),
         "margin_pct_of_equity": round(margin / equity * 100, 2),
         "stop_distance": round(stop_dist, 8),

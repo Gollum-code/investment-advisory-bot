@@ -93,6 +93,25 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
     return snap
 
 
+def _funding_rate_at(funding_hist: list[dict], ts: float) -> float:
+    """取某个历史时刻生效的资金费率（取该时刻之前最近一条）。
+
+    funding_hist 来自 MarketClient.funding_history，已按 funding_time 正序。
+    没有历史数据时返回 0（表示不计资金费）。
+    """
+    if not funding_hist:
+        return 0.0
+    last = 0.0
+    # funding_time 是毫秒，正序，最后一条=最新
+    for row in funding_hist:
+        ft = float(row.get("funding_time") or 0) / 1000.0
+        if ft <= ts:
+            last = float(row.get("funding_rate") or 0)
+        else:
+            break   # 已按正序，遇到未来就停
+    return last
+
+
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
              apply_costs: bool = True, costs: dict | None = None,
@@ -117,8 +136,12 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     m_period = "15min" if mode == "intraday" else "1day"
     m_period_sec = period_seconds(m_period)
     funding_period_h = 8.0  # 永续每 8 小时结算一次资金费
-    # 资金费率：优先用配置传入，否则取快照当前费率
-    funding_rate = float(C.get("funding_rate") or 0.0) or float(base.funding_rate or 0.0)
+    # 资金费率：优先用显式传入；否则优先用历史资金费率序列（按各建仓点时刻取），
+    # 都没有才退回快照当前费率作近似。
+    fixed_funding = float(C.get("funding_rate") or 0.0)
+    funding_hist = list(base.funding_history or [])
+    use_history = bool(funding_hist) and fixed_funding == 0.0
+    fallback_funding = 0.0 if use_history else float(base.funding_rate or 0.0)
     main = base.klines.get(m_period) or []
     n = len(main)
     if n < warmup + step + 30:
@@ -214,11 +237,16 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
                 nr = notional / risk_usd  # 名义 / 风险
                 fee_r = (C["taker_fee_bps"] / 10000.0) * 2 * nr   # 开平各一次
                 slip_r = (C["slippage_bps"] / 10000.0) * 2 * nr   # 开平各一次
-                if funding_rate:
+                # 资金费率取该建仓点历史时刻生效的那一期，而不是用"当前费率"
+                # 套全部历史（那会让回测在费率剧烈波动的行情里严重失真）。
+                fr = (fixed_funding if fixed_funding
+                      else (_funding_rate_at(funding_hist, ts) if use_history
+                            else fallback_funding))
+                if fr:
                     periods = holding_h / funding_period_h
                     sign = 1.0 if plan.direction == "long" else -1.0
                     # 费率为正时多头付、空头收；对 R 的影响取反号
-                    fund_r = -sign * funding_rate * periods * nr
+                    fund_r = -sign * fr * periods * nr
             cost_r = fee_r + slip_r + fund_r
             fee_rs.append(fee_r)
             slip_rs.append(slip_r)

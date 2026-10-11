@@ -328,6 +328,13 @@ def cmd_backtest(args) -> int:
                     snap.klines[p] = adv.client.kline(sym, p, need)
                 except Exception:
                     pass
+        # 回测要用"每个建仓点当时"的资金费率，这里补一段足够长的历史费率序列
+        # （默认 90 条只覆盖约 30 天，长回测需要更多）。
+        need_fh = min(2000, max(90, int(args.bars * 3)))
+        try:
+            snap.funding_history = adv.client.funding_history(sym, need_fh)
+        except Exception:
+            pass
     except Exception as exc:
         print(f"[错误] 拉取历史失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

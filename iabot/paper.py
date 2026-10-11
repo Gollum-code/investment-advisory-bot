@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .risk import liquidation_price, safe_max_leverage
+
 # 模拟盘口径的往返手续费（单边 5bps，开平各一次）
 ROUND_TRIP_FEE_BPS = 10.0
 
@@ -81,6 +83,12 @@ def pnl_of(pos: dict, price: float | None, fee_bps: float = 5.0) -> dict:
     out["notional_usdt"] = round(notional, 2)
     out["distance_to_stop_pct"] = round(dist_stop, 3) if dist_stop is not None else None
     out["distance_to_tp1_pct"] = round(dist_tp1, 3) if dist_tp1 is not None else None
+    # 强平价：模拟持仓同样要提醒强平风险（手动录入的高杠杆容易被忽视）
+    liq = liquidation_price(entry, leverage, direction)
+    out["liquidation_price"] = round(liq, 8) if liq else None
+    out["liquidation_risk"] = bool(liq and pos.get("stop")
+                                   and ((direction == "long" and liq > pos["stop"])
+                                        or (direction == "short" and liq < pos["stop"])))
     return out
 
 

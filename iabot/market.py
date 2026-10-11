@@ -211,7 +211,7 @@ class MarketClient:
             rows = (d.get("data") or {}).get("data") or []
             # 火币该接口返回的是倒序，统一排成正序（最后一条 = 最新）
             return sorted(rows, key=lambda r: int(r.get("funding_time") or 0))
-        return self._cached(f"fundh:{symbol}", fetch)
+        return self._cached(f"fundh:{symbol}:{page_size}", fetch)
 
     def open_interest(self, symbol: str) -> float | None:
         def fetch():

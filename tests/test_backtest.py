@@ -44,6 +44,50 @@ def _cfg():
     return cfg
 
 
+class TestFundingRateAt(unittest.TestCase):
+    """回测按建仓点历史时刻取资金费率。"""
+
+    def _hist(self):
+        # funding_time 是毫秒，正序（最后=最新）
+        return [
+            {"funding_time": 1_700_000_000_000, "funding_rate": 0.0001},
+            {"funding_time": 1_700_028_800_000, "funding_rate": 0.0003},
+            {"funding_time": 1_700_057_600_000, "funding_rate": -0.0002},
+        ]
+
+    def test_picks_rate_before_ts(self):
+        from iabot.backtest import _funding_rate_at
+        h = self._hist()
+        # ts 在第2期之后 -> 取第2期的费率
+        self.assertAlmostEqual(_funding_rate_at(h, 1_700_030_000), 0.0003)
+        # ts 在第1期之后 -> 取第1期
+        self.assertAlmostEqual(_funding_rate_at(h, 1_700_010_000), 0.0001)
+        # ts 早于所有 -> 0
+        self.assertEqual(_funding_rate_at(h, 1_600_000_000), 0.0)
+        # ts 在最新之后 -> 取最新
+        self.assertAlmostEqual(_funding_rate_at(h, 1_800_000_000), -0.0002)
+
+    def test_empty_history_returns_zero(self):
+        from iabot.backtest import _funding_rate_at
+        self.assertEqual(_funding_rate_at([], 1_700_000_000), 0.0)
+
+    def test_backtest_uses_history_when_available(self):
+        from iabot.backtest import _funding_rate_at
+        snap = _make_snapshot(200)
+        # 给一个"全正费率"的历史序列，多头要付更多 -> 成本不低于无历史
+        t0 = snap.klines["15min"][0].ts
+        snap.funding_history = [
+            {"funding_time": int((t0 + i * 8 * 3600) * 1000), "funding_rate": 0.0005}
+            for i in range(20)
+        ]
+        with_hist = backtest(snap, _cfg(), mode="intraday", step=6, warmup=30).to_dict()
+        snap2 = _make_snapshot(200)
+        snap2.funding_history = []
+        without = backtest(snap2, _cfg(), mode="intraday", step=6, warmup=30).to_dict()
+        # 有历史费率时，平均资金费成本不应为负（多头正费率要付钱）
+        self.assertGreaterEqual(with_hist["avg_funding_r"], without["avg_funding_r"] - 1e-9)
+
+
 class TestBacktest(unittest.TestCase):
     def test_runs_and_returns_summary(self):
         snap = _make_snapshot(240)
