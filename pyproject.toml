@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "investment-advisory-bot"
+version = "0.1.0"
+description = "火币(HTX) USDT 本位永续合约行情分析与投资建议工具（只读行情，不下单）"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "Gollum" }]
+keywords = ["trading", "htx", "crypto", "analysis", "backtest"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+# 零第三方依赖，仅用 Python 标准库。这是项目的重要特性，依赖列表刻意保持为空。
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sssuer77/investment-advisory-bot"
+
+[project.scripts]
+iabot = "iabot.__main__:main"
+
+[tool.setuptools]
+packages = ["iabot"]
+
+[tool.setuptools.package-data]
+iabot = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+# 挑对零依赖命令行工具真正有用的规则：抓未用导入、未定义名、可疑写法
+select = ["F", "E9", "B", "UP"]
+ignore = [
+    "E501",    # 行过长：项目里表格/文案里有长行，不强制
+    "B008",    # 函数调用默认值：argparse 默认值里常用
+    "UP031",   # printf 风格格式化：中文终端对齐常用 % 格式化
+    "UP032",   # f-string：项目混用两者
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里允许未用导入和断言内赋值
+"tests/*" = ["F401", "F811"]
+# web 资源目录无关
+"iabot/web/*" = []

@@ -83,7 +83,7 @@ class TestProfiles(unittest.TestCase):
 
         rnd = random.Random(3)
         closes = [30000.0]
-        for i in range(120):
+        for _ in range(120):
             closes.append(closes[-1] * (1 + rnd.uniform(-0.02, 0.02)))
         k = [__import__("iabot.market", fromlist=["Candle"]).Candle(
             ts=1_700_000_000 + i * 900, open=c, high=c * 1.01, low=c * 0.99,

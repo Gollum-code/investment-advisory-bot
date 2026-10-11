@@ -21,7 +21,7 @@ from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
                      orderbook_walls, price_ladder, round_number_levels,
                      swing_points, top_volume_nodes)
 from .market import Snapshot, bars_per_year
-from .risk import DEFAULT_MMR, liquidation_price, safe_max_leverage, stop_is_effective
+from .risk import liquidation_price, safe_max_leverage, stop_is_effective
 
 # tanh 归一化尺度：加权均值除以它之后过 tanh。
 # 0.40 => 加权均值 ±0.40 约对应 ±76 分；±0.20 约对应 ±46 分。

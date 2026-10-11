@@ -404,7 +404,7 @@ def make_handler(app: App):
                 app.scheduler.unsubscribe(push)
 
         def _sse_write(self, ev: dict):
-            self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
             self.wfile.flush()
 
         # ---------------- POST handlers ----------------
@@ -464,7 +464,6 @@ def make_handler(app: App):
                                "result": res.to_dict(), "ms": round((_t.time() - t0) * 1000)})
 
         def _handle_position(self, body: dict):
-            from .paper import pnl_of
             from .symbols import to_contract as _tc
 
             action = (body.get("action") or "").strip()

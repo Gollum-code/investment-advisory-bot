@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .risk import liquidation_price, safe_max_leverage
+from .risk import liquidation_price
 
 # 模拟盘口径的往返手续费（单边 5bps，开平各一次）
 ROUND_TRIP_FEE_BPS = 10.0

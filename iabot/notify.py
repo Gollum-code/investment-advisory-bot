@@ -14,7 +14,6 @@ import json
 import threading
 import urllib.parse
 import urllib.request
-from typing import Any
 
 from .netutil import ssl_context
 

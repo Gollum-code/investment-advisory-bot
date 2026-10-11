@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
 
 from .signals import FACTOR_DEFAULTS
 

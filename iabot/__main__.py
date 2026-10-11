@@ -15,11 +15,10 @@ import sys
 import threading
 import time
 import webbrowser
-from urllib.parse import quote
 
 from . import __version__, netutil
 from .advisor import Advisor
-from .config import ROOT, ensure_example, load_config
+from .config import ensure_example, load_config
 from .server import build_server, make_app
 from .signals import MODES
 from .symbols import to_contract
@@ -182,7 +181,7 @@ def cmd_analyze(args) -> int:
             rowid = st.save(plan)
         finally:
             st.close()
-        print(f"[已保存] 信号已写入历史库" + (f"（第 {rowid} 条）" if rowid else ""),
+        print("[已保存] 信号已写入历史库" + (f"（第 {rowid} 条）" if rowid else ""),
               file=sys.stderr)
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -261,7 +260,7 @@ def cmd_check(args) -> int:
         note = "" if row.get("ok") else f"  {row.get('error', '')[:80]}"
         print(f"  [{flag}] {row.get('base', '?'):<32} {ms}{note}")
         if row.get("current"):
-            print(f"        ^ 当前使用")
+            print("        ^ 当前使用")
 
     sym = args.symbol or (cfg.get("symbols") or ["BTC-USDT"])[0]
     try:
@@ -371,6 +370,32 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_notify_test(args) -> int:
+    """发送一条测试通知，验证 webhook / telegram / bark 配置是否可用。"""
+    from .notify import Notifier
+    cfg = load_config()
+    n = Notifier(cfg)
+    print(f"通知开关: {'开启' if n.enabled else '关闭'}")
+    print(f"已配置渠道: "
+          f"{'webhook ' if n._webhook.get('url') else ''}"
+          f"{'telegram ' if (n._telegram.get('token') and n._telegram.get('chat_id')) else ''}"
+          f"{'bark' if n._bark.get('url') else ''}".strip() or "(无)")
+    if not n.enabled:
+        print("  ! notify.enabled 还没打开，先在 config.json 里设为 true", file=sys.stderr)
+        return 1
+    if not n.configured:
+        print("  ! 没有配置任何渠道（webhook.url / telegram.token+chat_id / bark.url）",
+              file=sys.stderr)
+        return 1
+    sent = n.send("[iabot] 测试通知",
+                  "这是一条测试消息。\n如果你收到了，说明通知配置正确。")
+    if sent:
+        print(f"已发送: {sent} 个渠道")
+        return 0
+    print(f"  ! 发送失败: {n.last_error}", file=sys.stderr)
+    return 1
+
+
 def cmd_serve(args) -> int:
     cfg = load_config()
     ensure_example()
@@ -430,7 +455,7 @@ def cmd_serve(args) -> int:
 # 参数解析
 # --------------------------------------------------------------------------
 
-COMMANDS = ("serve", "analyze", "scan", "check", "backtest")
+COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "notify-test")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -469,8 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc.add_argument("--save", action="store_true",
                       help="把有方向的信号写入历史库（默认 data/signals.db）")
 
-    p_ck = sub.add_parser("check", help="网络 / 证书 / 行情接口自检")
+    p_ck = sub.add_parser("check", help="网络 / 证书 / 行情接口 / 配置体检")
     p_ck.add_argument("--symbol", help="用哪个合约做行情测试，默认取配置里第一个")
+
+    sub.add_parser("notify-test",
+                   help="发一条测试通知，验证 notify 渠道配置是否可用")
 
     p_bk = sub.add_parser("backtest", help="历史回测：用真实 K 线评估策略胜率与期望值")
     p_bk.add_argument("symbol", help="合约代码，如 BTC-USDT")
@@ -510,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     if args.cmd == "backtest":
         return cmd_backtest(args)
+    if args.cmd == "notify-test":
+        return cmd_notify_test(args)
     return cmd_serve(args)
 
 

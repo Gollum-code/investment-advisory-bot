@@ -13,7 +13,6 @@ from __future__ import annotations
 import html
 import time
 
-from .market import Candle
 
 
 def _esc(s) -> str:
@@ -53,7 +52,7 @@ def svg_candles(candles, *, width: int = 900, height: int = 320,
         return height - (price - lo) / (hi - lo) * height
 
     parts = [f'<svg viewBox="0 0 {width} {height}" width="100%" class="chart" xmlns="http://www.w3.org/2000/svg">']
-    for i, (ts, o, h, low, c) in enumerate(rows):
+    for i, (_ts, o, h, low, c) in enumerate(rows):
         x = i * cw + cw / 2
         up = c >= o
         col = "#22c55e" if up else "#ef4444"
@@ -75,7 +74,6 @@ def svg_candles(candles, *, width: int = 900, height: int = 320,
                      f'{_esc(label)} {_esc(_fmt(price))}</text>')
 
     if plan:
-        d = plan.get("direction")
         hline(plan.get("entry_low"), "#3b82f6", "入场")
         hline(plan.get("entry_high"), "#3b82f6", "入场", dash=True)
         hline(plan.get("stop"), "#ef4444", "止损")

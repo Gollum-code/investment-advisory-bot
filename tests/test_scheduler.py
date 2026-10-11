@@ -73,7 +73,6 @@ class TestDedupeOnRun(SchedulerTestBase):
 
     def test_dedupe_respects_only_on_signal(self):
         # 观望信号 + only_on_signal -> 不落库
-        client = FakeClient()
         adv = Advisor(self.cfg)
         sch = Scheduler(adv, self.store, self.cfg)
         sch.only_on_signal = True

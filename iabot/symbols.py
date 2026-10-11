@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from typing import Iterable
-
 # (合约代码前缀, 显示名, 中文, 别名…)
 CATALOG: list[tuple[str, str, tuple[str, ...]]] = [
     ("BTC",  "比特币",  ("大饼", "饼子", "bitcoin", "xbt")),
@@ -125,45 +123,8 @@ def display_name(contract: str) -> str:
     return b
 
 
-def all_contracts() -> list[str]:
-    return [f"{b}-USDT" for b, _, _ in CATALOG]
-
-
 def catalog_payload() -> list[dict]:
     return [
         {"code": f"{b}-USDT", "base": b, "name": cn, "aliases": list(als)}
         for b, cn, als in CATALOG
     ]
-
-
-def detect_symbol(text: str, known: Iterable[str] | None = None) -> tuple[str | None, str | None]:
-    """从一句话里识别币种，返回 (合约代码, 命中的原文)。"""
-    if not text:
-        return None, None
-    lowered = text.lower()
-
-    for code in known or ():
-        c = str(code or "").strip()
-        if not c:
-            continue
-        for token in (c, c.split("-")[0]):
-            idx = lowered.find(token.lower())
-            if idx != -1:
-                return c, text[idx:idx + len(token)]
-
-    # 显式合约写法
-    import re
-    m = re.search(r"([A-Za-z0-9]{2,15})-?USDT", text, re.I)
-    if m:
-        return to_contract(m.group(0)), m.group(0)
-
-    for alias in sorted(_ALIAS, key=len, reverse=True):
-        idx = lowered.find(alias)
-        if idx != -1:
-            if alias.isascii():
-                before = lowered[idx - 1] if idx > 0 else ""
-                after = lowered[idx + len(alias)] if idx + len(alias) < len(lowered) else ""
-                if (before.isalnum() and before.isascii()) or (after.isalnum() and after.isascii()):
-                    continue
-            return f"{_ALIAS[alias]}-USDT", text[idx:idx + len(alias)]
-    return None, None

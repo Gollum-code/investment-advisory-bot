@@ -15,7 +15,6 @@ import json
 import sqlite3
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from .config import data_path
@@ -197,13 +196,6 @@ class SignalStore:
         return {r["outcome"]: r["c"] for r in rows}
 
     # ------------------------------------------------------------------
-    def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        try:
-            return json.loads(row["payload"])
-        except Exception:
-            return {"symbol": row["symbol"], "direction": row["direction"],
-                    "score": row["score"], "generated_at": row["ts"]}
-
     def query(self, *, symbol: str | None = None, mode: str | None = None,
               direction: str | None = None, limit: int = 100,
               since: float | None = None, with_meta: bool = False) -> list[dict]:
@@ -238,20 +230,8 @@ class SignalStore:
             out.append(p)
         return out
 
-    def latest_per_symbol(self, mode: str | None = None) -> list[dict]:
-        mode_sql = "AND mode = ?" if mode else ""
-        args: list[Any] = [mode] if mode else []
-        sql = f"""
-            SELECT payload FROM signals s
-            WHERE ts = (SELECT MAX(ts) FROM signals s2
-                        WHERE s2.symbol = s.symbol {mode_sql.replace('mode', 's2.mode')})
-            {mode_sql}
-            ORDER BY ts DESC
-        """
-        with self._lock:
-            rows = self._conn.execute(sql, args).fetchall()
-        return [json.loads(r["payload"]) for r in rows]
-
+    # ------------------------------------------------------------------
+    # 胜率统计
     # ------------------------------------------------------------------
     def stats(self, hours: int = 24) -> dict:
         since = time.time() - hours * 3600

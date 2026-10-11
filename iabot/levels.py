@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from collections.abc import Iterable
 
 from .market import Candle
 
@@ -61,7 +61,6 @@ def top_volume_nodes(candles: list[Candle], bins: int = 40, top: int = 5,
     if not prof:
         return []
     total = sum(v for _, _, v in prof) or 1.0
-    step = prof[0][1] - prof[0][0] if len(prof) > 1 else 0.0
 
     # 先按成交量排序，取前若干，再合并价格相邻的簇
     ranked = sorted(range(len(prof)), key=lambda i: -prof[i][2])
@@ -216,7 +215,3 @@ def price_ladder(price: float, levels: list[Level], *,
     else:
         merged.sort(key=lambda l: (-l.weight, -l.price))
     return [l.to_dict() for l in merged[:max_each]]
-
-
-def atr_stop_buffer(atr_value: float | None, mult: float = 0.6) -> float:
-    return (atr_value or 0.0) * mult
