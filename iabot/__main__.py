@@ -186,11 +186,47 @@ def cmd_analyze(args) -> int:
             st.close()
         print("[已保存] 信号已写入历史库" + (f"（第 {rowid} 条）" if rowid else ""),
               file=sys.stderr)
+    if getattr(args, "paper", False):
+        _open_paper_from_plan(cfg, plan)
     if args.json:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
     else:
         print(render_plan(plan, verbose=not args.brief))
     return 0
+
+
+def _open_paper_from_plan(cfg: dict, plan: dict) -> None:
+    """按分析结果开一笔模拟仓（入场用现价，止损/止盈来自计划）。"""
+    from .store import SignalStore
+    d = plan.get("direction")
+    if d not in ("long", "short"):
+        print("[模拟仓] 当前是观望/被闸门拦下，未开仓。", file=sys.stderr)
+        return
+    s = plan.get("sizing") or {}
+    price = plan.get("price")
+    coin = s.get("position_coin")
+    if not price or not coin:
+        print("[模拟仓] 缺少价格或仓位大小，未开仓。", file=sys.stderr)
+        return
+    tps = plan.get("targets") or []
+    st = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                     int((cfg.get("storage") or {}).get("keep_days", 30)))
+    try:
+        if s.get("liquidation_price") and s.get("leverage_capped"):
+            print(f"[模拟仓] 提示：杠杆已因强平风险从 {cfg.get('account', {}).get('preferred_leverage')}x "
+                  f"降到 {s.get('leverage')}x", file=sys.stderr)
+        pid = st.open_position(
+            symbol=plan.get("symbol"), direction=d, entry_price=price,
+            size_coin=coin, leverage=s.get("leverage") or 1,
+            stop=plan.get("stop"),
+            tp1=(tps[0]["price"] if len(tps) > 0 else None),
+            tp2=(tps[1]["price"] if len(tps) > 1 else None),
+            tp3=(tps[2]["price"] if len(tps) > 2 else None),
+            note=f"{plan.get('profile') or '手动'} 分析开仓")
+    finally:
+        st.close()
+    print(f"[模拟仓] 已开 {d} {plan.get('symbol')} @ {price}"
+          f"（#{pid}，止损 {plan.get('stop')}）", file=sys.stderr)
 
 
 def cmd_scan(args) -> int:
@@ -391,6 +427,135 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_watch(args) -> int:
+    """终端监控模式：循环扫描关注列表，信号变化时提示，并刷新模拟仓浮盈。
+
+    Ctrl+C 退出。只在方向/评分显著变化时输出，避免每轮刷屏。
+    """
+    cfg = load_config()
+    acc = _account_from(args) or None
+    syms = [to_contract(s) for s in args.symbols.split(",") if s.strip()] \
+        if args.symbols else [to_contract(s) for s in (cfg.get("symbols") or [])]
+    if not syms:
+        print("[错误] 没有可监控的合约（--symbols 或配置 symbols）", file=sys.stderr)
+        return 2
+
+    from .store import SignalStore
+    st = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                     int((cfg.get("storage") or {}).get("keep_days", 30)))
+    print(f"监控中: {', '.join(syms)}")
+    print(f"模式 {args.mode} | 间隔 {args.interval}s | 每轮刷新模拟仓浮盈"
+          f" | Ctrl+C 退出")
+    print("-" * 62)
+
+    # 每轮重建 Advisor，避免复用过期缓存；也让 force 生效
+    prev: dict[str, tuple[str, float]] = {}   # symbol -> (direction, score)
+    round_no = 0
+    try:
+        while True:
+            round_no += 1
+            adv = Advisor(cfg)
+            changed = []
+            for sym in syms:
+                try:
+                    plan = adv.plan_payload(sym, mode=args.mode, force=True, account=acc)
+                except Exception as exc:
+                    print(f"  [{time.strftime('%H:%M:%S')}] {sym} 分析失败: "
+                          f"{type(exc).__name__}", file=sys.stderr)
+                    continue
+                d = plan.get("direction")
+                sc = plan.get("score") or 0
+                key = prev.get(sym)
+                if key is None:
+                    # 首轮只打印有方向的
+                    if d in ("long", "short"):
+                        changed.append((sym, plan, "新信号"))
+                elif key[0] != d or abs(sc - key[1]) >= args.score_delta:
+                    tag = "方向翻转" if key[0] != d else "评分明显变化"
+                    changed.append((sym, plan, tag))
+                prev[sym] = (d, sc)
+                # 只有有方向的才落库（复用去重逻辑）
+                if args.save and d in ("long", "short"):
+                    try:
+                        st.save(plan, only_on_signal=True)
+                    except Exception:
+                        pass
+
+            # 输出变化
+            ts = time.strftime("%H:%M:%S")
+            for sym, plan, tag in changed:
+                d = plan.get("direction")
+                sc = plan.get("score") or 0
+                cn = {"long": "做多", "short": "做空"}.get(d, "观望")
+                rr = plan.get("rr")
+                print(f"[{ts}] {sym:<12} {cn} ({sc:+.1f}) {tag}"
+                      + (f" RR {rr:.2f}" if rr else ""))
+            if not changed and round_no % args.every == 0:
+                # 静默轮次，按间隔报个平安
+                print(f"[{ts}] 第 {round_no} 轮：无变化"
+                      f"（{len(syms)} 个合约 | 每 {args.every} 轮汇报一次）")
+
+            # 刷新模拟仓浮盈
+            if round_no % args.every == 0:
+                opens = st.positions(status="open")
+                if opens:
+                    try:
+                        from .paper import pnl_of
+                        adv2 = Advisor(cfg)
+                        for p in opens:
+                            snap = adv2.fetch(p["symbol"], force=False)
+                            pn = pnl_of(p, snap.price)
+                            liq = " ⚠强平风险" if pn.get("liquidation_risk") else ""
+                            print(f"    持仓 {p['symbol']:<12} "
+                                  f"{pn['unrealized_pnl_usdt']:+.2f} U "
+                                  f"({pn['pnl_of_margin_pct']:+.1f}% 保证金){liq}")
+                    except Exception:
+                        pass
+            time.sleep(max(10, args.interval))
+    except KeyboardInterrupt:
+        print(f"\n已停止（共 {round_no} 轮）。")
+    finally:
+        st.close()
+    return 0
+
+
+def cmd_backup(args) -> int:
+    """手动备份 / 查看 / 恢复信号数据库。"""
+    from pathlib import Path
+    from .store import SignalStore
+    cfg = load_config()
+    bcfg = cfg.get("backup") or {}
+    bdir = Path(bcfg.get("dir") or "data/backups")
+    st = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                     int((cfg.get("storage") or {}).get("keep_days", 30)))
+    try:
+        if args.list:
+            st.close()
+            if not bdir.is_dir():
+                print("还没有任何备份。")
+                return 0
+            files = sorted(bdir.glob("signals-*.db"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                print("还没有任何备份。")
+                return 0
+            print(f"备份目录 {bdir}（共 {len(files)} 份）:")
+            for f in files:
+                size_mb = f.stat().st_size / 1024 / 1024
+                ts = time.strftime('%Y-%m-%d %H:%M',
+                                   time.localtime(f.stat().st_mtime))
+                print(f"  {f.name}   {size_mb:.2f} MB   {ts}")
+            return 0
+        path = st.backup_to(str(bdir / f"signals-{time.strftime('%Y%m%d-%H%M%S')}.db"))
+        overview = st.stats_overview()
+        print(f"已备份到 {path}")
+        print(f"  信号 {overview['signals']} 条 | 持仓 {overview['positions']} 条 | "
+              f"回测记录 {overview['backtest_runs']} 条")
+        return 0
+    finally:
+        st.close()
+
+
 def cmd_backtests(args) -> int:
     """列出历史回测记录，并排对比最近两次的参数差异。"""
     from .store import SignalStore
@@ -516,7 +681,7 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
-            "notify-test")
+            "backup", "watch", "notify-test")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -544,6 +709,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_an.add_argument("--brief", action="store_true", help="不打印因子明细")
     p_an.add_argument("--save", action="store_true",
                       help="把本次信号写入历史库（默认 data/signals.db）")
+    p_an.add_argument("--paper", action="store_true",
+                      help="按本次计划开一笔模拟仓（入场/止损/止盈自动带入）")
 
     p_sc = sub.add_parser("scan", help="批量扫描多个合约")
     p_sc.add_argument("symbols", help="逗号分隔，如 BTC-USDT,ETH-USDT,SOL-USDT")
@@ -581,6 +748,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_bl.add_argument("--limit", type=int, default=20, help="显示最近多少条（默认 20）")
     p_bl.add_argument("--json", action="store_true", help="输出原始 JSON")
 
+    p_bu = sub.add_parser("backup", help="备份信号数据库 / 查看已有备份")
+    p_bu.add_argument("--list", action="store_true", help="只列出已有备份，不做新备份")
+
+    p_wt = sub.add_parser("watch", help="终端监控：循环扫描，信号变化时提示（Ctrl+C 退出）")
+    p_wt.add_argument("--symbols", help="逗号分隔，默认取配置里的关注列表")
+    p_wt.add_argument("--mode", choices=list(MODES), default="intraday")
+    p_wt.add_argument("--interval", type=int, default=300, help="每轮间隔秒（默认 300）")
+    p_wt.add_argument("--score-delta", type=float, default=8.0,
+                      help="评分变化超过这个值才算变化（默认 8）")
+    p_wt.add_argument("--every", type=int, default=6, help="每多少轮汇报一次静默状态")
+    p_wt.add_argument("--equity", type=float)
+    p_wt.add_argument("--risk", type=float)
+    p_wt.add_argument("--save", action="store_true", help="把有方向的信号写入历史库")
+
     return ap
 
 
@@ -611,6 +792,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_notify_test(args)
     if args.cmd == "backtests":
         return cmd_backtests(args)
+    if args.cmd == "backup":
+        return cmd_backup(args)
+    if args.cmd == "watch":
+        return cmd_watch(args)
     return cmd_serve(args)
 
 

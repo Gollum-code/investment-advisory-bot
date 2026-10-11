@@ -47,6 +47,9 @@ python -m iabot scan BTC-USDT,ETH-USDT --save    :: 扫描并把有方向的信�
 python -m iabot backtest BTC-USDT --mode swing   :: 历史回测，统计胜率与期望值
 python -m iabot backtest BTC-USDT --save         :: 回测并把参数+结果存档（可事后复现/对比）
 python -m iabot backtests --symbol BTC-USDT      :: 查看历史回测记录与参数差异
+python -m iabot watch                             :: 终端监控：循环扫描，信号变化时提示（Ctrl+C 退出）
+python -m iabot analyze BTC-USDT --paper          :: 分析后直接开一笔模拟仓
+python -m iabot backup                            :: 备份信号数据库（信号/持仓/回测/利润簿）
 python -m iabot check                  :: 网络 / 证书 / 行情接口 / 配置体检
 python -m iabot notify-test           :: 发一条测试通知，验证 notify 渠道配置
 ```
@@ -122,6 +125,7 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 | `schedule.dedupe.*` | 1 小时 / 5 分 | 落库去重：冷却期与评分变化阈值，避免同信号刷屏 |
 | `schedule.verify.*` | 开启 | 信号结果回填：多久后开始回填、每轮最多回填多少 |
 | `storage.keep_days` | 30 | 信号历史保留天数，启动与每轮定时任务自动清理 |
+| `backup.*` | 开启 / 每天 / 14 份 | 数据库自动备份（一致性快照），目录/间隔/保留份数 |
 | `auth.token` | 空 | HTTP 访问令牌；设了之后 /api/* 需带 Bearer token（静态页免鉴权） |
 | `notify.*` | 关闭 | 通知：webhook / telegram / bark 渠道与推送阈值 |
 
@@ -278,6 +282,52 @@ server.py      HTTP 服务（REST + SSE + 静态前端）
 web/           前端（原生 HTML/CSS/JS，无 CDN）
 tests/           unittest 单元测试
 ```
+
+---
+
+## 完整工作流
+
+把上面的能力串起来就是完整的一条链路。命令行版：
+
+```bat
+:: 1) 体检：网络/证书/行情/配置
+python -m iabot check
+
+:: 2) 扫一遍关注列表，看谁有信号
+python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT
+
+:: 3) 深度分析单个合约，决定参数方案（网页上拖滑块更直观）
+python -m iabot analyze BTC-USDT
+
+:: 4) 历史验证这个参数组合靠不靠谱
+python -m iabot backtest BTC-USDT --mode swing --save
+
+:: 5) 多个方案横向对比，挑最优的
+::    （网页"参数方案 → 对比全部方案"更直观）
+
+:: 6) 按最优方案开一笔模拟仓，自动带入止损止盈
+python -m iabot analyze BTC-USDT --paper
+
+:: 7) 长期盯盘：开着不管，信号变化才提示；Ctrl+C 停
+python -m iabot watch --symbols BTC-USDT,ETH-USDT --save
+
+:: 8) 复盘：实测胜率（网页"信号胜率"） + 回测记录对比参数改动
+python -m iabot backtests
+
+:: 9) 定期备份（服务运行时会自动备份，这里是手动兜底）
+python -m iabot backup
+```
+
+网页版把同样的链路做成了面板：控制台 → 参数方案 → 胜率 → 模拟盘 → 利润簿 → 导出报告。
+
+**两条验证路径并存**：
+- **历史回测**：用过去的数据评估"这套参数准不准"（`backtest`）
+- **实测胜率**：用真实信号跟踪"实际做下来准不准"（`win-stats`，信号会自动回填结局）
+
+两者长期对比，才能判断参数是真的有效，还是只在某段历史行情里好看。
+
+**数据都在 `data/signals.db`**（信号历史 / 模拟持仓 / 回测记录 / 利润簿），服务会每天自动做
+一致性快照到 `data/backups/`，最多保留 14 份。`backup` 命令可手动备份/查看。
 
 ---
 

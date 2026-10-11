@@ -109,6 +109,33 @@ class TestSignalStore(unittest.TestCase):
             self.store._conn.commit()
         self.assertEqual(self.store.purge_old(), 1)
 
+    def test_backup_creates_consistent_snapshot(self):
+        """备份必须是一份能独立打开、内容一致的库（VACUUM INTO）。"""
+        self.store.save(self._plan())
+        dest = Path(self.tmp.name) / "snap.db"
+        path = self.store.backup_to(str(dest))
+        self.assertTrue(Path(path).exists())
+        # 用一个独立的 store 打开备份，确认内容在
+        snap_store = SignalStore(path, keep_days=30)
+        try:
+            self.assertEqual(snap_store._count(), self.store._count())
+        finally:
+            snap_store.close()
+
+    def test_backup_overwrites_existing_file(self):
+        self.store.save(self._plan())
+        dest = Path(self.tmp.name) / "snap2.db"
+        self.store.backup_to(str(dest))
+        # 再次备份到同一路径不应报错（内部先删旧文件）
+        self.store.backup_to(str(dest))
+        self.assertTrue(dest.exists())
+
+    def test_stats_overview(self):
+        self.store.save(self._plan())
+        ov = self.store.stats_overview()
+        self.assertEqual(ov["signals"], 1)
+        self.assertEqual(ov["positions"], 0)
+
     def test_win_stats_aggregates(self):
         good = self._plan()
         good["score"] = 70.0

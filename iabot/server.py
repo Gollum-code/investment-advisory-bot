@@ -59,6 +59,13 @@ class App:
         self.started_at = time.time()
         self.auth_token = (cfg.get("auth") or {}).get("token") or ""
         self.log_file = cfg.get("log_file") or ""
+        # 自动备份：DB 承载信号/持仓/回测记录/利润簿，损坏或误删无法恢复
+        bcfg = cfg.get("backup") or {}
+        self.backup_enabled = bool(bcfg.get("enabled", True))
+        self.backup_dir = bcfg.get("dir") or "data/backups"
+        self.backup_keep = int(bcfg.get("keep") or 14)
+        self.backup_hours = float(bcfg.get("hours") or 24)
+        self._last_backup = 0.0
 
     def authorized(self, hdrs, token_hint: str | None = None) -> bool:
         """Bearer token / X-Iabot-Token 请求头 == 配置里的 token 才算通过。
@@ -79,6 +86,10 @@ class App:
             self.store.purge_old()
         except Exception:
             pass
+        if self.backup_enabled:
+            self._maybe_backup()
+            threading.Thread(target=self._backup_loop, name="iabot-backup",
+                             daemon=True).start()
         if (self.cfg.get("schedule") or {}).get("enabled"):
             self.scheduler.start()
         # 后台把行情域名先探一遍：串行探测遇上连不通的域名要等一个超时，
@@ -90,6 +101,55 @@ class App:
             self.advisor.health()
         except Exception:
             pass
+
+    def _maybe_backup(self) -> str | None:
+        """距上次备份超过 backup_hours 就做一次，并清理超出 keep 份的旧备份。"""
+        if not self.backup_enabled:
+            return None
+        now = time.time()
+        if now - self._last_backup < self.backup_hours * 3600:
+            return None
+        self._last_backup = now
+        return self.do_backup()
+
+    def do_backup(self) -> str | None:
+        """做一份带时间戳的备份，返回文件路径（失败返回 None）。"""
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            name = f"signals-{ts}.db"
+            return self.store.backup_to(str(Path(self.backup_dir) / name))
+        except Exception:
+            return None
+
+    def _prune_backups(self) -> int:
+        """只保留最近 keep 份备份。"""
+        try:
+            d = Path(self.backup_dir)
+            if not d.is_dir():
+                return 0
+            files = sorted(d.glob("signals-*.db"), key=lambda p: p.stat().st_mtime,
+                           reverse=True)
+            removed = 0
+            for old in files[self.backup_keep:]:
+                try:
+                    old.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+            return removed
+        except Exception:
+            return 0
+
+    def _backup_loop(self) -> None:
+        # 独立后台线程：到点就备份 + 清理旧档，不打扰主服务
+        while True:
+            try:
+                time.sleep(self.backup_hours * 3600)
+            except Exception:
+                return
+            path = self._maybe_backup()
+            if path:
+                self._prune_backups()
 
     def stop(self) -> None:
         self.scheduler.stop()

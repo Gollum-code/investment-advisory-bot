@@ -165,6 +165,25 @@ def cert_info() -> dict:
     }
 
 
+def _is_rate_limited(exc: Exception) -> bool:
+    """判断异常是否为限流（HTTP 429）。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429
+    return False
+
+
+def _retry_after(exc: Exception, default: float) -> float:
+    """优先按服务端给的 Retry-After，否则用默认退避。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        ra = exc.headers.get("Retry-After") if exc.headers else None
+        if ra:
+            try:
+                return min(30.0, float(ra))
+            except (TypeError, ValueError):
+                pass
+    return default
+
+
 def http_json(
     url: str,
     *,
@@ -172,8 +191,13 @@ def http_json(
     headers: dict | None = None,
     timeout: float = 15.0,
     verify: bool = True,
+    retries: int = 0,
 ) -> dict:
-    """GET / POST JSON。data 不为 None 时走 POST。"""
+    """GET / POST JSON。data 不为 None 时走 POST。
+
+    retries>0 时，429 限流会按指数退避重试（1s、2s、4s…，封顶 8s），
+    优先采用服务端 Retry-After。scan 一次打几十个接口，很容易撞上限流。
+    """
     body = None
     hdrs = {"User-Agent": "iabot/0.1", "Accept": "application/json"}
     if headers:
@@ -181,10 +205,22 @@ def http_json(
     if data is not None:
         body = json.dumps(data).encode("utf-8")
         hdrs["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST" if body else "GET")
-    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context(verify)) as resp:
-        raw = resp.read().decode("utf-8", "replace")
-    return json.loads(raw) if raw.strip() else {}
+
+    attempt = 0
+    while True:
+        req = urllib.request.Request(url, data=body, headers=hdrs,
+                                     method="POST" if body else "GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=ssl_context(verify)) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            return json.loads(raw) if raw.strip() else {}
+        except Exception as exc:
+            attempt += 1
+            if attempt > retries or not _is_rate_limited(exc):
+                raise
+            delay = _retry_after(exc, min(8.0, 0.5 * (2 ** (attempt - 1))))
+            time.sleep(delay)
 
 
 def encode_path(path: str) -> str:
@@ -234,7 +270,8 @@ class BasePool:
         try:
             # 健康探测只是打个极小的 GET。4 秒还答不上来的域名不适合当主力，
             # 而且每个超时都会变成用户等待。真正的行情请求仍用完整超时。
-            d = http_json(url, timeout=min(self._timeout, 4.0), verify=self._verify)
+            d = http_json(url, timeout=min(self._timeout, 4.0), verify=self._verify,
+                       retries=1)  # 探测也容忍一次限流
             if str(d.get("status", "")).lower() == "ok" and d.get("tick"):
                 return True, (time.time() - t0) * 1000, ""
             return False, (time.time() - t0) * 1000, f"返回异常: {str(d)[:120]}"
@@ -300,7 +337,7 @@ class BasePool:
             url = base + encode_path(path)
             for attempt in range(self._retries):
                 try:
-                    d = http_json(url, timeout=timeout, verify=self._verify)
+                    d = http_json(url, timeout=timeout, verify=self._verify, retries=2)
                     with self._lock:
                         self._current = base
                         self._probe_cache[base] = (True, 0.0, "", time.time())

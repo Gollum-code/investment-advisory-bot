@@ -97,6 +97,14 @@ DEFAULTS: dict[str, Any] = {
         "keep_days": 30,
     },
 
+    # 自动备份：DB 里有信号历史/模拟持仓/回测记录/利润簿，损坏无法恢复
+    "backup": {
+        "enabled": True,
+        "dir": "data/backups",
+        "hours": 24,      # 多久备份一次
+        "keep": 14,       # 最多保留多少份
+    },
+
     # 参数方案：命名打包"权重+阈值+模式"，可回测对比后一键应用
     "profiles": {},
     "active_profile": "",

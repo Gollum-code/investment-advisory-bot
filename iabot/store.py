@@ -15,6 +15,7 @@ import json
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from .config import data_path
@@ -578,3 +579,41 @@ class SignalStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ------------------------------------------------------------------
+    # 备份 / 迁移
+    # ------------------------------------------------------------------
+    def backup_to(self, dest: str) -> str:
+        """做一份一致性快照到 dest（SQLite VACUUM INTO）。
+
+        比直接拷贝 .db 文件安全：源库正在写入时，拷贝可能拿到半截数据，
+        而 VACUUM INTO 保证快照是一个完整一致的数据库。
+        """
+        dest_path = Path(dest)
+        if dest_path.suffix != ".db":
+            dest_path = dest_path.with_suffix(".db")
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            if dest_path.exists():
+                dest_path.unlink()
+            # 目标不能和源同一个，否则 VACUUM INTO 会报错
+            self._conn.execute("VACUUM INTO ?", (str(dest_path),))
+        return str(dest_path)
+
+    def stats_overview(self) -> dict:
+        """各表行数概览（备份报告用）。"""
+        out = {}
+        with self._lock:
+            for t in ("signals", "positions", "backtest_runs"):
+                try:
+                    out[t] = self._conn.execute(
+                        f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+                except Exception:
+                    out[t] = None
+        return out
+
+    def table_size_bytes(self) -> int:
+        try:
+            return int(self.path.stat().st_size)
+        except Exception:
+            return 0
