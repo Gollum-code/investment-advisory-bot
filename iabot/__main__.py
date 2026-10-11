@@ -99,6 +99,9 @@ def render_plan(plan: dict, *, verbose: bool = True) -> str:
         out.append(f"  保证金    : {_num(s.get('margin_usdt'))} U"
                    f"（账户 {_num(s.get('margin_pct_of_equity'), 1)}%）"
                    f"  {s.get('leverage')}x")
+        if s.get("liquidation_price"):
+            cap = "（已因强平风险自动下调）" if s.get("leverage_capped") else ""
+            out.append(f"  强平价    : {_num(s.get('liquidation_price'), d)}{cap}")
         out.append(f"  止损亏损  : {_num(s.get('loss_if_stopped_usdt'))} U"
                    f"（{_num(s.get('loss_pct_of_equity'), 2)}%）"
                    f"  手续费约 {_num(s.get('fee_estimate_usdt'), 3)} U")

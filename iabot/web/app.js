@@ -586,6 +586,7 @@
     }
 
     if (sizing.applicable) {
+      const capTag = sizing.leverage_capped ? '<span class="tag warn">已降杠杆</span>' : '';
       h += '<div class="kvgrid">' +
         kv('下单张数', sizing.contracts + ' 张（' + fmtNum(sizing.position_coin, 6) + ' 币）', 'wide') +
         kv('名义价值', fmtNum(sizing.notional_usdt, 2) + ' U', '') +
@@ -593,6 +594,10 @@
           fmtNum(sizing.margin_pct_of_equity, 1) + '%）', '') +
         kv('止损亏损', fmtNum(sizing.loss_if_stopped_usdt, 2) + ' U（' +
           fmtNum(sizing.loss_pct_of_equity, 2) + '%）', '') +
+        (sizing.liquidation_price != null
+          ? kv('强平价', fmtPrice(sizing.liquidation_price, d) + ' ' + capTag,
+               sizing.leverage_capped ? 'bad' : '')
+          : '') +
         kv('杠杆 / 手续费', sizing.leverage + 'x / ' + fmtNum(sizing.fee_estimate_usdt, 3) + ' U', '') +
         '</div>';
       if (sizing.note) h += '<div class="sizing-note">' + esc(sizing.note) + '</div>';
@@ -1206,6 +1211,11 @@
         '<span>保证金 <b>' + fmtNum(pnl.margin_usdt, 2) + ' U</b></span>' +
         (p.stop ? '<span>止损 <b>' + fmtPrice(p.stop, digitsFor(p.entry_price)) + '</b></span>' : '') +
         (p.tp1 ? '<span>止盈 <b>' + fmtPrice(p.tp1, digitsFor(p.entry_price)) + '</b></span>' : '') +
+        (pnl.liquidation_price != null
+          ? '<span class="' + (pnl.liquidation_risk ? 'bad' : '') + '">强平 <b>' +
+            fmtPrice(pnl.liquidation_price, digitsFor(p.entry_price)) + '</b>' +
+            (pnl.liquidation_risk ? ' ⚠止损无效' : '') + '</span>'
+          : '') +
         '</div>' +
         (p.status === 'open'
           ? '<button class="ghost tiny pos-close" data-id="' + p.id + '">平仓</button>'

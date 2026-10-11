@@ -9,7 +9,7 @@ from iabot.config import DEFAULTS
 from iabot.signals import build_plan
 
 try:  # `discover -s tests` 和 `discover -t .` 两种跑法都要能用
-    from .test_signals import DOWN_INTRADAY, RANGE, UP, cfg_with, make_snapshot
+    from .test_signals import DOWN_INTRADAY, NO_ROOM, RANGE, UP, cfg_with, make_snapshot
 except ImportError:
     from test_signals import DOWN_INTRADAY, NO_ROOM, RANGE, UP, cfg_with, make_snapshot
 
@@ -68,6 +68,33 @@ class TestRenderPlan(unittest.TestCase):
         snap.price = None
         text = cli.render_plan(build_plan(snap, cfg_with(), mode="intraday").to_dict())
         self.assertIn("观望", text)
+
+    def test_shows_liquidation_price(self):
+        """强平价必须显示出来——它是杠杆仓位的关键风险信息。"""
+        import copy as _copy
+        cfg = _copy.deepcopy(DEFAULTS)
+        cfg["account"]["preferred_leverage"] = 100
+        cfg["account"]["max_leverage"] = 125
+        plan = build_plan(make_snapshot(**UP), cfg, mode="intraday")
+        text = cli.render_plan(plan.to_dict(), verbose=False)
+        self.assertIn("强平价", text)
+        self.assertIn(f"{plan.sizing['liquidation_price']:,.1f}", text)
+
+    def test_reports_leverage_capped_by_liquidation(self):
+        import copy as _copy
+        cfg = _copy.deepcopy(DEFAULTS)
+        cfg["account"]["preferred_leverage"] = 100
+        cfg["account"]["max_leverage"] = 125
+        plan = build_plan(make_snapshot(**UP), cfg, mode="intraday")
+        self.assertTrue(plan.sizing["leverage_capped"])
+        self.assertLess(plan.sizing["leverage"], 100)
+        self.assertTrue(any("强平" in w for w in plan.warnings))
+
+    def test_normal_leverage_not_capped(self):
+        """默认 10x 不该被误伤。"""
+        plan = build_plan(make_snapshot(**UP), cfg_with(), mode="intraday")
+        self.assertFalse(plan.sizing.get("leverage_capped"))
+        self.assertEqual(plan.sizing["leverage"], 10)
 
 
 class TestArgParsing(unittest.TestCase):
