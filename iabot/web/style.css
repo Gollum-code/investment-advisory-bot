@@ -55,6 +55,15 @@ button.tiny{padding:3px 9px;font-size:11.5px}
   padding:4px 11px;cursor:pointer;user-select:none}
 .chip:hover{background:#17224a;border-style:solid}
 .chip.active{background:#1d2b57;border-style:solid;border-color:var(--accent);color:#dbeafe}
+/* 最近搜索 / 分析过的合约 */
+.chips.recent{margin-top:8px;align-items:center}
+.chips.recent[hidden]{display:none}   /* display:flex 会盖掉 hidden 属性，得显式关掉 */
+.recent-lbl{font-size:11.5px;color:#5f6d8c;margin-right:2px}
+.chips-inline{display:inline-flex;gap:6px;flex-wrap:wrap}
+.chips.recent .chip{font-size:11.5px;padding:3px 10px}
+.recent-clear{font-size:11.5px;color:#5f6d8c;cursor:pointer;margin-left:4px;
+  border-bottom:1px dashed transparent}
+.recent-clear:hover{color:#fca5a5;border-bottom-color:#fca5a5}
 .msg{margin-top:10px;font-size:12.5px;color:var(--warn);white-space:pre-wrap;min-height:1px}
 .msg.err{color:#fca5a5}
 .msg.ok{color:#86efac}

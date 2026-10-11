@@ -15,6 +15,7 @@
     busy: false,
     es: null,
     log: [],
+    recent: [],
   };
 
   // ---------------------------------------------------------------- 工具
@@ -115,6 +116,49 @@
     el.innerHTML = '<div class="loading">' + esc(text || '加载中…') + '</div>';
   }
 
+  // ------------------------------------------------------------ 最近搜索
+  // 记在 localStorage 里，刷新页面后仍在；最多保留 RECENT_MAX 条。
+  const RECENT_KEY = 'iabot.recent';
+  const RECENT_MAX = 8;
+
+  function loadRecent() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+      state.recent = Array.isArray(raw)
+        ? raw.filter((s) => typeof s === 'string' && s).slice(0, RECENT_MAX) : [];
+    } catch (e) {
+      state.recent = [];                 // 隐身模式 / 存储被禁用时静默降级
+    }
+  }
+
+  function saveRecent() {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(state.recent)); } catch (e) { /* 忽略 */ }
+  }
+
+  function pushRecent(sym) {
+    if (!sym) return;
+    state.recent = [sym].concat(state.recent.filter((s) => s !== sym)).slice(0, RECENT_MAX);
+    saveRecent();
+    renderRecent();
+  }
+
+  function renderRecent() {
+    const row = $('recent-row');
+    const box = $('recent');
+    if (!row || !box) return;
+    if (!state.recent.length) { row.hidden = true; box.innerHTML = ''; return; }
+    row.hidden = false;
+    box.innerHTML = state.recent.map((s) =>
+      '<span class="chip' + (s === state.symbol ? ' active' : '') + '" data-recent="' + esc(s) +
+      '" title="' + esc(s) + '">' + esc(s.replace(/-USDT$/, '')) + '</span>').join('');
+  }
+
+  function clearRecent() {
+    state.recent = [];
+    saveRecent();
+    renderRecent();
+  }
+
   // ---------------------------------------------------------------- 初始化
   async function init() {
     try {
@@ -138,6 +182,8 @@
       setPill('pill-cert', '证书 ' + (cert.ca_count || 0) + ' 个' + (cert.verifying ? '' : '（未校验）'),
         cert.ca_count ? 'ok' : 'bad');
 
+      loadRecent();
+      renderRecent();
       applyScheduleUI((def.schedule) || {});
       loadHealth();
       loadHistory();
@@ -175,6 +221,13 @@
       $('symbol').value = chip.dataset.sym;
       analyze(false);
     });
+    $('recent').addEventListener('click', (e) => {
+      const chip = e.target.closest('[data-recent]');
+      if (!chip) return;
+      $('symbol').value = chip.dataset.recent;
+      analyze(false);
+    });
+    $('recent-clear').onclick = clearRecent;
     $('equity').onchange = $('leverage').onchange = $('risk').onchange = () => analyze(true);
     $('btn-run').onclick = runNow;
     $('btn-save-sched').onclick = saveSchedule;
@@ -194,7 +247,7 @@
     if (state.busy) return;
     state.busy = true;
     const sym = ($('symbol').value || '').trim().toUpperCase();
-    if (!/[A-Z0-9]/.test(sym)) { state.busy = false; return setMsg('请输入合约代码，例如 BTC-USDT', 'err'); }
+    if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(sym)) { state.busy = false; return setMsg('请输入合约代码，例如 BTC-USDT 或 牛来-USDT', 'err'); }
     $('symbol').value = sym;
     state.symbol = sym;
     state.mode = $('mode').value;
@@ -224,6 +277,7 @@
         (d.snapshot.errors && d.snapshot.errors.length ? ' · 部分接口异常：' + d.snapshot.errors.join('；') : ''),
         d.snapshot.errors && d.snapshot.errors.length ? '' : 'ok');
       logLine('ok', sym + ' ' + dirLabel(d.plan.direction) + ' 评分 ' + signed(d.plan.score));
+      pushRecent(sym);
     } catch (err) {
       setMsg('分析失败：' + err.message, 'err');
       $('advice').innerHTML = '<div class="empty">分析失败。</div>';
