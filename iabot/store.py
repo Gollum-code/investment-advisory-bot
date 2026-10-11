@@ -20,7 +20,9 @@ from typing import Any
 
 from .config import data_path
 
-SCHEMA = """
+# 建表 / 建索引分两段：老库升级时要先补列（见 _ensure_columns）再建索引，
+# 否则在 signals(outcome) 上建索引会因为列还没补出来而报 no such column。
+SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS signals (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            REAL    NOT NULL,
@@ -44,10 +46,6 @@ CREATE TABLE IF NOT EXISTS signals (
     mae_pct       REAL,            -- 最大不利偏移（相对入场中值 %）
     checked_at    REAL
 );
-CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_sym ON signals(symbol, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_dir ON signals(direction, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(outcome, ts) WHERE outcome IS NULL;
 
 -- 模拟盘持仓：手动录入、程序只负责跟踪浮动盈亏与止损/止盈（不下单）
 CREATE TABLE IF NOT EXISTS positions (
@@ -68,6 +66,13 @@ CREATE TABLE IF NOT EXISTS positions (
     close_reason  TEXT,                    -- stop | tp1 | tp2 | tp3 | manual
     note          TEXT
 );
+"""
+
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_sym ON signals(symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_dir ON signals(direction, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(outcome, ts) WHERE outcome IS NULL;
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol, opened_at DESC);
 """
@@ -107,8 +112,9 @@ class SignalStore:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            self._conn.executescript(SCHEMA)
+            self._conn.executescript(SCHEMA_TABLES)
             _ensure_columns(self._conn)
+            self._conn.executescript(SCHEMA_INDEXES)
             self._conn.commit()
 
     # ------------------------------------------------------------------

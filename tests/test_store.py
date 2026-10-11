@@ -150,5 +150,41 @@ class TestSignalStore(unittest.TestCase):
         self.assertIn("默认", st["by_profile"])
 
 
+
+class TestLegacyDbMigration(unittest.TestCase):
+    """老库（缺 outcome 等列）升级时，必须先补列再建索引，否则启动直接崩。"""
+
+    def test_old_schema_is_upgraded_in_place(self):
+        import sqlite3
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "legacy.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            """
+            CREATE TABLE signals (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,
+              symbol TEXT NOT NULL, mode TEXT NOT NULL, direction TEXT NOT NULL,
+              score REAL, confidence TEXT, price REAL, entry_low REAL,
+              entry_high REAL, stop REAL, stop_pct REAL, rr REAL,
+              payload TEXT NOT NULL);
+            """)
+        conn.execute("INSERT INTO signals (ts, symbol, mode, direction, payload)"
+                     " VALUES (1, 'BTC-USDT', 'intraday', 'long', '{}')")
+        conn.commit()
+        conn.close()
+
+        store = SignalStore(str(db))          # 不该再抛 no such column: outcome
+        self.addCleanup(store.close)
+        cols = {r["name"] for r in store._conn.execute("PRAGMA table_info(signals)")}
+        self.assertIn("outcome", cols)
+        self.assertIn("checked_at", cols)
+        self.assertEqual(
+            store._conn.execute("SELECT COUNT(*) FROM signals").fetchone()[0], 1)
+        names = {r[0] for r in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertIn("idx_signals_pending", names)
+
+
 if __name__ == "__main__":
     unittest.main()
