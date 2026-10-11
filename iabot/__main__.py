@@ -370,6 +370,63 @@ def cmd_backtest(args) -> int:
         print(f"  金额换算     : 初始 {res.equity_usdt:.0f} U / 单笔风险 {res.risk_amount_usdt:.1f} U"
               f" -> 期末约 {res.equity_usdt + pnl_usdt:.0f} U（{(pnl_usdt / res.equity_usdt) * 100:+.1f}%）")
     print("=" * 66)
+    if getattr(args, "save", False):
+        from .btlog import build_params, summarize_result
+        from .store import SignalStore
+        rid = st0 = None
+        try:
+            st0 = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
+                              int((cfg.get("storage") or {}).get("keep_days", 30)))
+            params = build_params(cfg, symbol=sym, mode=args.mode,
+                                  bars=args.bars, step=args.step, warmup=args.warmup,
+                                  equity_usdt=res.equity_usdt, risk_pct=res.risk_pct)
+            rid = st0.save_backtest_run(
+                symbol=sym, mode=args.mode, params=params,
+                result=summarize_result(res.to_dict()),
+                profile=cfg.get("active_profile") or "", elapsed_ms=int(ms))
+        finally:
+            if st0:
+                st0.close()
+        print(f"[已保存] 回测记录已写入历史库（第 {rid} 条）", file=sys.stderr)
+    return 0
+
+
+def cmd_backtests(args) -> int:
+    """列出历史回测记录，并排对比最近两次的参数差异。"""
+    from .store import SignalStore
+    st = SignalStore((load_config().get("storage") or {}).get("db_file", "data/signals.db"),
+                     int((load_config().get("storage") or {}).get("keep_days", 30)))
+    try:
+        rows = st.query_backtest_runs(symbol=args.symbol, mode=args.mode,
+                                      limit=args.limit)
+    finally:
+        st.close()
+    if not rows:
+        print("还没有回测记录。跑一次 backtest --save 就会记下来。")
+        return 0
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    print(f"最近 {len(rows)} 条回测记录：")
+    print()
+    for r in rows:
+        res = r.get("result") or {}
+        prof = f" [{r['profile']}]" if r.get("profile") else ""
+        print(f"  #{r['id']:<4} {r['symbol']:<12} {r['mode']:<9}{prof}")
+        print(f"        {time.strftime('%Y-%m-%d %H:%M', time.localtime(r['created_at']))}"
+              f"   胜率 {res.get('win_rate', 0) * 100:.1f}%"
+              f"   期望 {res.get('expectancy_r', 0):+.3f} R"
+              f"   {res.get('trades', 0)} 笔"
+              f"   期末 {res.get('final_equity_usdt', 0):.0f} U")
+    # 最近两次参数差异提示
+    if len(rows) >= 2:
+        from .btlog import diff_params
+        diffs = diff_params(rows[1].get("params") or {}, rows[0].get("params") or {})
+        if diffs:
+            print()
+            print("  与上一条相比改了：")
+            for d in diffs:
+                print(f"    - {d}")
     return 0
 
 
@@ -458,7 +515,8 @@ def cmd_serve(args) -> int:
 # 参数解析
 # --------------------------------------------------------------------------
 
-COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "notify-test")
+COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
+            "notify-test")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -514,6 +572,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_bk.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置，用于金额换算）")
     p_bk.add_argument("--risk", type=float, help="单笔风险 %（默认取配置，用于金额换算）")
     p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")
+    p_bk.add_argument("--save", action="store_true",
+                      help="把本次回测的参数与结果写入实验记录（可事后复现/对比）")
+
+    p_bl = sub.add_parser("backtests", help="列出历史回测记录")
+    p_bl.add_argument("--symbol", help="按合约过滤，如 BTC-USDT")
+    p_bl.add_argument("--mode", choices=list(MODES), help="按模式过滤")
+    p_bl.add_argument("--limit", type=int, default=20, help="显示最近多少条（默认 20）")
+    p_bl.add_argument("--json", action="store_true", help="输出原始 JSON")
 
     return ap
 
@@ -543,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_backtest(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
+    if args.cmd == "backtests":
+        return cmd_backtests(args)
     return cmd_serve(args)
 
 

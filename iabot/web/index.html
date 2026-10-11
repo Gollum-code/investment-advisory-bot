@@ -151,9 +151,15 @@
     <div class="prof-save">
       <input id="prof-name" type="text" placeholder="方案名，如 稳健/进取" spellcheck="false">
       <button id="btn-prof-save" class="primary">保存当前为方案</button>
+      <label class="line chk"><input type="checkbox" id="prof-archive" checked> 回测时存档</label>
     </div>
     <div id="profiles" class="profiles"></div>
     <div id="prof-cmp" class="prof-cmp"></div>
+    <div class="sub-title" style="margin-top:14px">回测记录
+      <span class="hint">每次回测的参数与结果，可复现可对比</span>
+      <button id="btn-bt-reload" class="ghost right tiny">刷新</button>
+    </div>
+    <div id="backtests" class="bt-list"></div>
   </section>
 
 <!-- 因子权重调参 -->

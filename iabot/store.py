@@ -74,6 +74,30 @@ CREATE INDEX IF NOT EXISTS idx_signals_dir ON signals(direction, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_pending ON signals(outcome, ts) WHERE outcome IS NULL;
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol, opened_at DESC);
+
+-- 回测实验记录：每次回测的参数快照 + 结果摘要，形成可追溯的实验历史。
+-- 存 params 是关键——只有把权重/阈值/成本参数一起存下来，日后才能复现那次结果。
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    REAL    NOT NULL,
+    symbol        TEXT    NOT NULL,
+    mode          TEXT    NOT NULL,
+    profile       TEXT,                    -- 当时生效的参数方案
+    params        TEXT    NOT NULL,        -- JSON：完整参数快照
+    result        TEXT    NOT NULL,        -- JSON：结果摘要（不含 equity_curve）
+    trades        INTEGER,
+    wins          INTEGER,
+    losses        INTEGER,
+    win_rate      REAL,
+    expectancy_r  REAL,
+    total_r       REAL,
+    final_equity  REAL,
+    return_pct    REAL,
+    elapsed_ms    INTEGER,
+    note          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bt_created ON backtest_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bt_symbol ON backtest_runs(symbol, mode, created_at DESC);
 """
 
 # 老库（加结果回填之前建的）没有这些列，启动时补齐
@@ -400,6 +424,90 @@ class SignalStore:
             cur = self._conn.execute("DELETE FROM positions WHERE id=?", (pos_id,))
             self._conn.commit()
             return cur.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # 回测实验记录（backtest_runs 表）
+    # ------------------------------------------------------------------
+    def save_backtest_run(self, *, symbol: str, mode: str, params: dict,
+                          result: dict, profile: str = "", note: str = "",
+                          elapsed_ms: int = 0) -> int:
+        """存一次回测记录。params 要包含足以复现该次结果的完整参数。"""
+        created = time.time()
+        # equity_curve 可能有上百个点，不适合入库，只留摘要
+        summary = {k: v for k, v in (result or {}).items() if k != "equity_curve"}
+        summary.pop("equity_curve_usdt", None)
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO backtest_runs (created_at, symbol, mode, profile, params,
+                       result, trades, wins, losses, win_rate, expectancy_r, total_r,
+                       final_equity, return_pct, elapsed_ms, note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (created, symbol, mode, profile or None,
+                 json.dumps(params or {}, ensure_ascii=False),
+                 json.dumps(summary, ensure_ascii=False),
+                 summary.get("trades"), summary.get("wins"), summary.get("losses"),
+                 summary.get("win_rate"), summary.get("expectancy_r"),
+                 summary.get("total_r"), summary.get("final_equity_usdt"),
+                 summary.get("return_pct"), int(elapsed_ms or 0), note or None))
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def query_backtest_runs(self, *, symbol: str | None = None,
+                            mode: str | None = None, profile: str | None = None,
+                            limit: int = 100) -> list[dict]:
+        sql = "SELECT * FROM backtest_runs WHERE 1=1"
+        args: list[Any] = []
+        if symbol:
+            sql += " AND symbol = ?"
+            args.append(symbol)
+        if mode:
+            sql += " AND mode = ?"
+            args.append(mode)
+        if profile:
+            sql += " AND profile = ?"
+            args.append(profile)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = {k: r[k] for k in r.keys()}
+            for field in ("params", "result"):
+                try:
+                    d[field] = json.loads(d[field])
+                except Exception:
+                    d[field] = {}
+            out.append(d)
+        return out
+
+    def backtest_run(self, run_id: int) -> dict | None:
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT * FROM backtest_runs WHERE id=?", (run_id,)).fetchone()
+        if not r:
+            return None
+        d = {k: r[k] for k in r.keys()}
+        for field in ("params", "result"):
+            try:
+                d[field] = json.loads(d[field])
+            except Exception:
+                d[field] = {}
+        return d
+
+    def delete_backtest_run(self, run_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM backtest_runs WHERE id=?", (run_id,))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def purge_backtest_runs(self, days: int) -> int:
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM backtest_runs WHERE created_at < ?",
+                                     (cutoff,))
+            self._conn.commit()
+            return cur.rowcount
 
     def pnl_summary(self) -> dict:
         """模拟盘利润簿：已平仓的已实现盈亏汇总 + 权益曲线。"""

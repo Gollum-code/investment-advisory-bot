@@ -268,6 +268,7 @@
     $('btn-weights-reset').onclick = () => saveWeights(true);
     $('btn-prof-save').onclick = saveProfile;
     $('btn-prof-cmp').onclick = compareProfiles;
+    $('btn-bt-reload').onclick = loadBacktests;
     $('btn-pos-open').onclick = openPosition;
     $('btn-report').onclick = openReport;
     $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
@@ -1248,6 +1249,45 @@
     } catch (e) {
       $('profiles').innerHTML = '<div class="empty">方案加载失败：' + esc(e.message) + '</div>';
     }
+    loadBacktests();
+  }
+
+  // ---------------------------------------------------------------- 回测记录
+  async function loadBacktests() {
+    try {
+      const d = await api('/api/backtests?limit=20');
+      renderBacktests(d.rows || []);
+    } catch (e) {
+      $('backtests').innerHTML = '<div class="empty">记录加载失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function renderBacktests(rows) {
+    const el = $('backtests');
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty">还没有回测记录。回测时勾选"存档"就会记下来。</div>';
+      return;
+    }
+    el.innerHTML = rows.map((r) => {
+      const res = r.result || {};
+      const exp = res.expectancy_r || 0;
+      const wr = res.win_rate || 0;
+      return '<div class="bt-row">' +
+        '<div class="bt-l">' +
+        '<span class="sym">' + esc(r.symbol) + '</span>' +
+        '<span class="mode">' + esc(r.mode) + '</span>' +
+        (r.profile ? '<span class="tag on">' + esc(r.profile) + '</span>' : '') +
+        '<span class="tm">' + fmtTime(r.created_at, true) + '</span></div>' +
+        '<div class="bt-r">' +
+        '<span>胜率 <b class="' + (wr >= 0.5 ? 'good' : 'bad') + '">' +
+        (wr * 100).toFixed(1) + '%</b></span>' +
+        '<span>期望 <b class="' + (exp >= 0 ? 'good' : 'bad') + '">' +
+        (exp >= 0 ? '+' : '') + exp.toFixed(3) + 'R</b></span>' +
+        '<span>' + (res.trades || 0) + ' 笔</span>' +
+        (res.final_equity_usdt != null
+          ? '<span>期末 <b>' + fmtNum(res.final_equity_usdt, 0) + 'U</b></span>' : '') +
+        '</div></div>';
+    }).join('');
   }
 
   function renderProfiles(list, active, current) {
@@ -1327,12 +1367,14 @@
     try {
       const d = await api('/api/profiles/backtest', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 300, step: 10 }),
+        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 300, step: 10,
+                               save: $('prof-archive').checked }),
       });
       const r = d.result || {};
       const wr = (r.win_rate * 100).toFixed(1);
       toast('回测 ' + name, '胜率 ' + wr + '% · 期望 ' + (r.expectancy_r >= 0 ? '+' : '') +
         r.expectancy_r + ' R/笔', r.expectancy_r >= 0 ? 'ok' : 'warn', 6000);
+      if ($('prof-archive').checked) loadBacktests();
     } catch (err) { toast('回测失败', err.message, 'err'); }
   }
 
@@ -1344,7 +1386,8 @@
     try {
       const d = await api('/api/profiles/compare', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: $('symbol').value, bars: 300, step: 10 }),
+        body: JSON.stringify({ symbol: $('symbol').value, bars: 300, step: 10,
+                               save: $('prof-archive').checked }),
       });
       const rows = d.rows || [];
       if (!rows.length) { el.innerHTML = '<div class="empty">没有可对比的方案。</div>'; return; }

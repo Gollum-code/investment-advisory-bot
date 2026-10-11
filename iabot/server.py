@@ -333,6 +333,13 @@ def make_handler(app: App):
             if path == "/api/pnl":
                 return self._json({"ok": True, "pnl": app.store.pnl_summary()})
 
+            if path == "/api/backtests":
+                rows = app.store.query_backtest_runs(symbol=q.get("symbol"),
+                                                     mode=q.get("mode"),
+                                                     profile=q.get("profile"),
+                                                     limit=min(500, int(q.get("limit") or 100)))
+                return self._json({"ok": True, "rows": rows, "count": len(rows)})
+
             if path == "/api/report":
                 from .report import render_report
                 sym = q.get("symbol") or "BTC-USDT"
@@ -460,8 +467,24 @@ def make_handler(app: App):
             import time as _t
             t0 = _t.time()
             res = backtest(snap, prof_cfg, mode=mode, step=step, max_points=2000)
+            ms = round((_t.time() - t0) * 1000)
+            d = res.to_dict()
+            if body.get("save"):
+                from .btlog import build_params, summarize_result
+                try:
+                    app.store.save_backtest_run(
+                        symbol=symbol, mode=mode,
+                        params=build_params(app.cfg, symbol=symbol, mode=mode,
+                                            bars=bars, step=step, warmup=60,
+                                            equity_usdt=d.get("equity_usdt") or 450.0,
+                                            risk_pct=d.get("risk_pct") or 2.0),
+                        result=summarize_result(d),
+                        profile=(profile or {}).get("name") or "",
+                        note=f"单方案回测 bars={bars} step={step}", elapsed_ms=ms)
+                except Exception:
+                    pass
             return self._json({"ok": True, "name": name, "profile": profile,
-                               "result": res.to_dict(), "ms": round((_t.time() - t0) * 1000)})
+                               "result": d, "ms": ms})
 
         def _handle_position(self, body: dict):
             from .symbols import to_contract as _tc
@@ -525,8 +548,31 @@ def make_handler(app: App):
             t0 = _t.time()
             rows = backtest_all(app.cfg, snapshot=snap, symbol=symbol,
                                 bars=bars, step=step)
-            return self._json({"ok": True, "rows": rows,
-                               "ms": round((_t.time() - t0) * 1000)})
+            ms = round((_t.time() - t0) * 1000)
+            # save=true 时把每个方案的结果都存成实验记录（一次对比留下多条档案）
+            if body.get("save"):
+                from .btlog import build_params, summarize_result
+                saved = 0
+                for row in rows:
+                    try:
+                        app.store.save_backtest_run(
+                            symbol=symbol, mode=row.get("mode") or "intraday",
+                            params=build_params(
+                                app.cfg, symbol=symbol, mode=row.get("mode") or "intraday",
+                                bars=bars, step=step, warmup=60,
+                                equity_usdt=(row["result"].get("equity_usdt") or 450.0),
+                                risk_pct=(row["result"].get("risk_pct") or 2.0)),
+                            result=summarize_result(row["result"]),
+                            profile=row.get("name") if row.get("name") != "当前参数" else "",
+                            note=f"方案对比 bars={bars} step={step}",
+                            elapsed_ms=ms)
+                        saved += 1
+                    except Exception:
+                        pass
+                for r in rows:
+                    r["saved"] = saved
+            return self._json({"ok": True, "rows": rows, "ms": ms,
+                               "saved": body.get("save")})
 
         # ---------------- POST ----------------
         def do_POST(self):

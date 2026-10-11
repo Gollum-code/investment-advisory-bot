@@ -275,6 +275,17 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .line{display:flex;align-items:center;gap:6px;margin:10px 0}
 .line .hint{margin-left:4px}
 .prof-cmp{margin-top:14px}
+.chk{margin:0;display:inline-flex;align-items:center;gap:5px}
+.bt-list{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto}
+.bt-row{display:flex;justify-content:space-between;align-items:center;gap:12px;
+  background:#0e1730;border:1px solid var(--line);border-radius:8px;padding:8px 11px;
+  font-size:12px;flex-wrap:wrap}
+.bt-l{display:flex;align-items:center;gap:8px}
+.bt-l .sym{color:#dbe7ff;font-weight:600}
+.bt-l .mode{color:var(--dim)}
+.bt-l .tm{color:var(--dim);font-size:11px}
+.bt-r{display:flex;gap:12px;color:var(--dim);font-variant-numeric:tabular-nums;flex-wrap:wrap}
+.bt-r b{color:var(--fg)}
 .cmp-table{width:100%;border-collapse:collapse;font-size:12.5px}
 .cmp-table th{color:var(--dim);text-align:left;padding:6px 5px;border-bottom:1px solid var(--line)}
 .cmp-table td{padding:6px 5px;border-top:1px solid #1c2747;font-variant-numeric:tabular-nums}

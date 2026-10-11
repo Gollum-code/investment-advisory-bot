@@ -45,6 +45,8 @@ python -m iabot analyze BTC-USDT --save     :: 分析后把这条信号写入历
 python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT   :: 批量扫描，按信号强度排序
 python -m iabot scan BTC-USDT,ETH-USDT --save    :: 扫描并把有方向的信号写入历史库
 python -m iabot backtest BTC-USDT --mode swing   :: 历史回测，统计胜率与期望值
+python -m iabot backtest BTC-USDT --save         :: 回测并把参数+结果存档（可事后复现/对比）
+python -m iabot backtests --symbol BTC-USDT      :: 查看历史回测记录与参数差异
 python -m iabot check                  :: 网络 / 证书 / 行情接口 / 配置体检
 python -m iabot notify-test           :: 发一条测试通知，验证 notify 渠道配置
 ```
@@ -146,6 +148,24 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 输出里的"期望 R"已扣成本，正数才代表长期按规则做有优势；同时会按你的账户权益和单笔
 风险折算出金额（`--equity` / `--risk` 可覆盖）。
 
+### 回测实验记录
+
+`backtest --save` 会把这次回测存成一条实验记录，网页和 `backtests` 命令都能看。
+关键在于**存的是完整参数快照**（权重、阈值、共振开关、成本参数、步长、账户口径），
+而不只是一个模式名——这样几个月后能复现那次结果，也能并排对比：
+
+```
+$ python -m iabot backtests
+  #3  BTC-USDT  intraday   胜率 60.0%  期望 +0.412 R  24 笔  期末 520 U
+  #2  BTC-USDT  swing      胜率 55.0%  期望 +0.180 R  11 笔  期末 466 U
+
+  与上一条相比改了：
+    - 模式: swing → intraday
+    - 权重 momentum: 0.15 → 0.4
+```
+
+网页上"参数方案"卡片里勾选"回测时存档"，做方案对比时会一次性把每个方案的结果都记下来。
+
 ---
 
 ## 它是怎么算的
@@ -246,6 +266,8 @@ signals.py     因子打分 + 交易计划生成
 advisor.py     编排与缓存
 outcomes.py    信号结局判定（先到目标还是先碰止损）
 backtest.py    历史回测（含手续费/滑点/资金费成本模型）
+btlog.py       回测实验记录（参数快照 + 结果摘要）
+risk.py        强平价估算与止损有效性校验
 profiles.py    参数方案（权重+阈值+模式）与对比应用
 paper.py       模拟盘持仓追踪
 store.py       SQLite 信号历史 + 模拟持仓
