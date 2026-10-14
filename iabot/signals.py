@@ -439,6 +439,70 @@ def _confidence_label(cs: float) -> str:
     return "高" if cs >= 60 else ("中" if cs >= 40 else "低")
 
 
+# 闸门判据。tp1 只看最近那档目标——evaluate_outcome 是"先到先算"，
+# TP1 正是实际最先命中的那档，所以它天然等于"这单实际能拿到多少 R"。
+# weighted / max 承认远端空间，理论上更宽松。
+#
+# 但 19 个币 × 1000 根 K 线回测（三档权重全试过）显示：
+#   swing   tp1 +0.327R | weighted +0.310R | max +0.308R
+#   intraday tp1 -0.046R | weighted -0.047R | max -0.044R
+# 三者差异在噪声内，tp1 反而略优。所以默认值是 tp1 —— 换判据并不能提高期望值。
+# 真正的问题不在这里，见 README「为什么全是观望」。
+GATE_MEASURES = ("tp1", "weighted", "max")
+GATE_DEFAULT_MEASURE = "tp1"
+GATE_DEFAULT_WEIGHTS = (0.5, 0.3, 0.2)
+_GATE_CN = {"tp1": "第一目标", "weighted": "加权目标", "max": "最好目标"}
+
+
+def _gate_settings(gate_cfg: dict) -> tuple[str, float, tuple[float, ...]]:
+    """从 config 的 analysis.gate 解出 (判据, 最低盈亏比, 权重)。"""
+    name = str((gate_cfg or {}).get("measure") or GATE_DEFAULT_MEASURE).lower()
+    if name not in GATE_MEASURES:
+        name = GATE_DEFAULT_MEASURE
+    try:
+        min_rr = float((gate_cfg or {}).get("min_rr", 1.0))
+    except (TypeError, ValueError):
+        min_rr = 1.0
+    raw_w = (gate_cfg or {}).get("weights") or GATE_DEFAULT_WEIGHTS
+    try:
+        w = tuple(float(x) for x in raw_w)[:3]
+    except (TypeError, ValueError):
+        w = GATE_DEFAULT_WEIGHTS
+    if len(w) < 3:                      # 补足三档；权重全 0 时退回默认
+        w = (w + GATE_DEFAULT_WEIGHTS)[:3]
+    if sum(w) <= 0:
+        w = GATE_DEFAULT_WEIGHTS
+    return name, min_rr, w
+
+
+def _target_rr(target_price: float, ref: float, risk: float, direction: str) -> float:
+    """目标位盈亏比 = 目标到入场中点的距离 / 止损距离。"""
+    if risk <= 0:
+        return 0.0
+    return (target_price - ref) / risk if direction == "long" else (ref - target_price) / risk
+
+
+def _gate_measure(targets: list[dict], measure: str,
+                  weights: tuple[float, ...]) -> float | None:
+    """按判据把多档目标压成"这一个闸门要看的盈亏比"。
+
+    只有一档时三种判据等价；档数不足时权重按实际档数归一，避免因为
+    "只有 TP1 却按 0.5 权重算"而把数值压小。
+    """
+    rrs = [float(t.get("rr") or 0.0) for t in targets]
+    if not rrs:
+        return None
+    if measure == "max":
+        return max(rrs)
+    if measure == "weighted":
+        w = weights[:len(rrs)]
+        total = sum(w)
+        if total <= 0:
+            return rrs[0]
+        return sum(v * wi for v, wi in zip(rrs, w)) / total
+    return rrs[0]
+
+
 def compute_factors(snap: Snapshot, *, resonance: bool = False,
                     resonance_weight: float = RESONANCE_DEFAULT_WEIGHT) -> list[Factor]:
     out: list[Factor] = []
@@ -626,6 +690,10 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         return plan
 
     # ---- 入场 / 止损 / 止盈 ----
+    # 顺序很重要：入场带与止损先"定稿"（含夹紧与最小宽度），再用最终的入场中点
+    # mid 算目标位的盈亏比。之前筛选目标位用的是临时的 entry_low，而判定用的是
+    # mid（两者差 0.175×ATR），同一个目标位在筛选和计时用的是两把尺子，
+    # 这才冒出 TP1_RR = 0.66 这种低于筛选门槛的目标。
     if plan.direction == "long":
         support = dn[0]["price"] if dn else None
         # 支撑离现价合适就挂到支撑上，否则用现价下方一小段回撤位
@@ -635,21 +703,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
             base = price - atr_v * 0.30
         plan.entry_low = round(base, 8)
         plan.entry_high = round(base + atr_v * 0.35, 8)
-        plan.stop = round(base - buf, 8)
-        risk = base - plan.stop
-        cands = []
-        for t in up:
-            rr = (t["price"] - base) / risk if risk > 0 else 0
-            if rr >= 0.8:
-                cands.append((rr, t))
-        # 按"先到的先算"排序：RR 越小离得越近
-        cands.sort(key=lambda x: x[0])
-        for i, (rr, t) in enumerate(cands[:3], 1):
-            plan.targets.append({"price": t["price"], "label": f"TP{i}",
-                                 "rr": round(rr, 2), "source": t.get("source", "")})
-        plan.invalidation = f"日线收盘跌破 {plan.stop:,.2f} 则多头逻辑作废"
-        plan.entry_note = ("现价已进入入场区，可挂单或直接进。" if price <= plan.entry_high
-                           else f"等回踩到 {plan.entry_low:,.2f}–{plan.entry_high:,.2f} 再进，现价追多风险高。")
+        raw_stop = base - buf
+        ladder = up
     else:
         resist = up[0]["price"] if up else None
         if resist and (resist - price) <= atr_v * 1.2:
@@ -658,38 +713,31 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
             base = price + atr_v * 0.30
         plan.entry_high = round(base, 8)
         plan.entry_low = round(base - atr_v * 0.35, 8)
-        plan.stop = round(base + buf, 8)
-        risk = plan.stop - base
-        cands = []
-        for t in dn:
-            rr = (base - t["price"]) / risk if risk > 0 else 0
-            if rr >= 0.8:
-                cands.append((rr, t))
-        cands.sort(key=lambda x: x[0])
-        for i, (rr, t) in enumerate(cands[:3], 1):
-            plan.targets.append({"price": t["price"], "label": f"TP{i}",
-                                 "rr": round(rr, 2), "source": t.get("source", "")})
-        plan.invalidation = f"日线收盘站上 {plan.stop:,.2f} 则空头逻辑作废"
-        plan.entry_note = ("现价已进入入场区，可挂单或直接进。" if price >= plan.entry_low
-                           else f"等反抽到 {plan.entry_low:,.2f}–{plan.entry_high:,.2f} 再进，现价追空风险高。")
+        raw_stop = base + buf
+        ladder = dn
 
     # ---- 止损距离夹紧：太窄容易被噪声打掉，太宽则仓位小到没意义 ----
     lo_pct, hi_pct = m["stop_pct_range"]
     mid = (plan.entry_low + plan.entry_high) / 2
-    stop_dist = abs(mid - plan.stop)
+    if plan.direction == "long":
+        stop_dist = mid - raw_stop
+    else:
+        stop_dist = raw_stop - mid
     clamped_lo, clamped_hi = mid * lo_pct / 100.0, mid * hi_pct / 100.0
     if stop_dist < clamped_lo:
         plan.warnings.append(
             f"原始止损仅 {stop_dist / mid * 100:.2f}%（低于 {lo_pct}%），"
             f"已被放宽到 {lo_pct}% 以避免被噪声扫掉。")
-        plan.stop = round(mid - clamped_lo if plan.direction == "long" else mid + clamped_lo, 8)
         stop_dist = clamped_lo
     elif stop_dist > clamped_hi:
         plan.warnings.append(
             f"原始止损 {stop_dist / mid * 100:.2f}% 过宽（超过 {hi_pct}%），"
             f"已收紧到 {hi_pct}%，请以更近的结构位为准。")
-        plan.stop = round(mid - clamped_hi if plan.direction == "long" else mid + clamped_hi, 8)
         stop_dist = clamped_hi
+    if plan.direction == "long":
+        plan.stop = round(mid - stop_dist, 8)
+    else:
+        plan.stop = round(mid + stop_dist, 8)
 
     # ---- 入场带最小宽度：避免出现 0.02% 这种挂不进去的区间 ----
     min_w = mid * m["entry_width_pct"] / 100.0
@@ -698,38 +746,60 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         half = min_w / 2
         plan.entry_low = round(mid - half, 8)
         plan.entry_high = round(mid + half, 8)
+        # 入场带变了，中点得跟着动，否则盈亏比基准还是旧值
+        mid = (plan.entry_low + plan.entry_high) / 2
 
-    # 止损被夹紧后 RR 会变，重新计算目标位
+    # ---- 目标位：用最终的 mid 与止损距离算盈亏比（筛选和判定同一把尺子）----
+    risk = abs(mid - plan.stop)
+    gate_cfg = (cfg.get("analysis") or {}).get("gate") or {}
+    try:
+        floor = float(gate_cfg.get("min_target_rr", 0.8))
+    except (TypeError, ValueError):
+        floor = 0.8
+    cands = []
+    for t in ladder:
+        rr = _target_rr(t["price"], mid, risk, plan.direction)
+        if rr >= floor:
+            cands.append((rr, t))
+    # 按"先到的先算"排序：RR 越小离得越近
+    cands.sort(key=lambda x: x[0])
+    for i, (rr, t) in enumerate(cands[:3], 1):
+        plan.targets.append({"price": t["price"], "label": f"TP{i}",
+                             "rr": round(rr, 2), "source": t.get("source", "")})
+
     if plan.direction == "long":
-        risk = (plan.entry_low + plan.entry_high) / 2 - plan.stop
-        for i, t in enumerate(plan.targets, 1):
-            t["rr"] = round((t["price"] - (plan.entry_low + plan.entry_high) / 2) / risk, 2)
-            t["label"] = f"TP{i}"
+        plan.invalidation = f"日线收盘跌破 {plan.stop:,.2f} 则多头逻辑作废"
+        plan.entry_note = ("现价已进入入场区，可挂单或直接进。" if price <= plan.entry_high
+                           else f"等回踩到 {plan.entry_low:,.2f}–{plan.entry_high:,.2f} 再进，现价追多风险高。")
     else:
-        risk = plan.stop - (plan.entry_low + plan.entry_high) / 2
-        for i, t in enumerate(plan.targets, 1):
-            t["rr"] = round(((plan.entry_low + plan.entry_high) / 2 - t["price"]) / risk, 2)
-            t["label"] = f"TP{i}"
+        plan.invalidation = f"日线收盘站上 {plan.stop:,.2f} 则空头逻辑作废"
+        plan.entry_note = ("现价已进入入场区，可挂单或直接进。" if price >= plan.entry_low
+                           else f"等反抽到 {plan.entry_low:,.2f}–{plan.entry_high:,.2f} 再进，现价追空风险高。")
 
     plan.stop_pct = round(stop_dist / mid * 100, 3)
     plan.rr = plan.targets[0]["rr"] if plan.targets else None
 
-    # 盈亏比不达标就不给方向——给一个注定亏钱的单子是害人
+    # ---- 闸门：只看目标位过不过关，不用再重算一遍（RR 已是最终值）----
+    measure_name, min_rr, measure_w = _gate_settings(gate_cfg)
+    measure_rr = _gate_measure(plan.targets, measure_name, measure_w)
     if not plan.targets:
         plan.warnings.append(
-            f"{m['label']}级别找不到 ≥0.8 盈亏比的目标位（价格正卡在关键位中间）。")
+            f"{m['label']}级别找不到 ≥{floor} 盈亏比的目标位（价格正卡在关键位中间）。")
         plan.gate = {"blocked": True, "reason": "no_target", "score": plan.score,
-                     "would_be": plan.direction, "rr": None, "need": 0.8}
+                     "would_be": plan.direction, "rr": None, "need": floor}
         return _downgrade(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v,
                           "评分有方向，但前方没有像样的空间，暂不出手。")
-    if plan.rr is not None and plan.rr < 1.0:
-        plan.warnings.append(f"调整止损后第一目标盈亏比只有 {plan.rr:.2f}（<1.0），风险大于收益。")
+    if measure_rr < min_rr:
+        cn = _GATE_CN.get(measure_name, measure_name)
+        plan.warnings.append(f"调整止损后{cn}盈亏比 {round(measure_rr, 2)}（< {min_rr}），风险大于收益。")
         plan.gate = {"blocked": True, "reason": "rr", "score": plan.score,
-                     "would_be": plan.direction, "rr": round(plan.rr, 2), "need": 1.0}
+                     "would_be": plan.direction, "rr": round(measure_rr, 2), "need": min_rr,
+                     "measure": measure_name}
         return _downgrade(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v,
                           "盈亏比不足 1:1，不出手。")
-    if plan.rr is not None and plan.rr < 1.2:
-        plan.warnings.append(f"第一目标盈亏比仅 {plan.rr:.2f}，性价比一般，建议等更好的位置。")
+    if measure_rr < min_rr + 0.2:
+        cn = _GATE_CN.get(measure_name, measure_name)
+        plan.warnings.append(f"{cn}盈亏比仅 {round(measure_rr, 2)}，性价比一般，建议等更好的位置。")
 
     agree = sum(1 for f in factors
                 if abs(f.score) > 0.1 and (f.score > 0) == (plan.direction == "long"))
@@ -740,6 +810,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     plan.notes.append(f"{len(factors)} 个因子中 {agree} 个与方向一致，其中 {strong} 个为强信号。")
     plan.notes.append(f"信号强度：{'很强' if abs(plan.score) >= 70 else ('较强' if abs(plan.score) >= 50 else '一般')}"
                       f"；止损用 {stop_mult}×ATR({m['atr_period']})。")
+    plan.notes.append(f"闸门判据：{_GATE_CN.get(measure_name, measure_name)} "
+                      f"{round(measure_rr, 2)} ≥ {min_rr}。")
     if any(f.name == "volatility" and f.score < 0 for f in factors):
         plan.warnings.append("当前波动率偏高，建议把杠杆降到 5 倍以内。")
 

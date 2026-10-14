@@ -72,6 +72,15 @@ DEFAULTS: dict[str, Any] = {
         "factor_weights": {},
         # 多周期共振因子（可选第 11 因子，默认关闭）：日线偏置 × 1h 偏置，
         "resonance": {"enabled": False, "weight": 0.06},
+        # 第二道闸门：目标位盈亏比。默认 tp1 = 只看第一目标（实际最先命中的那档）。
+        # 回测过 weighted(0.5/0.3/0.2) 与 max，与 tp1 差异在噪声内，故保持 tp1。
+        # 目标位筛选门槛：低于此盈亏比的目标位不作为 TP 候选。
+        "gate": {
+            "measure": "tp1",         # tp1 | weighted | max
+            "min_rr": 1.0,            # 闸门最低盈亏比
+            "weights": [0.5, 0.3, 0.2],   # measure=weighted 时各档权重
+            "min_target_rr": 0.8,     # 目标位候选门槛
+        },
         # 回测成本模型（更贴近真实：手续费 + 滑点 + 按持仓时长的资金费）
         "backtest": {
             "enabled": True,
@@ -225,6 +234,24 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         rc["enabled"] = bool(rc.get("enabled", False))
         rc["weight"] = _coerce_num(rc.get("weight"), "analysis.resonance.weight",
                                    0.0, 1.0, 0.06)
+
+    gc = an.get("gate")
+    if not isinstance(gc, dict):
+        an["gate"] = copy.deepcopy(DEFAULTS["analysis"]["gate"])
+    else:
+        if gc.get("measure") not in ("tp1", "weighted", "max"):
+            if gc.get("measure") is not None:
+                print(f"[config] analysis.gate.measure={gc.get('measure')!r} 不认，"
+                      f"改用 tp1")
+            gc["measure"] = "tp1"
+        gc["min_rr"] = _coerce_num(gc.get("min_rr"), "analysis.gate.min_rr",
+                                   0.0, 20.0, 1.0)
+        gc["min_target_rr"] = _coerce_num(gc.get("min_target_rr"),
+                                          "analysis.gate.min_target_rr", 0.0, 20.0, 0.8)
+        gw = gc.get("weights")
+        if not isinstance(gw, list) or not any(
+                isinstance(x, (int, float)) for x in gw):
+            gc["weights"] = [0.5, 0.3, 0.2]
 
     out["http_timeout_sec"] = _coerce_num(out.get("http_timeout_sec"),
                                           "http_timeout_sec", 1, 120, 12.0)
