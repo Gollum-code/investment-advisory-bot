@@ -161,5 +161,70 @@ class TestNearStopWarn(SchedulerTestBase):
         self.assertNotIn(pid, sch._warned)
 
 
+class UniverseFakeClient(FakeClient):
+    """在假行情源上再补全市场接口，用于测试定时任务的全市场轮询。"""
+
+    def __init__(self, symbols, candles=None):
+        super().__init__(candles)
+        self._symbols = symbols
+
+    def contract_list(self):
+        return [{"contract_code": s, "contract_size": 0.001, "labels": ["hot"],
+                 "contract_status": 1} for s in self._symbols]
+
+    def all_tickers(self):
+        return [{"symbol": s, "price": 100.0, "change_pct": 1.0, "turnover": 1e8,
+                 "volume": 1.0, "count": 10} for s in self._symbols]
+
+
+class TestUniverseRoundRobin(SchedulerTestBase):
+    """全市场轮询：每轮只深挖一批，游标跨轮推进，转完一圈回头。"""
+
+    def _universe_scheduler(self, symbols, batch):
+        client = UniverseFakeClient(symbols)
+        return self._scheduler(client=client, universe={
+            "enabled": True, "batch_size": batch, "workers": 2,
+            "filters": {"min_turnover_usdt": 1000}})
+
+    def test_disabled_uses_explicit_symbols(self):
+        sch = self._scheduler()          # universe 默认关闭
+        self.assertEqual(sch._round_symbols(), ["BTC-USDT"])
+
+    def test_batches_advance_cursor(self):
+        syms = ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT"]
+        sch = self._universe_scheduler(syms, 2)
+        self.assertEqual(sch._round_symbols(), ["A-USDT", "B-USDT"])
+        self.assertEqual(sch._round_symbols(), ["C-USDT", "D-USDT"])
+        self.assertEqual(sch._round_symbols(), ["E-USDT", "A-USDT"])   # 绕回
+        self.assertEqual(sch._universe_total, 5)
+
+    def test_batch_larger_than_universe(self):
+        sch = self._universe_scheduler(["A-USDT", "B-USDT"], 10)
+        self.assertEqual(sch._round_symbols(), ["A-USDT", "B-USDT"])
+
+    def test_filters_can_empty_the_universe(self):
+        sch = self._universe_scheduler(["A-USDT"], 5)
+        sch.universe_cfg = {"asset_class": "all", "min_turnover_usdt": 1e12}
+        self.assertEqual(sch._round_symbols(), [])
+        self.assertIn("为空", sch.last_error)
+
+    def test_run_once_scans_only_the_batch(self):
+        syms = [f"C{i}-USDT" for i in range(6)]
+        sch = self._universe_scheduler(syms, 2)
+        plans = sch.run_now()
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(sch._universe_total, 6)
+        self.assertEqual(sch._universe_cursor, 2)
+
+    def test_status_reports_universe(self):
+        sch = self._universe_scheduler(["A-USDT", "B-USDT"], 1)
+        sch.run_now()
+        st = sch.status()
+        self.assertTrue(st["universe"]["enabled"])
+        self.assertEqual(st["universe"]["total"], 2)
+        self.assertEqual(st["universe"]["cursor"], 1)
+        self.assertEqual(st["universe"]["batch_size"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

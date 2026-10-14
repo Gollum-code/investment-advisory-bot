@@ -35,6 +35,22 @@ DEFAULTS: dict[str, Any] = {
         "BNB-USDT", "LTC-USDT", "LINK-USDT", "AVAX-USDT", "ADA-USDT",
     ],
 
+    # 全市场合约池：决定"该关注哪些合约"。火币 USDT 永续有 300+ 个合约，
+    # 一半多是代币化股票/大宗商品，且 24h 成交额中位数只有几万 U，
+    # 所以默认只扫流动性达标的加密币；深挖数量再由 max_symbols 截断。
+    "universe": {
+        "enabled": False,             # 是否启用全市场模式（网页/CLI 也可临时开启）
+        "asset_class": "crypto",      # crypto=只加密币（剔除股票/商品/指数）| all
+        "min_turnover_usdt": 100000.0,  # 24h 成交额下限，过滤僵尸合约
+        "min_price": 0.0,             # 现价下限，过滤近零价合约
+        "include_labels": [],         # 命中任一标签优先纳入，如 ["hot","common","new"]
+        "exclude_labels": [],         # 命中任一标签直接剔除
+        "include": [],                # 强制纳入（豁免流动性门槛，保证不被 max_symbols 挤掉）
+        "exclude": [],                # 强制排除
+        "max_symbols": 60,            # 深挖上限（按 sort 排序后截断）
+        "sort": "turnover",           # turnover=成交额 | abs_change=24h 波动 | change=24h 涨跌
+    },
+
     # 账户与风控
     "account": {
         "equity_usdt": 450.0,
@@ -89,6 +105,15 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "pct": 1.5,              # 距止损小于该百分比时预警
             "cooldown_sec": 1800,    # 同一仓位两次预警的最小间隔
+        },
+        # 全市场轮询：enabled 打开后忽略 symbols，改用 universe.filters 筛选出的
+        # 全市场合约；每轮只深挖 batch_size 个，游标跨轮推进，转完一圈才回头。
+        # 不这么做的话几十上百个合约 × 每轮 300 秒根本跑不完，还必被限流。
+        "universe": {
+            "enabled": False,
+            "batch_size": 20,        # 每轮深挖多少个合约
+            "workers": 4,            # 并发分析数，调高容易撞火币限流（429）
+            "filters": {},           # 覆盖顶层 universe 的过滤条件（可选）
         },
     },
 

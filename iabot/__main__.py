@@ -22,6 +22,7 @@ from .config import ensure_example, load_config
 from .server import build_server, make_app
 from .signals import MODES
 from .symbols import to_contract
+from .universe import is_all_token, merge_spec, select
 
 # --------------------------------------------------------------------------
 # 纯文本输出
@@ -229,30 +230,81 @@ def _open_paper_from_plan(cfg: dict, plan: dict) -> None:
           f"（#{pid}，止损 {plan.get('stop')}）", file=sys.stderr)
 
 
+def _fmt_amt(v) -> str:
+    """雷达表里的价格/成交额：够大就带千分位，够小就多给几位小数。"""
+    if v is None:
+        return "--"
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return "--"
+    if abs(n) >= 1000:
+        return f"{n:,.0f}"
+    if abs(n) >= 1:
+        return f"{n:,.2f}"
+    # 不用 %g：PEPE 这类亚分币种会被写成 4.19e-06，不如直接摊开小数位
+    txt = f"{n:.10f}".rstrip("0").rstrip(".")
+    return txt or "0"
+
+
 def cmd_scan(args) -> int:
     cfg = load_config()
     adv = Advisor(cfg)
     acc = _account_from(args) or None
-    syms = [to_contract(s) for s in args.symbols.split(",") if s.strip()][:20]
-    if not syms:
-        print("[错误] 没有可扫描的合约", file=sys.stderr)
+    tokens = [s for s in (args.symbols or "").split(",") if s.strip()]
+    if not tokens:
+        print("[错误] 没有可扫描的合约（想扫全市场就写 all）", file=sys.stderr)
         return 2
-    plans, errs = [], []
-    for sym in syms:
-        t0 = time.time()
-        try:
-            p = adv.plan_payload(sym, mode=args.mode, force=True, account=acc)
-            plans.append(p)
-            ms = (time.time() - t0) * 1000
-            print(f"  [ok] {sym:<12} {p['direction']:<5} {p['score']:+7.1f}  "
-                  f"{ms:.0f}ms", file=sys.stderr)
-        except Exception as exc:
-            errs.append(f"{sym}: {exc}")
-            print(f"  [!!] {sym:<12} {type(exc).__name__}: {exc}", file=sys.stderr)
-    plans.sort(key=lambda p: -abs(p.get("score") or 0))
+
+    override: dict = {}
+    if args.top:
+        override["max_symbols"] = args.top
+    if args.min_turnover is not None:
+        override["min_turnover_usdt"] = args.min_turnover
+    if args.all_assets:
+        override["asset_class"] = "all"
+    if args.sort:
+        override["sort"] = args.sort
+
+    if getattr(args, "radar", False):
+        rows = adv.radar()
+        spec = merge_spec({**cfg, "universe": {**(cfg.get("universe") or {}), **override}})
+        rows = select(rows, spec)
+        print(f"全市场雷达：交易所共 {len(adv.client.all_tickers())} 个 USDT 永续，"
+              f"筛选后 {len(rows)} 个\n")
+        print(f"{'合约':<14}{'现价':>14}{'24h涨跌':>10}{'24h成交额':>16}  类别")
+        for r in rows:
+            chg = r.get("change_pct")
+            print(f"{r['symbol']:<14}{_fmt_amt(r.get('price')):>14}"
+                  f"{('%+.2f%%' % chg) if chg is not None else '--':>10}"
+                  f"{_fmt_amt(r.get('turnover')):>16}  {r.get('asset_class')}")
+        return 0
+
+    # `all` 在这里被展开成具体合约列表；显式写出的合约永远优先保留
+    syms = adv.expand_symbols(tokens, override=override or None)
+    if not syms:
+        print("[错误] 没有可扫描的合约（检查 --top / --min-turnover 是否筛得太狠）",
+              file=sys.stderr)
+        return 2
+
+    workers = max(1, int(getattr(args, "workers", 4) or 4))
+    if len(tokens) == 1 and is_all_token(tokens[0]):
+        print(f"[全市场] 候选 {len(syms)} 个，并发 {workers} 分析中…", file=sys.stderr)
+    t0 = time.time()
+
+    def on_result(sym: str, plan: dict | None, err: str | None) -> None:
+        if err:
+            print(f"  [!!] {sym:<12} {err}", file=sys.stderr)
+        elif plan:
+            print(f"  [ok] {sym:<12} {plan['direction']:<5} "
+                  f"{plan['score']:+7.1f}", file=sys.stderr)
+
+    plans, errs = adv.scan(syms, mode=args.mode, account=acc,
+                           workers=workers, on_result=on_result)
     if getattr(args, "save", False):
         saved = _save_plans(cfg, plans)
         print(f"[已保存] {saved} 条有方向的信号写入历史库", file=sys.stderr)
+    print(f"[耗时] {time.time() - t0:.1f}s / {len(syms)} 个合约", file=sys.stderr)
     if args.json:
         print(json.dumps({"plans": plans, "errors": errs}, ensure_ascii=False, indent=2))
         return 0
@@ -261,7 +313,7 @@ def cmd_scan(args) -> int:
     for p in plans:
         print(render_plan(p, verbose=False))
     if errs:
-        print("失败:", "; ".join(errs), file=sys.stderr)
+        print(f"失败 {len(errs)} 个:", "; ".join(errs[:10]), file=sys.stderr)
     return 0
 
 
@@ -712,8 +764,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_an.add_argument("--paper", action="store_true",
                       help="按本次计划开一笔模拟仓（入场/止损/止盈自动带入）")
 
-    p_sc = sub.add_parser("scan", help="批量扫描多个合约")
-    p_sc.add_argument("symbols", help="逗号分隔，如 BTC-USDT,ETH-USDT,SOL-USDT")
+    p_sc = sub.add_parser("scan", help="批量扫描多个合约，或全市场（all）")
+    p_sc.add_argument("symbols",
+                      help="逗号分隔，如 BTC-USDT,ETH-USDT；写 all/全部 则扫描全市场")
     p_sc.add_argument("--mode", choices=list(MODES), default="intraday")
     p_sc.add_argument("--equity", type=float)
     p_sc.add_argument("--leverage", type=int)
@@ -721,6 +774,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc.add_argument("--json", action="store_true")
     p_sc.add_argument("--save", action="store_true",
                       help="把有方向的信号写入历史库（默认 data/signals.db）")
+    p_sc.add_argument("--top", type=int,
+                      help="全市场深挖多少个（按成交额取前 N，覆盖配置 universe.max_symbols）")
+    p_sc.add_argument("--min-turnover", type=float,
+                      help="全市场筛选的 24h 成交额下限（USDT），默认取配置 100000")
+    p_sc.add_argument("--all-assets", action="store_true",
+                      help="连代币化股票/大宗商品一起扫（默认只扫加密币）")
+    p_sc.add_argument("--sort", choices=["turnover", "abs_change", "change"],
+                      help="全市场候选排序方式，默认按成交额")
+    p_sc.add_argument("--workers", type=int, default=4,
+                      help="并发分析数（默认 4，调高容易撞限流）")
+    p_sc.add_argument("--radar", action="store_true",
+                      help="只打印全市场雷达表（现价/涨跌/成交额，1 个请求），不做深度分析")
 
     p_ck = sub.add_parser("check", help="网络 / 证书 / 行情接口 / 配置体检")
     p_ck.add_argument("--symbol", help="用哪个合约做行情测试，默认取配置里第一个")

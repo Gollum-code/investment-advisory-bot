@@ -6,9 +6,12 @@ import threading
 import time
 from typing import Any
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from .market import MarketClient, Snapshot
 from .signals import MODES, Plan, build_plan
 from .symbols import to_contract
+from .universe import build_radar, expand_tokens, resolve
 
 # 影响交易计划的账户字段。计划缓存键只拼这些：用户改过权益/杠杆/风险后，
 # 同一合约同一模式就不能再复用旧结果，否则会拿到"按另一个账户算的张数"。
@@ -138,6 +141,64 @@ class Advisor:
         with self._lock:
             rows = sorted(self._plan_cache.values(), key=lambda t: -t[0])
         return [p.to_dict() for _, _, p in rows]
+
+    # ------------------------------------------------------------------
+    def scan(self, symbols: list[str], *, mode: str = "intraday",
+             account: dict | None = None, workers: int = 4, force: bool = True,
+             only_signal: bool = False,
+             on_result: Any = None, should_stop: Any = None,
+             ) -> tuple[list[dict], list[str]]:
+        """并发分析一批合约，返回 (plans, errors)，plans 按 |评分| 降序。
+
+        全市场动辄几十上百个合约，串行每个 3-10 秒根本跑不完，所以用线程池。
+        workers 默认 4：火币公开接口对高频请求会限流（429），并发抬太高反而
+        更慢——429 会触发指数退避重试。on_result(symbol, plan, error) 每完成
+        一个回调一次；should_stop() 返回 True 时不再派发新任务（定时任务收尾用）。
+        """
+        plans: list[dict] = []
+        errors: list[str] = []
+        if not symbols:
+            return plans, errors
+        workers = max(1, min(int(workers or 4), len(symbols)))
+
+        def work(sym: str) -> dict:
+            return self.plan_payload(sym, mode=mode, account=account, force=force)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(work, s): s for s in symbols}
+            for fut in as_completed(futs):
+                sym = futs[fut]
+                if should_stop and should_stop():
+                    for f in futs:
+                        f.cancel()
+                    break
+                try:
+                    p = fut.result()
+                except Exception as exc:
+                    msg = f"{sym}: {type(exc).__name__}: {exc}"
+                    errors.append(msg)
+                    if on_result:
+                        on_result(sym, None, msg)
+                    continue
+                if not only_signal or p.get("direction") != "wait":
+                    plans.append(p)
+                if on_result:
+                    on_result(sym, p, None)
+        plans.sort(key=lambda p: -abs(p.get("score") or 0))
+        return plans, errors
+
+    def radar(self) -> list[dict]:
+        """全市场雷达表：所有合约的现价/涨跌/成交额/分类（一次请求）。"""
+        return build_radar(self.client)
+
+    def universe(self, *, override: dict | None = None) -> list[str]:
+        """按配置筛选出该深挖的全市场合约代码列表。"""
+        return resolve(self.client, self.cfg, override=override)
+
+    def expand_symbols(self, tokens: list[str], *,
+                       override: dict | None = None) -> list[str]:
+        """把 `all` / 具体合约混合的写法展开成完整合约列表。"""
+        return expand_tokens(self.client, tokens, self.cfg, override=override)
 
     def health(self) -> list[dict]:
         return self.client.health()

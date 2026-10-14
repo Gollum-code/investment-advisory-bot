@@ -43,7 +43,9 @@ python -m iabot analyze btc --mode swing
 python -m iabot analyze BTC-USDT --json --brief
 python -m iabot analyze BTC-USDT --save     :: 分析后把这条信号写入历史库
 python -m iabot scan BTC-USDT,ETH-USDT,SOL-USDT   :: 批量扫描，按信号强度排序
-python -m iabot scan BTC-USDT,ETH-USDT --save    :: 扫描并把有方向的信号写入历史库
+python -m iabot scan all --top 40            :: 全市场扫描（自动筛出流动性达标的加密币）
+python -m iabot scan all --radar            :: 只看全市场雷达表，不做深度分析（1 个请求）
+python -m iabot scan all --save             :: 扫描并把有方向的信号写入历史库
 python -m iabot backtest BTC-USDT --mode swing   :: 历史回测，统计胜率与期望值
 python -m iabot backtest BTC-USDT --save         :: 回测并把参数+结果存档（可事后复现/对比）
 python -m iabot backtests --symbol BTC-USDT      :: 查看历史回测记录与参数差异
@@ -67,6 +69,18 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 | `--save` | 把本次分析结果写入信号历史库（SQLite，默认 `data/signals.db`） |
 | `--json` / `--brief` | 输出原始 JSON / 不打印因子明细 |
 
+`scan` 常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `all` / `全部` | 扫全市场；可与具体合约混写（`BTC-USDT,all`） |
+| `--top 40` | 全市场深挖多少个（按排序取前 N） |
+| `--min-turnover 100000` | 24h 成交额下限（USDT），过滤僵尸合约 |
+| `--all-assets` | 连代币化股票 / 大宗商品一起扫（默认只扫加密币） |
+| `--sort turnover\|abs_change\|change` | 候选排序：成交额 / 24h 波动 / 24h 涨跌 |
+| `--workers 4` | 并发分析数（调高容易撞火币限流） |
+| `--radar` | 只打印全市场雷达表，不做因子打分 |
+
 `backtest` 常用参数：
 
 | 参数 | 说明 |
@@ -78,9 +92,71 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 
 ---
 
+## 全市场监控
+
+关注列表只有 10 个币，怎么盯住**所有**币？两段式：
+
+1. **广度雷达（1 个请求）**：`batch_merged` 一次拿回交易所全部 400 个 USDT 永续的现价、
+   24h 涨跌、成交额；`swap_contract_info` 补上面值与标签，合成一张全市场表。
+   网页上就是"全市场雷达"面板，CLI 是 `scan all --radar`。
+2. **深度分析**：只对筛出来的候选做完整因子打分。筛选规则在 `universe` 配置块里。
+
+### 为什么不全量深挖
+
+全量 400 个合约每个要 10 个接口，4000 次请求；而且流动性差异极大：
+
+| 合约数 | 24h 成交额 |
+|---|---|
+| 388 | 全部 USDT 永续（含股票类） |
+| ~130 | 纯加密币 |
+| 170 | ≥ 10 万 U |
+| 23 | ≥ 100 万 U |
+
+成交额中位数只有 **6.5 万 U**，一半合约是几乎没有流动性的僵尸盘——深挖它们既慢又必然被限流。
+所以默认口径是「加密币 + 24h 成交额 ≥ 10 万 U + 取前 N 个」，把有限的请求花在能真下的单上。
+
+### 过滤规则（`config.json` 的 `universe`）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | 关闭 | 是否启用全市场模式（网页/CLI 可临时开，不依赖它） |
+| `asset_class` | `crypto` | `crypto`=剔除代币化股票/大宗商品/指数；`all`=全都扫 |
+| `min_turnover_usdt` | 100000 | 24h 成交额下限，过滤僵尸合约 |
+| `min_price` | 0 | 现价下限，过滤近零价合约 |
+| `include_labels` / `exclude_labels` | 空 | 按交易所标签增减（如 `["hot","new"]`） |
+| `include` / `exclude` | 空 | 强制纳入 / 排除；`include` 豁免流动性门槛且排在截断最前 |
+| `max_symbols` | 60 | 深挖上限 |
+| `sort` | `turnover` | `turnover` / `abs_change` / `change` |
+
+### 定时任务：分批轮转，不是每轮全扫
+
+勾上「全市场轮询」后，每轮只深挖 `batch_size` 个（默认 20），游标跨轮推进，
+全市场转完一圈才回头。这样 130 个币 ÷ 20 = 7 轮轮完，每轮约 50 秒，间隔 300 秒完全跑得动；
+也永远只请求 `batch_size × 10` 个接口。设 `batch_size ≥ 全市场数量` 就退化成每轮全扫。
+
+并发数 `workers` 默认 4。实测 8 个合约串行 80.8 秒、并发 4 只要 20.5 秒（快 3.9 倍）；
+再往上调收益有限，火币对高频请求会限流（429），程序会指数退避重试。
+
+### 用法
+
+```bat
+python -m iabot scan all --radar                    :: 全市场雷达表
+python -m iabot scan all --top 40 --save            :: 全市场深挖 + 落库
+python -m iabot scan all --min-turnover 1000000     :: 只扫百万 U 以上的大币
+python -m iabot scan all --sort abs_change --top 20 :: 扫今天波动最大的 20 个
+python -m iabot scan BTC-USDT,all                   :: 指定合约 + 全市场混合
+```
+
+网页上：「全市场雷达」面板可调筛选条件并点任意一行跳转分析；「扫描全市场」走并发深挖；
+「定时任务」里勾「全市场轮询」设每轮深挖数。
+
+---
+
 ## 网页控制台
 
 - **选币种**：输入框支持任意 `XXX-USDT`，带 80+ 币种中文名/别名下拉；下面还有常用币快捷标签。
+- **全市场雷达**：一次请求拉回交易所全部 USDT 永续，按流动性/类别筛选后列出现价、24h 涨跌、成交额与已有信号，点任意一行跳转分析。
+- **全市场轮询**：定时任务可切到全市场模式，每轮深挖一批、游标跨轮推进。
 - **模式**：日内 / 波段，切换即重算。
 - **账户参数**：权益、杠杆、单笔风险，改动立即重算仓位（不写回配置）。
 - **行情与关键位**：手绘 K 线（周期可切 1min/5min/15min/60min/1day…），叠加 MA20、成交量、入场区、止损与止盈位。
@@ -109,6 +185,8 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 | `rest_bases` | hbdm.com / btcgateway.pro / hbdm.vip | 行情域名池，启动时按顺序健康探测，用第一个能通的 |
 | `tls_verify` | `true` | 关掉可绕过证书问题（自行承担风险） |
 | `symbols` | 10 个主流币 | 关注列表，"扫描全部"用这个 |
+| `universe.*` | 加密币/10万U/前60 | 全市场筛选：类别、流动性门槛、深挖上限与排序 |
+| `schedule.universe.*` | 关闭/每轮20个/并发4 | 全市场轮询：分批大小、并发数、过滤覆盖 |
 | `account.equity_usdt` | 450 | 账户权益 |
 | `account.preferred_leverage` | 10 | 下单杠杆 |
 | `account.max_leverage` | 10 | 杠杆上限（程序不会给超过这个的杠杆） |
@@ -263,7 +341,8 @@ iabot/
   config.py      配置加载保存
   netutil.py     TLS 兜底 + 多域名健康探测与故障转移
   symbols.py     币种表与合约代码识别
-  market.py      行情抓取（K线/盘口/资金费率/持仓量，带缓存）
+  universe.py    全市场合约池（发现/分类/流动性筛选/排序）
+  market.py      行情抓取（K线/盘口/资金费率/持仓量/全市场列表，带缓存）
   indicators.py  零依赖技术指标（SMA/EMA/RSI/MACD/ATR/ADX/BOLL/VWAP…）
   levels.py      关键价位（摆动点/成交量密集区/斐波那契/挂单墙/整数关口）
 signals.py     因子打分 + 交易计划生成

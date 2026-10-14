@@ -230,5 +230,153 @@ class TestServerAuth(unittest.TestCase):
         self.assertEqual(code, 401)
 
 
+class TestUniverseAPI(unittest.TestCase):
+    """/api/universe 与 /api/scan?symbols=all：用假行情源，不联网。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["open_browser"] = False
+        cfg["rest_bases"] = []
+        cfg["storage"] = {"db_file": str(Path(self.tmp.name) / "signals.db"),
+                          "keep_days": 30}
+        self.app = make_app(cfg)
+        self.app.advisor.client = RadarFakeClient()
+        self.srv = build_server(self.app, "127.0.0.1", 0)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever,
+                         kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.app.stop()
+        self.tmp.cleanup()
+
+    def _get(self, path):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        try:
+            with urllib.request.urlopen(url, timeout=15) as r:
+                return r.status, json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    def test_universe_radar(self):
+        code, d = self._get("/api/universe")
+        self.assertEqual(code, 200)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["stats"]["total"], 4)
+        self.assertEqual(d["stats"]["crypto"], 3)
+        self.assertEqual(d["stats"]["picked"], 2)      # 流动性筛掉小币
+        syms = [r["symbol"] for r in d["rows"]]
+        self.assertEqual(syms, ["BTC-USDT", "ETH-USDT"])
+        # 股票合约不应混进加密币结果
+        self.assertNotIn("TSLA-USDT", syms)
+
+    def test_universe_overrides(self):
+        code, d = self._get("/api/universe?min_turnover=1&all_assets=1&top=10")
+        self.assertEqual(code, 200)
+        syms = [r["symbol"] for r in d["rows"]]
+        self.assertIn("TSLA-USDT", syms)
+
+    def test_scan_expands_all(self):
+        # 不带 min_turnover 时走配置默认（10 万 U），SMALL 被流动性筛掉
+        code, d = self._get("/api/scan?symbols=all&workers=2")
+        self.assertEqual(code, 200)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["scanned"], 2)              # BTC/ETH 流动性达标
+        self.assertEqual(len(d["plans"]), 2)
+        self.assertIn("breadth", d)
+        self.assertIn("elapsed", d)
+
+    def test_scan_all_relaxes_liquidity_filter(self):
+        code, d = self._get("/api/scan?symbols=all&min_turnover=1&workers=2")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["scanned"], 3)              # SMALL 也进来了
+        # 股票合约仍然不进加密币池
+        self.assertNotIn("TSLA-USDT", [p["symbol"] for p in d["plans"]])
+
+    def test_scan_impossible_filter_is_400(self):
+        code, d = self._get("/api/scan?symbols=all&min_turnover=999999999999")
+        self.assertEqual(code, 400)
+        self.assertFalse(d["ok"])
+        self.assertIn("error", d)
+
+    def test_scan_literal_symbols_still_work(self):
+        code, d = self._get("/api/scan?symbols=BTC-USDT")
+        self.assertEqual(code, 200)
+        self.assertEqual([p["symbol"] for p in d["plans"]], ["BTC-USDT"])
+
+    def test_scan_all_with_literal_token(self):
+        # 显式写出的合约与全市场候选合并，且不重复
+        code, d = self._get("/api/scan?symbols=BTC-USDT,all&min_turnover=1")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["scanned"], 3)
+        syms = [p["symbol"] for p in d["plans"]]
+        self.assertEqual(len(syms), len(set(syms)))
+
+    def test_schedule_persists_universe(self):
+        # 别真的写 config.json 到仓库里
+        from unittest import mock
+        with mock.patch("iabot.server.save_config") as saved:
+            body = json.dumps({"universe": {"enabled": True, "batch_size": 7,
+                                            "workers": 3,
+                                            "filters": {"min_turnover_usdt": 250000}}}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{self.port}/api/schedule", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+        sc = d["schedule"]
+        self.assertTrue(sc["universe"]["enabled"])
+        self.assertEqual(sc["universe"]["batch_size"], 7)
+        self.assertEqual(sc["universe"]["workers"], 3)
+        self.assertEqual(sc["universe"]["filters"]["min_turnover_usdt"], 250000)
+        saved.assert_called_once()
+        # 调度器状态与内存配置都要跟着变
+        self.assertTrue(self.app.scheduler.universe_enabled)
+        self.assertEqual(self.app.scheduler.universe_batch, 7)
+        self.assertEqual(self.app.scheduler.scan_workers, 3)
+        self.assertTrue(self.app.cfg["schedule"]["universe"]["enabled"])
+
+
+class RadarFakeClient:
+    """全市场接口的假实现：3 个加密币 + 1 个代币化股票。"""
+
+    def contract_list(self):
+        return [
+            {"contract_code": "BTC-USDT", "contract_size": 0.001,
+             "labels": ["hot"], "contract_status": 1},
+            {"contract_code": "ETH-USDT", "contract_size": 0.001,
+             "labels": ["common"], "contract_status": 1},
+            {"contract_code": "SMALL-USDT", "contract_size": 1.0,
+             "labels": ["new"], "contract_status": 1},
+            {"contract_code": "TSLA-USDT", "contract_size": 0.0001,
+             "labels": ["stock", "tradfi"], "contract_status": 1},
+        ]
+
+    def all_tickers(self):
+        return [
+            {"symbol": "BTC-USDT", "price": 100.0, "change_pct": 1.0,
+             "turnover": 5e8, "volume": 1.0, "count": 9},
+            {"symbol": "ETH-USDT", "price": 50.0, "change_pct": -2.0,
+             "turnover": 3e8, "volume": 1.0, "count": 9},
+            {"symbol": "SMALL-USDT", "price": 1.0, "change_pct": 5.0,
+             "turnover": 1e4, "volume": 1.0, "count": 2},
+            {"symbol": "TSLA-USDT", "price": 400.0, "change_pct": 0.5,
+             "turnover": 9e7, "volume": 1.0, "count": 9},
+        ]
+
+    def snapshot(self, symbol, *, periods, kline_size):
+        from iabot.market import Snapshot
+        return Snapshot(symbol=symbol, price=100.0)
+
+    def kline(self, symbol, period, size=300):
+        return []
+
+    def health(self):
+        return []
+
+
 if __name__ == "__main__":
     unittest.main()

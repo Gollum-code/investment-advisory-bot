@@ -16,6 +16,9 @@
     es: null,
     log: [],
     recent: [],
+    uniAuto: true,
+    uniRows: [],
+    uniBusy: false,
   };
 
   // ---------------------------------------------------------------- 工具
@@ -221,6 +224,8 @@
       loadProfiles();
       loadPositions();
       analyze(false);
+      // 雷达是全市场一次性请求，让首个分析先跑完再拉，免得开局就撞限流
+      setTimeout(() => { if (state.uniAuto) loadUniverse(false); }, 1500);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
       toast('初始化失败', err.message, 'err');
@@ -275,6 +280,15 @@
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
+    $('btn-scan-all').onclick = () => scan(true);
+    $('btn-uni-reload').onclick = () => loadUniverse(true);
+    $('btn-uni-scan').onclick = () => scan(true);
+    $('uni-autoload').onchange = (e) => { state.uniAuto = e.target.checked; if (state.uniAuto) loadUniverse(false); };
+    $('sc-uni').onchange = () => {
+      const on = $('sc-uni').checked;
+      $('sc-uni-batch').disabled = !on;
+      $('sc-symbols').disabled = on;
+    };
     $('tf-seg').addEventListener('click', (e) => {
       const b = e.target.closest('.seg-btn');
       if (!b) return;
@@ -739,21 +753,117 @@
       '</div>';
   }
 
-  async function scan() {
-    const btn = $('btn-scan');
+  function uniQuery() {
+    const q = new URLSearchParams({
+      top: $('uni-top').value || '40',
+      min_turnover: $('uni-turnover').value || '100000',
+      sort: $('uni-sort').value || 'turnover',
+    });
+    if ($('uni-allassets').checked) q.set('all_assets', '1');
+    return q;
+  }
+
+  async function loadUniverse(force) {
+    const box = $('universe');
+    if (state.uniBusy) return;
+    state.uniBusy = true;
+    if (force || !state.uniRows.length) loading(box, '拉取全市场行情中（一次请求拉回所有合约）…');
+    try {
+      const d = await api('/api/universe?' + uniQuery().toString());
+      state.uniRows = d.candidates || [];
+      renderUniverse(d);
+    } catch (err) {
+      box.innerHTML = '<div class="empty">雷达加载失败：' + esc(err.message) + '</div>';
+      $('uni-hint').textContent = '全市场行情获取失败';
+    } finally {
+      state.uniBusy = false;
+    }
+  }
+
+  const UNI_CLASS = {
+    crypto: '加密', stock: '股票', tradfi: ' TradFi',
+    commodity: '商品', index: '指数',
+  };
+
+  function renderUniverse(d) {
+    const st = d.stats || {};
+    $('uni-hint').textContent = '交易所共 ' + (st.total || 0) + ' 个 USDT 永续（加密 ' +
+      (st.crypto || 0) + ' / 股票类 ' + ((st.stock || 0) + (st.tradfi || 0)) +
+      '），成交额 ≥ ' + fmtCompact(st.threshold || 0) + ' U 的有 ' +
+      (st.picked || 0) + ' 个';
+
+    const rows = state.uniRows || [];
+    if (!rows.length) {
+      $('universe').innerHTML =
+        '<div class="empty">没有合约通过筛选——把「24h 成交额下限」调低试试。</div>';
+      return;
+    }
+    const body = rows.map((r) => {
+      const chg = r.change_pct;
+      const dd = digitsFor(r.price);
+      const dir = r.direction || '';
+      return '<tr data-sym="' + esc(r.symbol) + '">' +
+        '<td class="us">' + esc(r.symbol) + '</td>' +
+        '<td class="uni-tag ' + esc(r.asset_class) + '">' +
+          esc(UNI_CLASS[r.asset_class] || r.asset_class) + '</td>' +
+        '<td class="uni-px">' + fmtPrice(r.price, dd) + '</td>' +
+        '<td class="' + cls(chg || 0) + '">' +
+          (chg == null ? '--' : signed(chg) + '%') + '</td>' +
+        '<td class="uni-to">' + fmtCompact(r.turnover) + '</td>' +
+        '<td class="uni-sc ' + cls(r.score || 0) + '">' +
+          (r.score == null ? '--' : signed(r.score)) +
+          (dir && dir !== 'wait' ? ' ' + dirLabel(dir) : '') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    $('universe').innerHTML =
+      '<table class="uni-tbl"><thead><tr><th>合约</th><th>类别</th><th>现价</th>' +
+      '<th>24h</th><th>24h 成交额</th><th>信号</th></tr></thead><tbody>' +
+      body + '</tbody></table>';
+    $('universe').onclick = (e) => {
+      const tr = e.target.closest('tr[data-sym]');
+      if (!tr) return;
+      $('symbol').value = tr.dataset.sym;
+      analyze(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  }
+
+  function fmtCompact(v) {
+    if (v == null || !isFinite(v)) return '--';
+    const n = Number(v);
+    if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (Math.abs(n) >= 1e4) return (n / 1e4).toFixed(1) + '万';
+    return fmtNum(n, 0);
+  }
+
+  async function scan(full) {
+    const btn = full ? $('btn-scan-all') : $('btn-scan');
     btn.disabled = true;
-    loading($('scan'), '扫描中，逐个合约拉取行情（约 3-10 秒/个）…');
+    const target = $('btn-scan-all');
+    $('btn-scan').disabled = true;
+    $('btn-uni-scan').disabled = true;
+    loading($('scan'), full
+      ? '全市场扫描中：先按流动性筛候选，再并发深挖（越慢说明候选越多）…'
+      : '扫描中，逐个合约拉取行情（约 3-10 秒/个，并发执行）…');
     try {
       const q = new URLSearchParams({
-        symbols: state.watchlist.join(','),
+        symbols: full ? 'all' : state.watchlist.join(','),
         mode: $('mode').value,
         equity: $('equity').value || '450',
         leverage: $('leverage').value || '10',
         risk_pct: $('risk').value || '2',
+        workers: $('uni-workers').value || '4',
       });
+      if (full) for (const [k, v] of uniQuery()) q.set(k, v);
       const d = await api('/api/scan?' + q.toString());
       const plans = d.plans || [];
-      if (!plans.length) { $('scan').innerHTML = '<div class="empty">没有结果。</div>'; return; }
+      if (!plans.length) {
+        $('scan').innerHTML = '<div class="empty">没有结果。' +
+          (d.error ? esc(d.error) : '') + '</div>';
+        if (d.error) toast('全市场扫描', d.error, 'err', 8000);
+        return;
+      }
       const bd = d.breadth || {};
       $('scan').innerHTML = renderBreadth(bd) + plans.map((p) => {
         const dd = digitsFor(p.price);
@@ -775,13 +885,21 @@
         analyze(false);
         window.scrollTo({ top: 0, behavior: 'smooth' });
       };
-      if ((d.errors || []).length) toast('部分合约失败', d.errors.join('；'), 'err', 6000);
-      logLine('ok', '扫描完成：' + plans.length + ' 个合约');
+      const label = full ? '全市场扫描' : '扫描';
+      logLine('ok', label + '完成：' + plans.length + ' 个合约 / 耗时 ' +
+        (d.elapsed != null ? d.elapsed + 's' : '未知'));
+      if (full) logLine('ok', '扫描范围：' + (d.scanned || plans.length) + ' 个候选');
+      if ((d.errors || []).length) toast('部分合约失败', d.errors.slice(0, 5).join('；'), 'err', 6000);
+      // 扫描完刷新雷达，顺带把新评分显示到雷达表上
+      if (full && state.uniAuto) loadUniverse(false);
     } catch (err) {
       $('scan').innerHTML = '<div class="empty">扫描失败：' + esc(err.message) + '</div>';
       toast('扫描失败', err.message, 'err');
     } finally {
       btn.disabled = false;
+      target.disabled = false;
+      $('btn-scan').disabled = false;
+      $('btn-uni-scan').disabled = false;
     }
   }
 
@@ -791,6 +909,17 @@
     $('sc-interval').value = sc.interval_sec || 300;
     $('sc-symbols').value = (sc.symbols || ['BTC-USDT']).join(', ');
     $('sc-onlysig').checked = !!sc.only_on_signal;
+    const u = sc.universe || {};
+    $('sc-uni').checked = !!u.enabled;
+    $('sc-uni-batch').value = u.batch_size || 20;
+    $('sc-uni-batch').disabled = !u.enabled;
+    $('sc-symbols').disabled = !!u.enabled;
+    // 全市场过滤条件与雷达面板共用同一份输入，省得两处各调一遍
+    const f = u.filters || {};
+    if (f.min_turnover_usdt != null) $('uni-turnover').value = f.min_turnover_usdt;
+    if (f.max_symbols != null) $('uni-top').value = f.max_symbols;
+    if (f.asset_class) $('uni-allassets').checked = f.asset_class === 'all';
+    if (f.sort) $('uni-sort').value = f.sort;
   }
 
   async function loadSchedule() {
@@ -810,32 +939,50 @@
     const next = sc.next_run ? '，下次 ' + fmtTime(sc.next_run) : '';
     setPill('pill-sched', on ? '任务运行中 ' + sc.interval_sec + 's' + next : '任务已停止',
       on ? 'ok' : 'warn');
-    $('sched-hint').textContent = '已跑 ' + (sc.run_count || 0) + ' 轮 · 合约 ' +
-      ((sc.symbols || []).join(', ') || '--') +
+    const u = sc.universe || {};
+    const scope = u.enabled
+      ? '全市场 ' + (u.total || '?') + ' 个 / 每轮 ' + u.batch_size +
+        ' 个（游标 ' + (u.cursor || 0) + '）'
+      : '指定合约 ' + ((sc.symbols || []).join(', ') || '--');
+    $('sched-hint').textContent = '已跑 ' + (sc.run_count || 0) + ' 轮 · ' + scope +
       (sc.last_error ? ' · 上次错误：' + sc.last_error : '');
   }
 
   async function saveSchedule() {
+    const fullMarket = $('sc-uni').checked;
     const syms = $('sc-symbols').value.split(/[,，\s]+/).filter(Boolean)
       .map((s) => s.toUpperCase());
-    if (!syms.length) return toast('保存失败', '至少要填一个合约', 'err');
+    if (!fullMarket && !syms.length) return toast('保存失败', '至少要填一个合约', 'err');
     $('btn-save-sched').disabled = true;
     try {
+      const body = {
+        enabled: $('sc-enabled').checked,
+        interval_sec: Number($('sc-interval').value) || 300,
+        symbols: syms.length ? syms : ['BTC-USDT'],
+        mode: $('mode').value,
+        only_on_signal: $('sc-onlysig').checked,
+        universe: {
+          enabled: fullMarket,
+          batch_size: Number($('sc-uni-batch').value) || 20,
+          workers: Number($('uni-workers').value) || 4,
+          filters: {
+            min_turnover_usdt: Number($('uni-turnover').value) || 0,
+            max_symbols: Number($('uni-top').value) || 40,
+            asset_class: $('uni-allassets').checked ? 'all' : 'crypto',
+            sort: $('uni-sort').value || 'turnover',
+          },
+        },
+      };
       const d = await api('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          enabled: $('sc-enabled').checked,
-          interval_sec: Number($('sc-interval').value) || 300,
-          symbols: syms,
-          mode: $('mode').value,
-          only_on_signal: $('sc-onlysig').checked,
-        }),
+        body: JSON.stringify(body),
       });
       renderSchedStatus(d.schedule);
+      const scope = fullMarket ? '全市场轮询' : syms.join(', ');
       toast('已保存', ($('sc-enabled').checked ? '循环执行已开启' : '循环执行已关闭') +
-        '，每 ' + d.schedule.interval_sec + ' 秒一轮', 'ok');
-      logLine('ok', '任务配置已更新：' + syms.join(', ') + ' / ' + d.schedule.interval_sec + 's');
+        '，每 ' + d.schedule.interval_sec + ' 秒一轮 · ' + scope, 'ok');
+      logLine('ok', '任务配置已更新：' + scope + ' / ' + d.schedule.interval_sec + 's');
     } catch (err) {
       toast('保存失败', err.message, 'err');
     } finally {

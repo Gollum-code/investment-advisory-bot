@@ -22,6 +22,18 @@
     "AVAX-USDT",
     "ADA-USDT"
   ],
+  "universe": {
+    "enabled": false,
+    "asset_class": "crypto",
+    "min_turnover_usdt": 100000.0,
+    "min_price": 0.0,
+    "include_labels": [],
+    "exclude_labels": [],
+    "include": [],
+    "exclude": [],
+    "max_symbols": 60,
+    "sort": "turnover"
+  },
   "account": {
     "equity_usdt": 450.0,
     "risk_pct_per_trade": 2.0,
@@ -75,11 +87,23 @@
       "enabled": true,
       "pct": 1.5,
       "cooldown_sec": 1800
+    },
+    "universe": {
+      "enabled": false,
+      "batch_size": 20,
+      "workers": 4,
+      "filters": {}
     }
   },
   "storage": {
     "db_file": "data/signals.db",
     "keep_days": 30
+  },
+  "backup": {
+    "enabled": true,
+    "dir": "data/backups",
+    "hours": 24,
+    "keep": 14
   },
   "profiles": {},
   "active_profile": "",

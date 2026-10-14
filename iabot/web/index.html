@@ -208,7 +208,11 @@
       <label class="fld narrow"><span>间隔（秒）</span>
         <input id="sc-interval" type="number" min="30" step="30" value="300">
       </label>
-      <label class="fld"><span>循环合约（逗号分隔）</span>
+      <label class="line"><input type="checkbox" id="sc-uni"> 全市场轮询</label>
+      <label class="fld narrow"><span>每轮深挖数</span>
+        <input id="sc-uni-batch" type="number" min="1" max="120" step="5" value="20">
+      </label>
+      <label class="fld"><span>循环合约（逗号分隔，全市场模式下忽略）</span>
         <input id="sc-symbols" type="text" value="BTC-USDT" spellcheck="false">
       </label>
       <label class="line"><input type="checkbox" id="sc-onlysig"> 只在有方向时落库</label>
@@ -228,11 +232,42 @@
     </div>
   </section>
 
+  <!-- 全市场雷达 -->
+  <section class="card">
+    <h2>全市场雷达
+      <span class="hint" id="uni-hint">一次请求拉回火币全部 USDT 永续合约，按流动性筛出值得看的</span>
+      <button id="btn-uni-scan" class="ghost right">深挖候选</button>
+      <button id="btn-uni-reload" class="primary right">刷新雷达</button>
+    </h2>
+    <div class="uni-row">
+      <label class="fld narrow"><span>24h 成交额下限（U）</span>
+        <input id="uni-turnover" type="number" min="0" step="10000" value="100000">
+      </label>
+      <label class="fld narrow"><span>候选上限</span>
+        <input id="uni-top" type="number" min="1" max="300" step="5" value="40">
+      </label>
+      <label class="fld narrow"><span>排序</span>
+        <select id="uni-sort">
+          <option value="turnover">按成交额</option>
+          <option value="abs_change">按 24h 波动</option>
+          <option value="change">按 24h 涨跌</option>
+        </select>
+      </label>
+      <label class="fld narrow"><span>并发数</span>
+        <input id="uni-workers" type="number" min="1" max="12" step="1" value="4">
+      </label>
+      <label class="line"><input type="checkbox" id="uni-allassets"> 连代币化股票/大宗商品一起</label>
+      <label class="line"><input type="checkbox" id="uni-autoload" checked> 打开页面自动刷新</label>
+    </div>
+    <div id="universe" class="universe"><div class="empty">点「刷新雷达」拉取全市场行情。</div></div>
+  </section>
+
   <!-- 多币种速览 -->
   <section class="card">
     <h2>多币种速览
-      <span class="hint">批量扫描当前关注列表，按信号强度排序</span>
-      <button id="btn-scan" class="ghost right">扫描全部</button>
+      <span class="hint">批量扫描关注列表或全市场候选，按信号强度排序</span>
+      <button id="btn-scan-all" class="ghost right">扫描全市场</button>
+      <button id="btn-scan" class="ghost right">扫描关注列表</button>
     </h2>
     <div id="scan" class="scan"></div>
   </section>

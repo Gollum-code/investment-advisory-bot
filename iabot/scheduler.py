@@ -34,6 +34,15 @@ class Scheduler:
         self.symbols: list[str] = list(sc.get("symbols") or ["BTC-USDT"])
         self.mode: str = sc.get("mode") or "intraday"
         self.only_on_signal: bool = bool(sc.get("only_on_signal", False))
+        # 全市场轮询：每次只深挖分批的一批，游标跨轮推进，全市场转完一圈再回头。
+        # 若每轮都扫全量，几十上百个合约 × 每轮 300 秒根本跑不完，还必被限流。
+        uni = dict(sc.get("universe") or {})
+        self.universe_enabled: bool = bool(uni.get("enabled", False))
+        self.universe_batch: int = max(1, int(uni.get("batch_size") or 20))
+        self.universe_cfg: dict[str, Any] = dict(uni.get("filters") or {})
+        self.scan_workers: int = max(1, int(uni.get("workers") or 4))
+        self._universe_cursor: int = 0
+        self._universe_total: int = 0
         # 落库去重：方向没变且评分变化不大时，间隔期内不重复记录
         self.dedupe: dict = dict(sc.get("dedupe") or {}) if sc.get("dedupe") else {
             "cooldown_sec": 3600, "score_delta": 5.0}
@@ -224,6 +233,33 @@ class Scheduler:
                         "mfe_pct": res["mfe_pct"], "mae_pct": res["mae_pct"]})
         return done
 
+    def _round_symbols(self) -> list[str]:
+        """本轮要分析的合约列表。
+
+        开了全市场就按游标取分批的一批（转完一圈才回头），
+        没开就按配置里写死的列表。
+        """
+        if not self.universe_enabled:
+            return [s for s in self.symbols if s]
+        try:
+            all_syms = self.advisor.universe(override=self.universe_cfg)
+        except Exception as exc:
+            self.last_error = f"universe: {type(exc).__name__}: {exc}"
+            self._emit({"type": "error", "ts": time.time(),
+                        "error": f"全市场列表获取失败，本轮跳过: {self.last_error}"})
+            return []
+        self._universe_total = len(all_syms)
+        if not all_syms:
+            self.last_error = "全市场列表为空（可能被过滤条件筛光了）"
+            self._emit({"type": "error", "ts": time.time(),
+                        "error": "全市场筛选后没有合约，检查 universe.min_turnover_usdt 等过滤条件"})
+            return []
+        size = min(self.universe_batch, len(all_syms))
+        start = self._universe_cursor % len(all_syms)
+        batch = [all_syms[(start + i) % len(all_syms)] for i in range(size)]
+        self._universe_cursor = (start + size) % len(all_syms)
+        return batch
+
     def _run_once(self) -> list[dict]:
         if not self._run_lock.acquire(blocking=False):
             self._emit({"type": "skip", "ts": time.time(), "reason": "上一轮还没跑完"})
@@ -232,27 +268,37 @@ class Scheduler:
             t0 = time.time()
             verified = self._verify_pending()
             closed = self._check_positions()
-            self._emit({"type": "run_start", "ts": t0, "symbols": list(self.symbols),
-                        "mode": self.mode, "verified": verified, "closed": closed})
+            symbols = self._round_symbols()
+            self._emit({"type": "run_start", "ts": t0, "symbols": list(symbols),
+                        "mode": self.mode, "verified": verified, "closed": closed,
+                        "universe": self.universe_enabled,
+                        "universe_total": self._universe_total})
             results: list[dict] = []
-            for sym in list(self.symbols):
-                if self._stop.is_set():
-                    break
-                try:
-                    plan = self.advisor.plan_payload(sym, mode=self.mode, force=True)
-                    # 推送前先看上一条信号的方向，用于判断"方向翻转"
-                    prev = self.store.last_row(sym, self.mode)
-                    prev_dir = (prev or {}).get("direction")
-                    sent = self.notifier.notify_signal(plan, prev_direction=prev_dir)
-                    self.store.save(plan, only_on_signal=self.only_on_signal,
-                                    dedupe=self.dedupe)
-                    results.append(plan)
-                    self._emit({"type": "plan", "ts": plan.get("generated_at"),
-                                "plan": plan, "notified": sent})
-                except Exception as exc:
-                    self.last_error = f"{sym}: {type(exc).__name__}: {exc}"
-                    self._emit({"type": "error", "ts": time.time(), "symbol": sym,
-                                "error": self.last_error})
+
+            def on_result(sym: str, plan: dict | None, err: str | None) -> None:
+                if err:
+                    self.last_error = err
+                    self._emit({"type": "error", "ts": time.time(),
+                                "symbol": sym, "error": err})
+                    return
+                assert plan is not None
+                # 推送前先看上一条信号的方向，用于判断"方向翻转"
+                prev = self.store.last_row(sym, self.mode)
+                prev_dir = (prev or {}).get("direction")
+                sent = self.notifier.notify_signal(plan, prev_direction=prev_dir)
+                self.store.save(plan, only_on_signal=self.only_on_signal,
+                                dedupe=self.dedupe)
+                results.append(plan)
+                self._emit({"type": "plan", "ts": plan.get("generated_at"),
+                            "plan": plan, "notified": sent})
+
+            plans, errs = self.advisor.scan(
+                symbols, mode=self.mode, workers=self.scan_workers,
+                only_signal=self.only_on_signal,
+                on_result=on_result,
+                should_stop=lambda: self._stop.is_set())
+            del errs          # 错误已由 on_result 逐条 emit 过
+
             self.run_count += 1
             self.last_run = time.time()
             try:
@@ -266,9 +312,11 @@ class Scheduler:
             self._emit({"type": "run_done", "ts": self.last_run,
                         "elapsed": round(self.last_run - t0, 2), "count": len(results),
                         "verified": verified, "closed": closed, "purged": purged,
+                        "universe_total": self._universe_total,
+                        "universe_cursor": self._universe_cursor,
                         "signals": [{"symbol": p["symbol"], "direction": p["direction"],
-                                     "score": p["score"]} for p in results]})
-            return results
+                                     "score": p["score"]} for p in plans]})
+            return plans
         finally:
             self._run_lock.release()
 
@@ -286,6 +334,14 @@ class Scheduler:
             "mode": self.mode,
             "symbols": list(self.symbols),
             "only_on_signal": self.only_on_signal,
+            "universe": {
+                "enabled": self.universe_enabled,
+                "batch_size": self.universe_batch,
+                "workers": self.scan_workers,
+                "filters": dict(self.universe_cfg),
+                "total": self._universe_total,
+                "cursor": self._universe_cursor,
+            },
             "last_run": self.last_run,
             "next_run": self.next_run,
             "run_count": self.run_count,
@@ -296,7 +352,11 @@ class Scheduler:
 
     def configure(self, *, enabled: bool | None = None, interval_sec: int | None = None,
                   symbols: list[str] | None = None, mode: str | None = None,
-                  only_on_signal: bool | None = None) -> dict:
+                  only_on_signal: bool | None = None,
+                  universe_enabled: bool | None = None,
+                  universe_batch: int | None = None,
+                  universe_workers: int | None = None,
+                  universe_filters: dict | None = None) -> dict:
         if interval_sec is not None:
             self.interval = max(30, int(interval_sec))
         if symbols is not None:
@@ -305,6 +365,15 @@ class Scheduler:
             self.mode = mode
         if only_on_signal is not None:
             self.only_on_signal = only_on_signal
+        if universe_enabled is not None:
+            self.universe_enabled = bool(universe_enabled)
+        if universe_batch is not None:
+            self.universe_batch = max(1, int(universe_batch))
+        if universe_workers is not None:
+            self.scan_workers = max(1, int(universe_workers))
+        if universe_filters is not None:
+            self.universe_cfg = dict(universe_filters)
+            self._universe_cursor = 0     # 过滤条件变了，游标回到起点重扫
 
         want = self.enabled if enabled is None else bool(enabled)
         was_running = self.running

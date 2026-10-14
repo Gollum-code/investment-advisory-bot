@@ -197,6 +197,49 @@ class MarketClient:
             return rows[0] if rows else {}
         return self._cached(f"cinfo:{symbol}", fetch)
 
+    def contract_list(self) -> list[dict]:
+        """全市场 USDT 永续合约清单（不带 contract_code 就是全量）。
+
+        一次请求能拿回交易所所有在架合约，含合约面值、状态与标签
+        （labels 里带 stock/tradfi/commodities 的是代币化股票与大宗商品，
+        不是加密币，全市场扫描时要靠它过滤）。
+        """
+        def fetch():
+            d = self._get("/linear-swap-api/v1/swap_contract_info")
+            return [r for r in (d.get("data") or [])
+                    if str(r.get("contract_code") or "").endswith("-USDT")]
+        return self._cached("all-contracts", fetch)
+
+    def all_tickers(self) -> list[dict]:
+        """全市场批量行情：一次请求拿回所有合约的现价/涨跌/成交额。
+
+        这是全市场广度雷达的数据源——400 个合约只要一次请求，
+        比逐个拉 detail/merged 快几个数量级。
+        """
+        def fetch():
+            d = self._get("/linear-swap-ex/market/detail/batch_merged")
+            out = []
+            for r in (d.get("ticks") or []):
+                code = str(r.get("contract_code") or "")
+                if not code.endswith("-USDT"):
+                    continue
+                close = float(r.get("close") or 0) or None
+                open24 = float(r.get("open") or 0) or None
+                out.append({
+                    "symbol": code,
+                    "price": close,
+                    "open": open24,
+                    "high": float(r.get("high") or 0) or None,
+                    "low": float(r.get("low") or 0) or None,
+                    "volume": float(r.get("vol") or 0) or 0.0,
+                    "turnover": float(r.get("trade_turnover") or 0) or 0.0,
+                    "count": int(r.get("count") or 0),
+                    "change_pct": (close / open24 - 1.0) * 100.0
+                                  if close and open24 else None,
+                })
+            return out
+        return self._cached("all-tickers", fetch)
+
     def funding(self, symbol: str) -> dict:
         def fetch():
             d = self._get(f"/linear-swap-api/v1/swap_funding_rate?contract_code={symbol}")

@@ -19,6 +19,7 @@ from .scheduler import Scheduler
 from .signals import FACTOR_DEFAULTS, MODES
 from .profiles import ProfileStore, cfg_with_profile
 from .store import SignalStore
+from .universe import merge_spec, select
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -47,6 +48,20 @@ def market_breadth(plans: list[dict]) -> dict:
         "sentiment": sentiment,
         "scores": {p.get("symbol"): p.get("score") for p in plans},
     }
+
+
+def _universe_override(q: dict) -> dict:
+    """把查询串里的一次性全市场筛选参数转成 universe 覆盖项（不写回配置）。"""
+    out: dict = {}
+    if q.get("top"):
+        out["max_symbols"] = int(q["top"])
+    if q.get("min_turnover") not in (None, ""):
+        out["min_turnover_usdt"] = float(q["min_turnover"])
+    if q.get("all_assets") in ("1", "true"):
+        out["asset_class"] = "all"
+    if q.get("sort"):
+        out["sort"] = q["sort"]
+    return out
 
 
 class App:
@@ -296,22 +311,79 @@ def make_handler(app: App):
 
             if path == "/api/scan":
                 raw = q.get("symbols") or "BTC-USDT"
-                syms = [s for s in raw.split(",") if s.strip()][:20]
+                tokens = [s for s in raw.split(",") if s.strip()]
                 mode = q.get("mode") or "intraday"
                 only_sig = q.get("only_signal") == "1"
-                out, errs = [], []
-                for s in syms:
-                    try:
-                        p = app.advisor.plan_payload(s, mode=mode,
-                                                     account=app._account(q))
-                        if not only_sig or p.get("direction") != "wait":
-                            out.append(p)
-                    except Exception as exc:
-                        errs.append(f"{s}: {type(exc).__name__}: {exc}")
-                out.sort(key=lambda p: -abs(p.get("score") or 0))
+                t_scan = time.time()
+                override = _universe_override(q)
+                try:
+                    syms = app.advisor.expand_symbols(tokens, override=override)
+                except Exception as exc:
+                    return self._json({"ok": False,
+                                       "error": f"全市场列表获取失败: {type(exc).__name__}: {exc}"},
+                                      502)
+                if not syms:
+                    return self._json({"ok": False, "plans": [], "errors": [],
+                                       "breadth": market_breadth([]),
+                                       "ts": time.time(),
+                                       "error": "筛选后没有合约（试试放宽 --min-turnover / 调大 top）"},
+                                      400)
+                out, errs = app.advisor.scan(
+                    syms, mode=mode, account=app._account(q),
+                    workers=max(1, min(16, int(q.get("workers") or 4))),
+                    only_signal=only_sig)
                 return self._json({"ok": True, "plans": out, "errors": errs,
                                    "breadth": market_breadth(out),
+                                   "scanned": len(syms),
+                                   "elapsed": round(time.time() - t_scan, 1),
                                    "ts": time.time()})
+
+            if path == "/api/universe":
+                # 全市场雷达：一次请求拿回所有合约的现价/涨跌/成交额。
+                # 这是"监控所有币种"的第一段，不做因子打分，所以很快。
+                try:
+                    rows = app.advisor.radar()
+                except Exception as exc:
+                    return self._json({"ok": False,
+                                       "error": f"全市场列表获取失败: {type(exc).__name__}: {exc}"},
+                                      502)
+                spec = merge_spec({**app.cfg,
+                                   "universe": {**(app.cfg.get("universe") or {}),
+                                                **_universe_override(q)}})
+                picked = select(rows, spec)
+                by_sym = {r["symbol"]: r for r in rows}
+                # 已缓存的计划直接带上评分，网页上能一次看到"全市场 + 谁有信号"
+                plans = app.advisor.cached_plans()
+                latest: dict[str, dict] = {}
+                for p in plans:
+                    s = p.get("symbol")
+                    if s and (s not in latest or (p.get("generated_at") or 0) >=
+                              (latest[s].get("generated_at") or 0)):
+                        latest[s] = p
+                crypto = [r for r in rows if r.get("asset_class") == "crypto"]
+                return self._json({
+                    "ok": True, "ts": time.time(),
+                    "rows": picked,
+                    "stats": {
+                        "total": len(rows),
+                        "crypto": len(crypto),
+                        "stock": sum(1 for r in rows if r.get("asset_class") == "stock"),
+                        "tradfi": sum(1 for r in rows if r.get("asset_class") == "tradfi"),
+                        "other": len(rows) - len(crypto),
+                        "picked": len(picked),
+                        "threshold": spec["min_turnover_usdt"],
+                        "max_symbols": spec["max_symbols"],
+                    },
+                    "candidates": [{
+                        **by_sym[s],
+                        "score": (latest.get(s) or {}).get("score"),
+                        "direction": (latest.get(s) or {}).get("direction"),
+                    } for s in [p.get("symbol") for p in picked] if s],
+                    "spec": {"min_turnover_usdt": spec["min_turnover_usdt"],
+                             "max_symbols": spec["max_symbols"],
+                             "asset_class": spec["asset_class"],
+                             "sort": spec["sort"]},
+                })
 
             if path == "/api/breadth":
                 raw = q.get("symbols") or ",".join(app.cfg.get("symbols") or ["BTC-USDT"])
@@ -643,17 +715,27 @@ def make_handler(app: App):
             body = self._body()
             try:
                 if path == "/api/schedule":
+                    uni = body.get("universe") if isinstance(body.get("universe"), dict) else None
                     st = app.scheduler.configure(
                         enabled=body.get("enabled"),
                         interval_sec=body.get("interval_sec"),
                         symbols=body.get("symbols"),
                         mode=body.get("mode"),
                         only_on_signal=body.get("only_on_signal"),
+                        universe_enabled=(uni or {}).get("enabled"),
+                        universe_batch=(uni or {}).get("batch_size"),
+                        universe_workers=(uni or {}).get("workers"),
+                        universe_filters=(uni or {}).get("filters"),
                     )
-                    app.cfg.setdefault("schedule", {}).update({
-                        "enabled": st["enabled"], "interval_sec": st["interval_sec"],
-                        "symbols": st["symbols"], "mode": st["mode"],
-                        "only_on_signal": st["only_on_signal"]})
+                    saved = {"enabled": st["enabled"], "interval_sec": st["interval_sec"],
+                             "symbols": st["symbols"], "mode": st["mode"],
+                             "only_on_signal": st["only_on_signal"]}
+                    if uni is not None:
+                        merged_uni = dict(app.cfg.get("schedule", {}).get("universe") or {})
+                        merged_uni.update({k: v for k, v in uni.items() if v is not None})
+                        merged_uni.update(st["universe"])
+                        saved["universe"] = merged_uni
+                    app.cfg.setdefault("schedule", {}).update(saved)
                     save_config(app.cfg)
                     return self._json({"ok": True, "schedule": st})
 
@@ -687,6 +769,9 @@ def make_handler(app: App):
                     an = body.get("analysis")
                     if isinstance(an, dict):
                         app.cfg.setdefault("analysis", {}).update(an)
+                    uni = body.get("universe")
+                    if isinstance(uni, dict):
+                        app.cfg.setdefault("universe", {}).update(uni)
                     save_config(app.cfg)
                     return self._json({"ok": True, "config": app.cfg})
 
