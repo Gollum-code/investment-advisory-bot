@@ -177,6 +177,58 @@ class TestSignalStore(unittest.TestCase):
         self.assertIn("默认", st["by_profile"])
 
 
+    def test_win_stats_excludes_timeout_from_grouped_win_rate(self):
+        """timeout 不是亏损：分组胜率必须和总胜率用同一套口径。
+
+        曾经 by_mode/by_score 直接拿含 timeout 的 rows 去算，而 _agg 用
+        l = n - w，把 timeout 当成了亏损，于是分组胜率比总胜率低一大截，
+        页面上会同时出现两个互相矛盾的胜率。
+        """
+        tp = self.store.save({**self._plan(), "symbol": "AAA-USDT"})
+        stopped = self.store.save({**self._plan(RANGE), "symbol": "AAA-USDT"})
+        timeout = self.store.save({**self._plan(), "symbol": "AAA-USDT"})
+        self.store.set_outcome(tp, "tp1", rr=2.0)
+        self.store.set_outcome(stopped, "stopped", rr=-1.0)
+        self.store.set_outcome(timeout, "timeout")
+        st = self.store.win_stats()
+        self.assertEqual(st["resolved"], 2)
+        self.assertAlmostEqual(st["win_rate"], 0.5)
+        g = st["by_symbol"]["AAA-USDT"]
+        self.assertEqual(g["n"], 2)          # timeout 不进分母
+        self.assertEqual(g["wins"], 1)
+        self.assertEqual(g["losses"], 1)     # 也不会被算成亏损
+        self.assertAlmostEqual(g["win_rate"], st["win_rate"])
+
+    def test_win_stats_group_with_only_timeouts_still_listed(self):
+        """只有 timeout 的分组仍要出现在结果里（只是计数为 0），
+        否则用户会以为那个币/方案从没出过信号。"""
+        only = self.store.save({**self._plan(), "symbol": "ZZZ-USDT"})
+        self.store.set_outcome(only, "timeout")
+        st = self.store.win_stats()
+        self.assertIn("ZZZ-USDT", st["by_symbol"])
+        self.assertEqual(st["by_symbol"]["ZZZ-USDT"]["n"], 0)
+        self.assertIsNone(st["by_symbol"]["ZZZ-USDT"]["win_rate"])
+
+    def test_open_count_not_capped_by_positions_page_limit(self):
+        """持仓数不能用 positions() 的默认分页（200）去数，否则超了就报少。"""
+        n = 5
+        for i in range(n):
+            self.store.open_position(symbol=f"S{i}-USDT", direction="long",
+                                     entry_price=100.0, size_coin=1.0,
+                                     leverage=5, stop=95.0)
+        self.assertEqual(self.store._count_where(status="open"), n)
+        self.assertEqual(len(self.store.positions(status="open")), n)
+        self.assertEqual(self.store.pnl_summary()["open_count"], n)
+
+    def test_backup_refuses_same_path_as_source(self):
+        """备份目标与源库同路径时必须拒绝，不能先把源库 unlink 掉。"""
+        same = str(self.store.path)
+        with self.assertRaises(ValueError):
+            self.store.backup_to(same)
+        self.assertTrue(self.store.path.exists(), "源库被删了")
+        # 拒绝之后仍然能正常读写
+        self.assertIsNotNone(self.store.save(self._plan()))
+
 
 class TestLegacyDbMigration(unittest.TestCase):
     """老库（缺 outcome 等列）升级时，必须先补列再建索引，否则启动直接崩。"""

@@ -40,8 +40,38 @@ def _make_snapshot(n=240, period="15min"):
 
 def _cfg():
     cfg = copy.deepcopy(DEFAULTS)
-    cfg["analysis"]["score_threshold"] = 20  # 让合成行情更容易出信号
+    cfg["analysis"]["score_threshold"] = 20  # 用合成行情才容易出信号
     return cfg
+
+
+def _trading_snapshot(n=300):
+    """三周期齐全、真能出交易的夹具。
+
+    _make_snapshot 只给一个周期，其余因子因缺数据全部降权为 0，
+    结果永远是 0 笔交易 —— 用它写的成本测试其实一直在空转。
+    这里把 15min/60min/1day 都填上，才能真的比较成本。
+    """
+    from iabot.market import Snapshot
+    import random
+
+    rnd = random.Random(17)
+    closes = [START]
+    for i in range(1, n):
+        drift = -0.004 if i < n // 3 else 0.005
+        closes.append(closes[-1] * (1 + drift + rnd.uniform(-0.012, 0.012)))
+    series = {}
+    for period, secs in (("15min", 900), ("60min", 3600), ("1day", 86400)):
+        series[period] = [_bar(BASE + i * secs, c) for i, c in enumerate(closes)]
+    return Snapshot(symbol="BTC-USDT", price=closes[-1], klines=series,
+                    contract_size=0.001, funding_rate=0.0001, open_interest=1e6,
+                    funding_history=[
+                        {"funding_time": (BASE + i * 28800) * 1000,
+                         "funding_rate": 0.0001} for i in range(0, n)])
+
+
+def _bt(snap, cfg=None, **kw):
+    return backtest(snap, cfg or _cfg(), mode="intraday",
+                    step=kw.pop("step", 3), warmup=30, **kw)
 
 
 class TestFundingRateAt(unittest.TestCase):
@@ -146,6 +176,40 @@ class TestBacktest(unittest.TestCase):
                       costs={"funding_rate": 0.0})
         # 多头在正费率下要付钱 -> 累计 R 不应更高
         self.assertLessEqual(hi.total_r, lo.total_r + 1e-9)
+
+    def test_cfg_cost_params_are_wired_in(self):
+        """README 与 btlog 都写了成本参数在 analysis.backtest 里，改它必须生效。
+
+        曾经 backtest() 从不读这段配置，一律用 DEFAULT_COSTS，
+        改 config 完全没反应 —— 一段死配置。
+        """
+        snap = _trading_snapshot()
+        self.assertGreater(_bt(snap).trades, 0, "夹具没造出交易，测不了成本")
+
+        def run(**backtest_cfg):
+            c = _cfg()
+            c["analysis"]["backtest"].update(backtest_cfg)
+            return _bt(snap, c)
+
+        base = run()
+        # 手续费拉高 -> 每笔成本变大、总 R 变小
+        expensive = run(taker_fee_bps=50.0)
+        self.assertGreater(expensive.avg_cost_r, base.avg_cost_r)
+        self.assertLess(expensive.total_r, base.total_r)
+        # 滑点同样生效
+        self.assertGreater(run(slippage_bps=20.0).avg_cost_r, base.avg_cost_r)
+        # enabled=False -> 完全不扣成本
+        free = run(enabled=False)
+        self.assertEqual(free.avg_cost_r, 0.0)
+        self.assertGreater(free.total_r, base.total_r)
+        # funding=False -> 资金费为 0
+        self.assertEqual(run(funding=False).avg_funding_r, 0.0)
+
+    def test_explicit_apply_costs_overrides_cfg(self):
+        snap = _trading_snapshot()
+        c = _cfg()
+        c["analysis"]["backtest"]["enabled"] = True
+        self.assertEqual(_bt(snap, c, apply_costs=False).avg_cost_r, 0.0)
 
     def test_equity_usdt_conversion(self):
         snap = _make_snapshot(200)

@@ -119,6 +119,44 @@ class TestSelect(unittest.TestCase):
         spec = U.merge_spec({"universe": {"include": ["SCAM-USDT"], "max_symbols": 1}})
         self.assertEqual([r["symbol"] for r in U.select(ROWS, spec)], ["SCAM-USDT"])
 
+    def test_include_labels_waives_liquidity_floor(self):
+        """include_labels 是白名单式捞回：命中标签的合约豁免流动性门槛。
+
+        它以前只被解析进 spec 却从没用过，README 却写成"命中任一标签即优先纳入"。
+        """
+        rows = [
+            row("AAA-USDT", turnover=1e7, labels=["new"]),
+            row("BBB-USDT", turnover=5e4, labels=["new"]),    # 流动性不达标
+            row("CCC-USDT", turnover=5e4, labels=["hot"]),    # 标签不匹配
+        ]
+        spec = U.merge_spec({"universe": {"include_labels": ["NEW"]}})
+        picked = [r["symbol"] for r in U.select(rows, spec)]
+        self.assertEqual(picked, ["AAA-USDT", "BBB-USDT"])
+        self.assertNotIn("CCC-USDT", picked)
+
+    def test_include_labels_sorts_after_normal_candidates(self):
+        """靠标签捞回来的排在正常候选之后（成交额只有 1000 U 的新币不该压过主流币），
+        但要为它预留 max_symbols 名额，否则照样被截掉。"""
+        rows = [row(f"C{i}-USDT", turnover=1e8 - i, labels=["hot"]) for i in range(5)]
+        rows.append(row("NEWCOIN-USDT", turnover=1000, labels=["new"]))
+        spec = U.merge_spec({"universe": {"include_labels": ["new"], "max_symbols": 3}})
+        picked = [r["symbol"] for r in U.select(rows, spec)]
+        self.assertEqual(len(picked), 3)
+        self.assertEqual(picked[-1], "NEWCOIN-USDT")   # 留了名额
+        self.assertEqual(picked[:2], ["C0-USDT", "C1-USDT"])
+
+    def test_include_labels_still_respects_exclude(self):
+        rows = [row("BBB-USDT", turnover=1, labels=["new"])]
+        spec = U.merge_spec({"universe": {"include_labels": ["new"],
+                                          "exclude": ["BBB-USDT"]}})
+        self.assertEqual(U.select(rows, spec), [])
+
+    def test_include_labels_keeps_output_shape(self):
+        rows = [row("NEWCOIN-USDT", turnover=1, labels=["new"])]
+        spec = U.merge_spec({"universe": {"include_labels": ["new"]}})
+        out = U.select(rows, spec)[0]
+        self.assertEqual(sorted(out), sorted(rows[0]))
+
     def test_exclude_labels(self):
         spec = U.merge_spec({"universe": {"exclude_labels": ["HOT"]}})
         self.assertNotIn("BTC-USDT", [r["symbol"] for r in U.select(ROWS, spec)])

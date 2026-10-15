@@ -74,6 +74,13 @@ class TestLevelMerge(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertAlmostEqual(merged[0].weight, 0.7, places=6)
 
+    def test_zero_price_does_not_crash(self):
+        """合并用"相对差"要除以 price；price=0 时以前直接抛 ZeroDivisionError。"""
+        lv = [Level(100.0, "resistance", 0.3, "A"), Level(100.05, "resistance", 0.4, "B")]
+        self.assertEqual(merge_levels(0, lv, cluster_pct=0.1), lv)
+        self.assertEqual(merge_levels(0.0, lv), lv)
+        self.assertEqual(merge_levels(None, lv), lv)
+
     def test_far_levels_stay_separate(self):
         lv = [Level(100.0, "resistance", 0.3, "A"), Level(110.0, "resistance", 0.4, "B")]
         self.assertEqual(len(merge_levels(100.0, lv, cluster_pct=0.1)), 2)

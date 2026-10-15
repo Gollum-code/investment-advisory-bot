@@ -58,6 +58,16 @@
       "enabled": false,
       "weight": 0.06
     },
+    "gate": {
+      "measure": "tp1",
+      "min_rr": 1.0,
+      "weights": [
+        0.5,
+        0.3,
+        0.2
+      ],
+      "min_target_rr": 0.8
+    },
     "backtest": {
       "enabled": true,
       "taker_fee_bps": 5.0,

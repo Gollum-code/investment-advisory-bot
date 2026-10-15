@@ -25,6 +25,28 @@ def _norm_weights(w: dict | None) -> dict:
     return out
 
 
+def _thr(v) -> float:
+    """score_threshold 缺省取 30；但显式填 0 是合法的（阈值 0 = 不设门槛），
+    不能因为 0 为假就替换成 30。"""
+    if v is None or v == "":
+        return 30.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _exp_key(v) -> float:
+    """排序键：期望 R 缺失时排最后。不能写 `v or -999`——0.0 是合法值却为假，
+    会被当成 -999 而排到所有负数后面。"""
+    if v is None:
+        return -999.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return -999.0
+
+
 class ProfileStore:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
@@ -48,7 +70,7 @@ class ProfileStore:
                 "name": name,
                 "note": p.get("note", ""),
                 "mode": p.get("mode") or "intraday",
-                "score_threshold": float(p.get("score_threshold") or 30),
+                "score_threshold": _thr(p.get("score_threshold")),
                 "weights": w,
                 "custom": custom,
                 "active": name == self.active,
@@ -63,7 +85,7 @@ class ProfileStore:
             "name": name,
             "note": p.get("note", ""),
             "mode": p.get("mode") or "intraday",
-            "score_threshold": float(p.get("score_threshold") or 30),
+            "score_threshold": _thr(p.get("score_threshold")),
             "factor_weights": _norm_weights(p.get("factor_weights")),
         }
 
@@ -105,7 +127,7 @@ class ProfileStore:
         an = self.cfg.get("analysis") or {}
         return {
             "factor_weights": _norm_weights(an.get("factor_weights")),
-            "score_threshold": float(an.get("score_threshold") or 30),
+            "score_threshold": _thr(an.get("score_threshold")),
             "mode": (self.cfg.get("schedule") or {}).get("mode") or "intraday",
         }
 
@@ -117,7 +139,7 @@ def cfg_with_profile(cfg: dict, profile: dict | None) -> dict:
     out = copy.deepcopy(cfg)
     an = out.setdefault("analysis", {})
     an["factor_weights"] = _norm_weights(profile.get("factor_weights"))
-    an["score_threshold"] = float(profile.get("score_threshold") or 30)
+    an["score_threshold"] = _thr(profile.get("score_threshold"))
     out.setdefault("schedule", {})["mode"] = profile.get("mode") or "intraday"
     return out
 
@@ -134,16 +156,20 @@ def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 300,
     rows: list[dict] = []
     base = {"name": "当前参数", "active": True if ps.active else False,
             "mode": (cfg.get("schedule") or {}).get("mode") or "intraday",
-            "score_threshold": (cfg.get("analysis") or {}).get("score_threshold") or 30,
+            "score_threshold": _thr((cfg.get("analysis") or {}).get("score_threshold")),
             "profile": None}
     prof_cfg = cfg_with_profile(cfg, None)
     res = backtest(snapshot, prof_cfg, mode=base["mode"], step=step, max_points=2000)
     rows.append({**base, "result": res.to_dict()})
     for p in ps.list():
-        r = backtest(snapshot, cfg_with_profile(cfg, p), mode=p["mode"],
+        # 必须取 get() 的完整方案：list() 返回的键是 "weights"，
+        # 而 cfg_with_profile 读的是 "factor_weights"——直接用 list() 的元素
+        # 会让权重静默回落成默认值，几个方案回测出来结果一模一样。
+        prof = ps.get(p["name"]) or p
+        r = backtest(snapshot, cfg_with_profile(cfg, prof), mode=p["mode"],
                      step=step, max_points=2000)
         rows.append({"name": p["name"], "active": p["active"], "mode": p["mode"],
                      "score_threshold": p["score_threshold"],
                      "profile": p, "result": r.to_dict()})
-    rows.sort(key=lambda x: -(x["result"].get("expectancy_r") or -999))
+    rows.sort(key=lambda x: -_exp_key(x["result"].get("expectancy_r")))
     return rows

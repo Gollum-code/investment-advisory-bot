@@ -314,12 +314,16 @@ class SignalStore:
         timeouts = [r for r in rows if r["outcome"] == "timeout"]
 
         def _agg(rs) -> dict:
+            # timeout（到期未了结）不是亏损，不该计入分母——但分组时仍要保留它，
+            # 否则"只有 timeout 的币/方案"会整个从分组里消失。
+            # outcomes.py 的口径也是"timeout 不参与胜率统计"。
+            rs = [r for r in rs if r["outcome"] != "timeout"]
             n = len(rs)
             if not n:
                 return {"n": 0, "wins": 0, "losses": 0, "win_rate": None, "avg_r": None,
                         "avg_mfe_pct": None, "avg_mae_pct": None}
             w = sum(1 for r in rs if (r["outcome"] or "").startswith("tp"))
-            l = n - w
+            l = n - w          # 过滤掉 timeout 后，剩下的非 tp 就只有 stopped
             rrs = [r["outcome_rr"] for r in rs if r["outcome_rr"] is not None]
             mfes = [r["mfe_pct"] for r in rs if r["mfe_pct"] is not None]
             maes = [r["mae_pct"] for r in rs if r["mae_pct"] is not None]
@@ -354,6 +358,16 @@ class SignalStore:
             "by_score": {k: _agg(v) for k, v in sorted(by_score.items())},
             "by_profile": _group(lambda r: r["profile"]),
         }
+
+    def _count_where(self, *, status: str | None = None) -> int:
+        """按状态计数，不受 positions() 的分页上限影响。"""
+        sql = "SELECT COUNT(*) c FROM positions"
+        args: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            args.append(status)
+        with self._lock:
+            return int(self._conn.execute(sql, args).fetchone()["c"])
 
     def _count(self) -> int:
         with self._lock:
@@ -546,7 +560,7 @@ class SignalStore:
         total_trades = wins + losses
         return {
             "closed_count": len(closed),
-            "open_count": len(self.positions(status="open")),
+            "open_count": self._count_where(status="open"),
             "total_net_usdt": round(total_net, 2),
             "week_net_usdt": round(week_net, 2),
             "month_net_usdt": round(month_net, 2),
@@ -593,10 +607,17 @@ class SignalStore:
         if dest_path.suffix != ".db":
             dest_path = dest_path.with_suffix(".db")
         dest_path.parent.mkdir(parents=True, exist_ok=True)
+        # 必须先比路径再删目标：dest 就是源库时，下面那句 unlink 会把
+        # 正在用的数据库文件删掉，VACUUM INTO 随之失败且不可恢复。
+        try:
+            same = dest_path.resolve() == self.path.resolve()
+        except OSError:
+            same = False
+        if same:
+            raise ValueError(f"备份目标不能与源数据库相同: {dest_path}")
         with self._lock:
             if dest_path.exists():
                 dest_path.unlink()
-            # 目标不能和源同一个，否则 VACUUM INTO 会报错
             self._conn.execute("VACUUM INTO ?", (str(dest_path),))
         return str(dest_path)
 

@@ -147,8 +147,11 @@ class Notifier:
             return 0
         direction = plan.get("direction")
         score = plan.get("score") or 0
+        # "方向翻转"含 wait <-> long/short：定时任务默认会落库 wait 行，
+        # 所以长期静默的币第一次给出方向时 prev 就是 wait——那一根才是最该推的。
+        # 仍排除 direction == "wait"：观望本身没有可执行内容，不推。
         changed = (prev_direction is not None and direction != prev_direction
-                   and direction != "wait" and prev_direction != "wait")
+                   and direction != "wait")
         strong = direction in ("long", "short") and abs(score) >= self.min_abs_score
         if not (strong or (self.on_direction_change and changed)):
             return 0

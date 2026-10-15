@@ -32,9 +32,10 @@ MODES = {
         "label": "日内",
         "atr_period": "15min",
         "stop_atr_mult": 2.0,      # 止损 = 2.0 × ATR(15m)
-        "min_target_atr": 1.4,     # 目标位至少这么远才有意义
+        # 目标位候选的门槛不再用 ATR 倍数，而用盈亏比（analysis.gate.min_target_rr）：
+        # "离现价多远"和"离入场多远"是两件事，后者直接决定这单值不值得做。
         "max_target_atr": 14.0,
-        "min_dist_atr": 0.45,      # 入场基准离现价至少这么远
+        "min_dist_atr": 0.45,      # 入场基准离现价至少这么远（剔除贴近现价的噪声位）
         "level_lookback": {"5min": 288, "15min": 200, "60min": 160},
         "use_daily_fib": False,
         "stop_pct_range": (0.30, 2.50),   # 止损幅度（占价格 %）的合理区间
@@ -44,7 +45,6 @@ MODES = {
         "label": "波段",
         "atr_period": "1day",
         "stop_atr_mult": 0.8,
-        "min_target_atr": 1.0,
         "max_target_atr": 9.0,
         "min_dist_atr": 0.35,
         "level_lookback": {"60min": 240, "1day": 90},

@@ -1,9 +1,11 @@
 """参数方案（ProfileStore）的单元测试。"""
 
 import copy
+import random
 import unittest
 
 from iabot.config import DEFAULTS
+from iabot.market import Candle, Snapshot
 from iabot.profiles import ProfileStore, cfg_with_profile, backtest_all
 from iabot.signals import FACTOR_DEFAULTS
 
@@ -100,6 +102,81 @@ class TestProfiles(unittest.TestCase):
         # 按期望 R 降序
         exps = [r["result"]["expectancy_r"] for r in rows]
         self.assertEqual(exps, sorted(exps, reverse=True))
+
+
+class TestBacktestAllUsesProfileWeights(unittest.TestCase):
+    """回归：对比回测必须真的用上各方案的权重。
+
+    list() 返回的键是 "weights"，cfg_with_profile 读的是 "factor_weights"，
+    直接用 list() 的元素会让权重静默回落成默认值 —— 几个方案回测出来完全一样，
+    "参数方案对比"这个功能就废了。
+    """
+
+    def test_list_entry_loses_weights_but_get_keeps_them(self):
+        cfg = copy.deepcopy(DEFAULTS)
+        ps = ProfileStore(cfg)
+        ps.save("动量", factor_weights={"momentum": 0.9}, score_threshold=30,
+                mode="intraday")
+        listed = ps.list()[0]
+        self.assertIn("weights", listed)
+        self.assertNotIn("factor_weights", listed)
+        # 这正是曾经踩的坑：list() 的元素喂给 cfg_with_profile 拿不到自定义权重
+        self.assertEqual(
+            cfg_with_profile(cfg, listed)["analysis"]["factor_weights"]["momentum"],
+            FACTOR_DEFAULTS["momentum"])
+        # get() 才是完整方案
+        self.assertEqual(
+            cfg_with_profile(cfg, ps.get("动量"))["analysis"]["factor_weights"]["momentum"],
+            0.9)
+
+    def test_backtest_all_honours_weights(self):
+        """两个只有权重不同的方案，回测笔数/结果不应完全相同。"""
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["analysis"]["score_threshold"] = 12
+        ps = ProfileStore(cfg)
+        # 同一个币：一个几乎只看动量，一个几乎只看日线趋势
+        ps.save("动量派", factor_weights={"momentum": 0.95, "trend_daily": 0.01},
+                score_threshold=12, mode="intraday")
+        ps.save("趋势派", factor_weights={"momentum": 0.01, "trend_daily": 0.95},
+                score_threshold=12, mode="intraday")
+
+        rnd = random.Random(11)
+        closes = [100.0]
+        for _ in range(150):
+            closes.append(closes[-1] * (1 + rnd.uniform(-0.03, 0.03)))
+        k = [Candle(ts=1_700_000_000 + i * 900, open=c, high=c * 1.012,
+                    low=c * 0.988, close=c, volume=1000.0)
+             for i, c in enumerate(closes)]
+        snap = Snapshot(symbol="BTC-USDT", price=closes[-1],
+                        klines={"15min": k, "60min": k, "1day": k},
+                        contract_size=0.001)
+
+        rows = backtest_all(cfg, snapshot=snap, symbol="BTC-USDT", step=6)
+        by_name = {r["name"]: r["result"] for r in rows}
+        a, b = by_name["动量派"], by_name["趋势派"]
+        # 用上了权重 => 两套参数产生的交易不会一模一样
+        self.assertNotEqual(
+            (a["trades"], a["expectancy_r"]), (b["trades"], b["expectancy_r"]),
+            "两个只有权重不同的方案回测结果完全相同，说明权重没生效")
+
+    def test_zero_expectancy_sorts_below_negative(self):
+        """0.0 是合法期望值，不能被 `or -999` 当成最差而排到负数后面。"""
+        from iabot.profiles import _exp_key
+        vals = [0.3, 0.0, -0.5, -1.2]
+        self.assertEqual(sorted(vals, key=lambda v: -_exp_key(v)),
+                         [0.3, 0.0, -0.5, -1.2])
+        self.assertEqual(_exp_key(None), -999.0)
+        self.assertEqual(_exp_key("bad"), -999.0)
+
+    def test_threshold_zero_is_preserved(self):
+        """显式把阈值设成 0（不设门槛）不能被当成缺省而变成 30。"""
+        from iabot.profiles import _thr
+        self.assertEqual(_thr(0), 0.0)
+        self.assertEqual(_thr(0.0), 0.0)
+        self.assertEqual(_thr(None), 30.0)
+        self.assertEqual(_thr(""), 30.0)
+        self.assertEqual(_thr("bad"), 30.0)
+        self.assertEqual(_thr(45), 45.0)
 
 
 if __name__ == "__main__":

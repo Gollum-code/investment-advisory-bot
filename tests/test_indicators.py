@@ -115,6 +115,26 @@ class TestVwapVolAdx(unittest.TestCase):
         flat = ind.last(ind.adx([v + 1 for v in s], [v - 1 for v in s], s, 14))
         self.assertLess(flat, 25)
 
+    def test_adx_first_value_needs_exactly_2n_bars(self):
+        """首个 ADX 落在 2n-1 处，所以 2n 根就够出值。
+
+        守卫写成 `ln < 2n + 1` 时，恰好 2n 根（n=14 即 28 根）明明能算出
+        index 27 却整列返回 None，白丢一根。
+        """
+        import random
+        rnd = random.Random(5)
+        h = [100.0 + rnd.uniform(-2, 2) for _ in range(40)]
+        l = [x - rnd.uniform(0.4, 1.8) for x in h]
+        c = [(a + b) / 2 for a, b in zip(h, l)]
+        n = 14
+        self.assertTrue(all(v is None for v in ind.adx(h[:2 * n - 1], l[:2 * n - 1], c[:2 * n - 1])))
+        out = ind.adx(h[:2 * n], l[:2 * n], c[:2 * n])
+        self.assertIsNotNone(out[2 * n - 1],
+                            "2n 根就该算出首个 ADX，此前守卫多要一根")
+
+    def test_adx_too_short_returns_all_none(self):
+        self.assertEqual(ind.adx([1.0] * 5, [0.5] * 5, [0.8] * 5), [None] * 5)
+
     def test_pct_change(self):
         self.assertAlmostEqual(ind.pct_change([100.0, 110.0], 1), 10.0)
         self.assertIsNone(ind.pct_change([100.0], 1))

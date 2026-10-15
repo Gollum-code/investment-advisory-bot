@@ -114,7 +114,7 @@ def _funding_rate_at(funding_hist: list[dict], ts: float) -> float:
 
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
-             apply_costs: bool = True, costs: dict | None = None,
+             apply_costs: bool | None = None, costs: dict | None = None,
              equity_usdt: float | None = None, risk_pct: float | None = None) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
@@ -122,6 +122,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     step:  每隔多少根主周期 K 线构造一个建仓点（越小越密、越慢）。
     warmup: 前多少根跳过，保证指标有足够数据。
     apply_costs: 每笔交易扣除真实成本（手续费 + 滑点 + 按持仓时长的资金费）。
+                 None=读 config 的 analysis.backtest（默认开启）。
     costs:  覆盖默认成本参数；资金费率从 base.funding_rate 取（作为近似）。
     equity_usdt / risk_pct: 用于把 R 折算成金额（默认取 cfg.account）。
     """
@@ -130,18 +131,32 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     rp = float(risk_pct if risk_pct is not None else (acc.get("risk_pct_per_trade") or 2.0))
     risk_amount = eq * rp / 100.0
 
+    # 成本参数读 config.analysis.backtest：README 与 btlog 都写了这个块，
+    # 之前却没人把它传进来，改配置完全不生效，等于一段死配置。
+    bc = (cfg.get("analysis") or {}).get("backtest") or {}
+    if apply_costs is None:
+        apply_costs = bool(bc.get("enabled", True))
+    if not costs:
+        costs = {k: bc[k] for k in ("taker_fee_bps", "slippage_bps") if k in bc}
+    funding_on = bool(bc.get("funding", True))
+    try:
+        funding_period_h = float(bc.get("funding_period_sec") or 28800) / 3600.0
+    except (TypeError, ValueError):
+        funding_period_h = 8.0
+    if funding_period_h <= 0:
+        funding_period_h = 8.0
+
     C = dict(DEFAULT_COSTS)
     if costs:
         C.update({k: float(v) for k, v in costs.items() if k in C})
     m_period = "15min" if mode == "intraday" else "1day"
     m_period_sec = period_seconds(m_period)
-    funding_period_h = 8.0  # 永续每 8 小时结算一次资金费
     # 资金费率：优先用显式传入；否则优先用历史资金费率序列（按各建仓点时刻取），
-    # 都没有才退回快照当前费率作近似。
+    # 都没有才退回快照当前费率作近似。config 的 analysis.backtest.funding=false 可整体不计。
     fixed_funding = float(C.get("funding_rate") or 0.0)
-    funding_hist = list(base.funding_history or [])
+    funding_hist = list(base.funding_history or []) if funding_on else []
     use_history = bool(funding_hist) and fixed_funding == 0.0
-    fallback_funding = 0.0 if use_history else float(base.funding_rate or 0.0)
+    fallback_funding = 0.0 if (use_history or not funding_on) else float(base.funding_rate or 0.0)
     main = base.klines.get(m_period) or []
     n = len(main)
     if n < warmup + step + 30:

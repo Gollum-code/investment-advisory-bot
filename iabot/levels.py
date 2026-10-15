@@ -181,6 +181,8 @@ def moving_average_levels(price: float, mas: dict[str, float | None],
 def merge_levels(price: float, levels: list[Level], cluster_pct: float = 0.18) -> list[Level]:
     """合并距离相近的价位（相对差 < cluster_pct%），权重相加。"""
     items = sorted([l for l in levels if l.price and l.price > 0], key=lambda l: l.price)
+    if not price or price <= 0:      # 相对差要除以 price，price=0 会抛 ZeroDivisionError
+        return items
     merged: list[Level] = []
     for lv in items:
         if merged and abs(lv.price - merged[-1].price) / price * 100 < cluster_pct:

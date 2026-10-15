@@ -123,8 +123,8 @@ python -m iabot notify-test           :: 发一条测试通知，验证 notify �
 | `asset_class` | `crypto` | `crypto`=剔除代币化股票/大宗商品/指数；`all`=全都扫 |
 | `min_turnover_usdt` | 100000 | 24h 成交额下限，过滤僵尸合约 |
 | `min_price` | 0 | 现价下限，过滤近零价合约 |
-| `include_labels` / `exclude_labels` | 空 | 按交易所标签增减（如 `["hot","new"]`） |
-| `include` / `exclude` | 空 | 强制纳入 / 排除；`include` 豁免流动性门槛且排在截断最前 |
+| `include_labels` / `exclude_labels` | 空 | 按交易所标签增减。`include_labels` 是"白名单式捞回"：命中标签的合约豁免流动性门槛，排在正常候选之后但**为其预留名额**，不会被 `max_symbols` 截掉 |
+| `include` / `exclude` | 空 | 强制纳入 / 排除；`include` 优先级最高（置顶），同样豁免流动性门槛 |
 | `max_symbols` | 60 | 深挖上限 |
 | `sort` | `turnover` | `turnover` / `abs_change` / `change` |
 

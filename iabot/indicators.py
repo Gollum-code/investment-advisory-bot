@@ -164,7 +164,7 @@ def adx(high: list[float], low: list[float], close: list[float], n: int = 14) ->
     """平均趋向指数：>25 趋势市，<20 震荡市。"""
     ln = len(close)
     out: list[Num] = [None] * ln
-    if ln < 2 * n + 1:
+    if ln < 2 * n:          # 首个 ADX 在 first+n-1 = 2n-1 处，所以 2n 根就够
         return out
     plus_dm = [0.0] * ln
     minus_dm = [0.0] * ln

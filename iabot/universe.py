@@ -32,9 +32,9 @@ DEFAULTS: dict[str, Any] = {
     "asset_class": "crypto",        # crypto（默认，剔除股票/大宗商品）| all
     "min_turnover_usdt": 100000.0,  # 24h 成交额下限，过滤僵尸合约
     "min_price": 0.0,               # 现价下限，过滤近零币
-    "include_labels": [],           # 命中任一标签即优先纳入（如 hot/common/new）
+    "include_labels": [],           # 白名单式捞回：命中标签的合约豁免流动性门槛（如 ["new"]）
     "exclude_labels": [],           # 命中任一标签即剔除
-    "include": [],                  # 强制纳入的合约代码
+    "include": [],                  # 强制纳入的合约代码（豁免流动性门槛且排最前）
     "exclude": [],                  # 强制排除的合约代码
     "max_symbols": 60,              # 深挖上限（按成交额从高到低截断）
     "sort": "turnover",             # turnover | abs_change | change
@@ -163,24 +163,42 @@ def _passes(row: dict, spec: dict[str, Any]) -> bool:
 
 
 def select(rows: list[dict], spec: dict[str, Any]) -> list[dict]:
-    """按规格过滤 + 排序 + 截断，返回该深挖的合约行。"""
-    kept = [r for r in rows if _passes(r, spec)]
+    """按规格过滤 + 排序 + 截断，返回该深挖的合约行。
+
+    include_labels 是"白名单式捞回"：流动性不达标的合约只要命中标签就入选
+    （例如把最近新上线的都纳进来）。但它们排在正常候选之后——新币成交额可能
+    只有几千 U，不该压过高流动性的主流币。代价是要为它们预留名额，
+    否则 max_symbols 截断时新币仍会被切掉，等于白捞。
+    """
+    must_keep_labels = set(spec["include_labels"])
+    normal: list[dict] = []
+    picked: list[dict] = []
+    for r in rows:
+        if _passes(r, spec):
+            normal.append(r)
+            continue
+        if not must_keep_labels or r.get("symbol") in spec["exclude"]:
+            continue
+        if {str(x).lower() for x in (r.get("labels") or [])} & must_keep_labels:
+            picked.append(r)
 
     forced = set(spec["include"])
     sort_key = spec.get("sort") or "turnover"
 
     def key(r: dict):
-        # 强制纳入的排最前，保证不会被 max_symbols 截断掉
-        if r.get("symbol") in forced:
-            return (0, 0.0)
         if sort_key == "abs_change":
-            return (1, -abs(float(r.get("change_pct") or 0.0)))
+            return -abs(float(r.get("change_pct") or 0.0))
         if sort_key == "change":
-            return (1, -float(r.get("change_pct") or 0.0))
-        return (1, -float(r.get("turnover") or 0.0))
+            return -float(r.get("change_pct") or 0.0)
+        return -float(r.get("turnover") or 0.0)
 
-    kept.sort(key=key)
-    return kept[:spec["max_symbols"]]
+    normal.sort(key=key)
+    picked.sort(key=key)
+    # 强制纳入的置顶（显式指定，优先级高于任何排序）
+    top = [r for r in normal if r.get("symbol") in forced]
+    rest = [r for r in normal if r.get("symbol") not in forced]
+    cap = max(0, spec["max_symbols"] - len(top) - len(picked))
+    return top + rest[:cap] + picked
 
 
 def symbols_from_rows(rows: list[dict]) -> list[str]:

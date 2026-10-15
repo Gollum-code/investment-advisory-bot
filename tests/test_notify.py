@@ -75,6 +75,25 @@ class TestNotifySignal(unittest.TestCase):
         n = _Notifier(_cfg(min_abs_score=45, on_direction_change=True))
         self.assertEqual(n.notify_signal(p, prev_direction="short"), 1)
 
+    def test_first_signal_after_wait_is_notified(self):
+        """长期静默的币第一次给出方向（wait -> long）时最该推。
+
+        文档写的是"观望<->做多/做空 翻转时也推"，但代码里多余的条件
+        `prev_direction != "wait"` 把这个最常见的翻转排除了，
+        导致静默后出现的第一个方向不推送。
+        """
+        p = _Plan.long()
+        p["score"] = 20.0
+        n = _Notifier(_cfg(min_abs_score=45, on_direction_change=True))
+        self.assertEqual(n.notify_signal(p, prev_direction="wait"), 1)
+        self.assertEqual(n.notify_signal(p, prev_direction=None), 0)  # 无历史不算翻转
+
+    def test_direction_change_can_be_switched_off(self):
+        p = _Plan.long()
+        p["score"] = 20.0
+        n = _Notifier(_cfg(min_abs_score=45, on_direction_change=False))
+        self.assertEqual(n.notify_signal(p, prev_direction="wait"), 0)
+
     def test_wait_never_notified(self):
         p = _Plan.long()
         p["direction"] = "wait"
