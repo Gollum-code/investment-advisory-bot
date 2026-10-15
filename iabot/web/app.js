@@ -12,13 +12,16 @@
     snapshot: null,
     klines: [],
     tf: '15min',
-    busy: false,
+busy: false,
+    analyzeSeq: 0,      // 分析请求序号：新请求总是胜出，旧响应直接丢弃
     es: null,
-    log: [],
     recent: [],
     uniAuto: true,
     uniRows: [],
     uniBusy: false,
+    threshold: 30,      // 评分阈值，仪表盘刻度要用（以前写死 ±30）
+    winSeq: 0,        // 胜率面板请求序号
+    histSeq: 0,       // 历史列表请求序号
   };
 
   // ---------------------------------------------------------------- 工具
@@ -192,6 +195,11 @@
 
   // ---------------------------------------------------------------- 初始化
   async function init() {
+    // 先绑事件再拉 meta。/api/meta 要探行情域名，慢的话能卡好几秒
+    // （配了 token 时还会弹 window.prompt）。绑在 await 之后的话，
+    // 这段时间里整个面板点了没反应——而权重/方案/任务面板根本不依赖 meta。
+    bindEvents();
+    connectSSE();
     try {
       const meta = await api('/api/meta');
       state.meta = meta;
@@ -223,15 +231,15 @@
       loadWeights();
       loadProfiles();
       loadPositions();
-      analyze(false);
-      // 雷达是全市场一次性请求，让首个分析先跑完再拉，免得开局就撞限流
-      setTimeout(() => { if (state.uniAuto) loadUniverse(false); }, 1500);
+      // 雷达是全市场一次性请求，等首个分析跑完再拉，免得开局就撞限流
+      // （原来这里只是 setTimeout 1500ms，而 analyze 根本没 await，
+      //   首屏分析通常要好几秒，等于压根没让路）
+      await analyze(false);
+      if (state.uniAuto) loadUniverse(false);
     } catch (err) {
       setMsg('初始化失败：' + err.message, 'err');
       toast('初始化失败', err.message, 'err');
     }
-    bindEvents();
-    connectSSE();
   }
 
   async function loadHealth() {
@@ -276,7 +284,11 @@
     $('btn-bt-reload').onclick = loadBacktests;
     $('btn-pos-open').onclick = openPosition;
     $('btn-report').onclick = openReport;
-    $('pos-entry').onclick = () => { if (!$('pos-entry').value) fillMarkPrice(); };
+    $('pos-entry').oninput = () => {
+      // 之前是 onclick + "仅当输入框为空"：先填了价再想填现价就点不动，
+      // 而且合约不一致时会填错价（fillMarkPrice 现在自带校验）。
+      if (!$('pos-entry').value) fillMarkPrice();
+    };
     $('btn-save-sched').onclick = saveSchedule;
     $('btn-clear-hist').onclick = clearHistory;
     $('btn-scan').onclick = scan;
@@ -300,11 +312,13 @@
 
   // ---------------------------------------------------------------- 分析
   async function analyze(force) {
-    if (state.busy) return;
-    state.busy = true;
     const sym = ($('symbol').value || '').trim().toUpperCase();
-    if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(sym)) { state.busy = false; return setMsg('请输入合约代码，例如 BTC-USDT 或 牛来-USDT', 'err'); }
+    if (!/[A-Za-z0-9\u4e00-\u9fff]/.test(sym)) { return setMsg('请输入合约代码，例如 BTC-USDT 或 牛来-USDT', 'err'); }
     $('symbol').value = sym;
+    // 用请求序号而不是 busy 直接丢弃：以前第二次点击会直接 return，
+    // 但输入框已经被改成新币，于是出现「框里是 ETH、面板显示 BTC」，
+    // 而且 ETH 永远不会被分析。序号保证新请求总是胜出、旧响应不再覆盖。
+    const seq = ++state.analyzeSeq;
     state.symbol = sym;
     state.mode = $('mode').value;
     $('btn-go').disabled = $('btn-refresh').disabled = true;
@@ -320,9 +334,9 @@
       });
       if (force) q.set('force', '1');
       const d = await api('/api/analyze?' + q.toString());
+      if (seq !== state.analyzeSeq) return;   // 已有更新的请求，丢弃这份过期结果
       state.plan = d.plan;
       state.snapshot = d.snapshot;
-      state.klines = d.snapshot.klines || {};
       buildSeg(d.snapshot.klines || {});
       renderQuote();
       renderChart();
@@ -335,19 +349,14 @@
       logLine('ok', sym + ' ' + dirLabel(d.plan.direction) + ' 评分 ' + signed(d.plan.score));
       pushRecent(sym);
     } catch (err) {
+      if (seq !== state.analyzeSeq) return;
       setMsg('分析失败：' + err.message, 'err');
       $('advice').innerHTML = '<div class="empty">分析失败。</div>';
       $('factors').innerHTML = '<div class="empty">分析失败。</div>';
       toast('分析失败', err.message, 'err');
     } finally {
-      state.busy = false;
-      $('btn-go').disabled = $('btn-refresh').disabled = false;
+      if (seq === state.analyzeSeq) $('btn-go').disabled = $('btn-refresh').disabled = false;
     }
-  }
-
-  function toTf() {
-    const ks = (state.snapshot && state.snapshot.klines) || {};
-    return ks[state.tf] ? state.tf : (Object.keys(ks)[0] || '15min');
   }
 
   function buildSeg(klines) {
@@ -392,7 +401,7 @@
     const ctx = cv.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const cssW = cv.clientWidth || 800;
-    const cssH = 360;
+    const cssH = cv.clientHeight || 360;
     cv.width = Math.round(cssW * dpr);
     cv.height = Math.round(cssH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -569,7 +578,8 @@
     const w = Math.abs(Math.max(-100, Math.min(100, plan.score))) / 100 * 50;
     h += '<div class="gauge"><i style="left:' + (plan.score >= 0 ? 50 : 50 - w) + '%;width:' + w + '%"></i>' +
       '<div class="mid"></div></div>' +
-      '<div class="gauge-lbl"><span>-100 空</span><span>±30 阈值</span><span>+100 多</span></div>';
+      '<div class="gauge-lbl"><span>-100 空</span><span>±' +
+      (state.threshold != null ? state.threshold : 30) + ' 阈值</span><span>+100 多</span></div>';
 
     if (plan.entry_note) h += '<div class="adv-note">' + esc(plan.entry_note) + '</div>';
 
@@ -781,7 +791,7 @@
   }
 
   const UNI_CLASS = {
-    crypto: '加密', stock: '股票', tradfi: ' TradFi',
+    crypto: '加密', stock: '股票', tradfi: 'TradFi',
     commodity: '商品', index: '指数',
   };
 
@@ -838,11 +848,10 @@
   }
 
   async function scan(full) {
-    const btn = full ? $('btn-scan-all') : $('btn-scan');
-    btn.disabled = true;
-    const target = $('btn-scan-all');
-    $('btn-scan').disabled = true;
-    $('btn-uni-scan').disabled = true;
+    // 两个扫描按钮 + 深挖按钮一起禁：它们会互相触发（深挖就是全市场扫描），
+    // 只禁一个的话能从另一个再点进来，重复打同一批接口。
+    const btns = [$('btn-scan'), $('btn-scan-all'), $('btn-uni-scan')];
+    btns.forEach((b) => { b.disabled = true; });
     loading($('scan'), full
       ? '全市场扫描中：先按流动性筛候选，再并发深挖（越慢说明候选越多）…'
       : '扫描中，逐个合约拉取行情（约 3-10 秒/个，并发执行）…');
@@ -896,10 +905,7 @@
       $('scan').innerHTML = '<div class="empty">扫描失败：' + esc(err.message) + '</div>';
       toast('扫描失败', err.message, 'err');
     } finally {
-      btn.disabled = false;
-      target.disabled = false;
-      $('btn-scan').disabled = false;
-      $('btn-uni-scan').disabled = false;
+      btns.forEach((b) => { b.disabled = false; });
     }
   }
 
@@ -1025,8 +1031,12 @@
   }
 
   async function loadHistory() {
+    // 同样需要序号：SSE 的 plan/outcome 事件和"清空"都会并发触发，
+    // 旧响应回来了就把新列表盖回去。
+    const seq = ++state.histSeq;
     try {
       const d = await api('/api/history?limit=60');
+      if (seq !== state.histSeq) return;
       const rows = d.rows || [];
       $('hist-hint').textContent = rows.length + ' 条';
       if (!rows.length) { $('history').innerHTML = '<div class="empty">还没有落库的信号。</div>'; return; }
@@ -1069,10 +1079,15 @@
     const days = $('win-days').value;
     const q = new URLSearchParams();
     if (days) q.set('days', days);
+    // 序号守卫：切换天数 + SSE 的 outcome 事件都会并发触发本函数，
+    // 先发后回的旧响应会覆盖新选择（选了"全部"却显示"近 30 天"）。
+    const seq = ++state.winSeq;
     try {
       const d = await api('/api/win-stats?' + q.toString());
+      if (seq !== state.winSeq) return;
       renderWinStats(d.win || {}, d.outcomes || {});
     } catch (e) {
+      if (seq !== state.winSeq) return;
       $('win').innerHTML = '<div class="empty">胜率统计加载失败：' + esc(e.message) + '</div>';
     }
   }
@@ -1091,8 +1106,6 @@
 
   function renderWinStats(win, outcomes) {
     const resolved = win.resolved || 0;
-    const pending = (outcomes && !Object.keys(outcomes).length)
-      ? '' : '';
     const sum = $('win');
     if (!resolved) {
       const done = Object.keys(outcomes || {}).reduce((a, k) => a + outcomes[k], 0);
@@ -1143,7 +1156,6 @@
     try {
       const d = await api('/api/weights');
       state.weights = d.weights || {};
-      state.weightsDefaults = d.defaults || {};
       const names = {
         trend_daily: '日线趋势', trend_intraday: '1小时趋势', momentum: '动量',
         structure: '摆动结构', vwap: 'VWAP', funding: '资金费率',
@@ -1153,6 +1165,8 @@
       const def = d.defaults || {};
       if (def['score_threshold'] !== undefined) $('score-threshold').value = def['score_threshold'];
       state.threshold = def['score_threshold'] ?? 30;
+      // 阈值变了仪表盘刻度也要跟着变；重画一次建议卡（若已有计划）
+      if (state.plan) renderAdvice(state.plan);
       $('res-enabled').checked = !!def['resonance_enabled'];
       $('weights').innerHTML = Object.keys(d.weights).map((k) => {
         const cur = d.weights[k];
@@ -1187,6 +1201,7 @@
 
   async function saveWeights(reset) {
     $('btn-weights-save').disabled = true;
+    $('btn-weights-reset').disabled = true;   // 同一个函数，防连点重复提交
     try {
       const data = reset ? {} : (state.weights || {});
       const thr = reset ? 30 : parseInt($('score-threshold').value || '30', 10);
@@ -1209,6 +1224,7 @@
       toast('保存失败', err.message, 'err');
     } finally {
       $('btn-weights-save').disabled = false;
+      $('btn-weights-reset').disabled = false;
     }
   }
 
@@ -1244,9 +1260,16 @@
 
   // ---------------------------------------------------------------- 模拟盘持仓
   function fillMarkPrice() {
+    // 只有当表单里的合约就是当前分析的合约时才能填——否则分析的是 BTC、
+    // 表单填的是 ETH，填进去的就是 BTC 的价。
     const p = state.plan || state.snapshot;
-    const price = (p && (p.price != null ? p.price : (state.snapshot && state.snapshot.price)));
-    if (price) $('pos-entry').value = price;
+    const sym = (state.symbol || '').toUpperCase();
+    const want = ($('pos-sym').value || '').trim().toUpperCase();
+    if (sym && want && sym !== want) return false;
+    const price = (p && p.price != null ? p.price : (state.snapshot && state.snapshot.price));
+    if (!price) return false;
+    $('pos-entry').value = price;
+    return true;
   }
 
   async function openPosition() {
@@ -1263,6 +1286,11 @@
     if (!(body.entry_price > 0) || !(body.size_coin > 0)) {
       toast('请填写开仓价和数量', '', 'warn'); return;
     }
+    // 防重复提交：其它写操作（保存方案/保存任务/导出）都会禁用按钮，
+    // 只有开仓没有，双击会开出两笔重复持仓并虚增浮盈。
+    const btn = $('btn-pos-open');
+    if (btn.disabled) return;
+    btn.disabled = true;
     try {
       await api('/api/positions', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1271,6 +1299,7 @@
       toast('已开仓', body.symbol + ' ' + body.direction, 'ok');
       loadPositions();
     } catch (err) { toast('开仓失败', err.message, 'err'); }
+    finally { btn.disabled = false; }
   }
 
   async function loadPositions() {
@@ -1366,22 +1395,26 @@
           : '') +
         '</div>' +
         (p.status === 'open'
-          ? '<button class="ghost tiny pos-close" data-id="' + p.id + '">平仓</button>'
+          ? '<button class="ghost tiny pos-close" data-id="' + p.id +
+            '" data-price="' + (p.mark_price != null ? p.mark_price : '') + '">平仓</button>'
           : '') +
         '</div>';
     }).join('');
     el.querySelectorAll('.pos-close').forEach((b) => {
-      b.onclick = () => closePosition(b.dataset.id);
+      b.onclick = () => closePosition(b.dataset.id, b.dataset.price);
     });
   }
 
-  async function closePosition(id) {
-    const price = state.plan && state.plan.price;
-    if (!confirm('按现价 ' + (price || '') + ' 平仓该模拟持仓？')) return;
+  async function closePosition(id, markPrice) {
+    // 必须用「这一行自己的」现价。state.plan.price 是顶部分析框当前合约的价，
+    // 跟被点的持仓毫无关系——看的是 BTC、点 ETH 的平仓，就会拿 BTC 的价去结算。
+    const px = Number(markPrice);
+    if (!isFinite(px) || px <= 0) return toast('平仓失败', '拿不到该持仓的现价，请刷新后重试', 'err');
+    if (!confirm('按现价 ' + fmtPrice(px, digitsFor(px)) + ' 平仓该模拟持仓？')) return;
     try {
       await api('/api/positions', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'close', id, close_price: price, reason: 'manual' }),
+        body: JSON.stringify({ action: 'close', id, close_price: px, reason: 'manual' }),
       });
       toast('已平仓', '', 'ok');
       loadPositions();
@@ -1529,7 +1562,7 @@
     const el = $('prof-cmp');
     const btn = $('btn-prof-cmp');
     btn.disabled = true;
-    el.innerHTML = '<div class="loading">正在对每个方案跑同一段历史回测，逐个约 1-3 秒…</div>';
+    el.innerHTML = '<div class="loading">正在对每个方案跑同一段历史回测（每个方案各跑一遍，方案越多越慢）…</div>';
     try {
       const d = await api('/api/profiles/compare', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1540,7 +1573,7 @@
       if (!rows.length) { el.innerHTML = '<div class="empty">没有可对比的方案。</div>'; return; }
       const best = rows[0];
       el.innerHTML = '<div class="sub-title">回测对比（' + rows.length + ' 个，按期望 R 排序，当前合约 ' +
-        $('symbol').value + '）</div>' +
+        esc($('symbol').value) + '）</div>' +
         '<table class="cmp-table"><tr>' +
         '<th>方案</th><th>胜率</th><th>期望 R</th><th>笔数</th><th>平均持仓</th><th>成本 R</th><th></th></tr>' +
         rows.map((r, i) => {
@@ -1586,6 +1619,9 @@
 
   function connectSSE() {
     if (!window.EventSource) { setPill('pill-sse', '实时流 不支持', 'bad'); return; }
+    // 先关掉旧的再建：init 会先 bindEvents 再连一次，不关就会留下两个
+    // EventSource，服务端多挂一个订阅者。
+    if (state.es) { try { state.es.close(); } catch (e) { /* 已断开 */ } state.es = null; }
     const tok = localStorage.getItem('iabot_token');
     const es = new EventSource('/api/stream' + (tok ? ('?token=' + encodeURIComponent(tok)) : ''));
     state.es = es;
@@ -1624,5 +1660,14 @@
   }
 
   window.addEventListener('resize', () => { if (state.snapshot) renderChart(); });
+  document.addEventListener('visibilitychange', () => {
+    // 页面切走时断开 SSE，避免后台标签页长期占着一条长连接 + 服务端订阅队列
+    if (document.hidden) {
+      if (state.es) { try { state.es.close(); } catch (e) { /* 忽略 */ } state.es = null; }
+    } else {
+      connectSSE();
+    }
+  });
+
   document.addEventListener('DOMContentLoaded', init);
 })();

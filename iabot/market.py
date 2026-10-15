@@ -77,7 +77,6 @@ class Snapshot:
     funding_history: list[dict] = field(default_factory=list)
     open_interest: float | None = None      # 张
     oi_history: list[dict] = field(default_factory=list)
-    elite_account: list[dict] = field(default_factory=list)
     elite_position: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -134,11 +133,13 @@ class MarketClient:
     """带缓存的行情客户端。同一个 (symbol, period) 在 ttl 内不会重复请求。"""
 
     def __init__(self, bases: list[str], *, timeout: float = 12.0, retries: int = 2,
-                 verify: bool = True, cache_ttl: float = 2.0) -> None:
+                 verify: bool = True, cache_ttl: float = 2.0,
+                 cache_max: int = 512) -> None:
         self.pool = BasePool(bases, timeout=timeout, retries=retries, verify=verify)
         self._cache: dict[str, tuple[float, Any]] = {}
         self._lock = threading.Lock()
         self._ttl = cache_ttl
+        self._cache_max = max(32, int(cache_max))
 
     # ---------- 底层 ----------
     def _cached(self, key: str, fn):
@@ -152,6 +153,13 @@ class MarketClient:
             # 以抓取完成时刻计时，而不是开始时刻：并发抓 K 线时单次可能要好几秒，
             # 按开始时刻算会让条目一落地就"过期大半"。
             self._cache[key] = (time.time(), val)
+            # 必须有上限。缓存键里含 K 线根数（如 kline:BTC-USDT:60min:317），
+            # 而定时任务按持仓年龄取不同根数，于是每长一小时就多一个全新键，
+            # 每条还可能带着上千个 Candle。只靠 TTL 不会回收——过期条目仍在字典里。
+            if len(self._cache) > self._cache_max:
+                for k in sorted(self._cache, key=lambda k: self._cache[k][0]
+                                )[:len(self._cache) - self._cache_max]:
+                    del self._cache[k]
         return val
 
     def _get(self, path: str):
@@ -275,15 +283,6 @@ class MarketClient:
             return sorted(rows, key=lambda r: int(r.get("ts") or 0))
         return self._cached(f"oih:{symbol}:{period}", fetch)
 
-    def elite_account(self, symbol: str, period: str = "1day") -> list[dict]:
-        def fetch():
-            d = self._get(
-                f"/linear-swap-api/v1/swap_elite_account_ratio"
-                f"?contract_code={symbol}&period={period}")
-            rows = (d.get("data") or {}).get("list") or []
-            return sorted(rows, key=lambda r: int(r.get("ts") or 0))
-        return self._cached(f"ea:{symbol}:{period}", fetch)
-
     def elite_position(self, symbol: str, period: str = "1day") -> list[dict]:
         def fetch():
             d = self._get(
@@ -352,17 +351,19 @@ class MarketClient:
             snap.depth = guard("depth", lambda: self.depth(symbol, "step2"), {}) or {}
 
         if with_extra:
-            # 这几个接口也互相独立，一起并发
+            # 这几个接口也互相独立，一起并发。
+            # 不含 elite_account：因子只用 elite_position（signals._f_elite），
+            # elite_account 抓回来从来没人读——每个合约白付一次 HTTPS，
+            # 全市场扫描时就是几百次纯浪费的请求，还会推高 429 触发率。
             jobs = {
                 "funding": lambda: self.funding(symbol),
                 "funding_history": lambda: self.funding_history(symbol, 90),
                 "open_interest": lambda: self.open_interest(symbol),
                 "oi_history": lambda: self.oi_history(symbol, "1day", 60),
-                "elite_account": lambda: self.elite_account(symbol, "1day"),
                 "elite_position": lambda: self.elite_position(symbol, "1day"),
             }
             extra: dict[str, Any] = {}
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            with ThreadPoolExecutor(max_workers=5) as pool:
                 futs = {k: pool.submit(v) for k, v in jobs.items()}
                 for k, fut in futs.items():
                     try:
@@ -379,7 +380,6 @@ class MarketClient:
             snap.funding_history = extra.get("funding_history") or []
             snap.open_interest = extra.get("open_interest")
             snap.oi_history = extra.get("oi_history") or []
-            snap.elite_account = extra.get("elite_account") or []
             snap.elite_position = extra.get("elite_position") or []
 
         snap.base_used = self.pool.current or ""

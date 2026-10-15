@@ -59,6 +59,7 @@ class Scheduler:
         self._warned: dict[int, float] = {}
 
         self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._last_purge: float = 0.0
@@ -93,23 +94,39 @@ class Scheduler:
 
     # ------------------------------------------------------------------
     def start(self) -> bool:
-        if self._thread and self._thread.is_alive():
-            return False
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="iabot-sched", daemon=True)
-        self._thread.start()
-        return True
+        # 必须先看旧线程是否真的活着。一轮全市场扫描动辄几分钟，
+        # stop() 的 join 经常超时；若无条件新建，就会同时跑两个循环，
+        # 它们互相 clear() 对方的唤醒事件，还会争 _run_lock 刷"上一轮还没跑完"。
+        with self._thread_lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="iabot-sched",
+                                           daemon=True)
+            self._thread.start()
+            return True
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
         self._wake.set()
-        if self._thread:
-            self._thread.join(timeout=timeout)
-        self._thread = None
+        with self._thread_lock:
+            t = self._thread
+        if t:
+            t.join(timeout=timeout)
+        with self._thread_lock:
+            # join 超时也要留着引用：否则 running 会误报 False，
+            # 下一次 start() 就会再拉一个线程，把这个还在跑的变成孤儿。
+            if self._thread is t and (t is None or not t.is_alive()):
+                self._thread = None
 
     @property
     def running(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
+        with self._thread_lock:
+            return bool(self._thread and self._thread.is_alive())
+
+    def busy(self) -> bool:
+        """当前是否有一轮正在执行（手动"立即执行"据此判断该不该跳过）。"""
+        return self._run_lock.locked()
 
     def kick(self) -> None:
         """立刻唤醒跑一轮（不等间隔到点）。"""

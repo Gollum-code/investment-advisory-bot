@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,7 @@ DEFAULTS: dict[str, Any] = {
     "analysis": {
         "tf_periods": ["1min", "5min", "15min", "60min", "1day"],
         "kline_size": 300,
+        "plan_cache_max": 128,       # 计划缓存条数上限（长跑服务防止无限膨胀）
         "score_threshold": 30,       # |score| 达到该值才给方向（tanh 归一化后）
         "cache_ttl_sec": 20,          # 同一合约多久内重复查询直接复用结果
         "snapshot_ttl_sec": 20,       # 行情快照保鲜期（定时任务靠它拿到新数据）
@@ -194,6 +196,37 @@ def _coerce_int(val, name, lo=None, hi=None, default=0):
     return int(_coerce_num(val, name, lo, hi, float(default)))
 
 
+def _section(out: dict, key: str, default: dict) -> dict:
+    """取出一个"保证是字典"的配置段。
+
+    setdefault 只在缺失时填默认值，对 `{"analysis": "oops"}` 这种用户手打错的
+    值毫无作用——后面一调 .get() 就 AttributeError，启动直接崩。
+    这个函数的职责恰恰是"不让服务崩掉"，所以这里必须做类型兜底。
+    """
+    v = out.get(key)
+    if not isinstance(v, dict):
+        if v is not None:
+            print(f"[config] {key} 不是字典（{type(v).__name__}），已重置为默认")
+        out[key] = copy.deepcopy(default)
+    return out[key]
+
+
+def _coerce_list(val, name: str, default: list) -> list:
+    """列表兜底：字符串必须当整体收下。
+
+    直接 `[s for s in val]` 会把 "BTC-USDT" 拆成 8 个单字符"合约"，
+    而且不报错——定时任务会拿着 B-USDT、T-USDT… 傻跑一辈子。
+    """
+    if val is None:
+        return list(default)
+    if isinstance(val, str):
+        val = [val]
+    if not isinstance(val, (list, tuple)):
+        print(f"[config] {name} 不是列表（{type(val).__name__}），已重置为默认")
+        return list(default)
+    return [str(s).strip() for s in val if str(s).strip()]
+
+
 def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """类型强转 + 范围钳制。用户手改 config.json 最容易把数字写成字符串，
     这里在启动时兜底：非法值回落默认并打一行告警，不让整个服务崩掉。
@@ -201,7 +234,7 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     返回一个新的 dict，不改原 cfg。
     """
     out = copy.deepcopy(cfg)
-    acc = out.setdefault("account", {})
+    acc = _section(out, "account", DEFAULTS["account"])
     acc["equity_usdt"] = _coerce_num(acc.get("equity_usdt"), "account.equity_usdt",
                                      1, None, 450.0)
     acc["risk_pct_per_trade"] = _coerce_num(acc.get("risk_pct_per_trade"),
@@ -214,13 +247,21 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     acc["max_margin_pct"] = _coerce_num(acc.get("max_margin_pct"),
                                         "account.max_margin_pct", 1, 100, 50.0)
 
-    an = out.setdefault("analysis", {})
+    an = _section(out, "analysis", DEFAULTS["analysis"])
     an["score_threshold"] = _coerce_num(an.get("score_threshold"),
                                         "analysis.score_threshold", 0, 100, 30.0)
     an["cache_ttl_sec"] = _coerce_num(an.get("cache_ttl_sec"),
                                       "analysis.cache_ttl_sec", 1, 3600, 20.0)
     an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),
                                          "analysis.snapshot_ttl_sec", 1, 3600, 20.0)
+    # 下面两个会被 Advisor 直接 int() 一次，没校验过就是启动即崩
+    an["kline_size"] = _coerce_int(an.get("kline_size"), "analysis.kline_size",
+                                   30, 2000, 300)
+    an["plan_cache_max"] = _coerce_int(an.get("plan_cache_max"),
+                                       "analysis.plan_cache_max", 1, 100000, 128)
+    tf = an.get("tf_periods")
+    if not isinstance(tf, list) or not tf:
+        an["tf_periods"] = list(DEFAULTS["analysis"]["tf_periods"])
     fw = an.get("factor_weights")
     if fw is None:
         an["factor_weights"] = {}
@@ -257,15 +298,41 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                           "http_timeout_sec", 1, 120, 12.0)
     out["http_retries"] = _coerce_int(out.get("http_retries"), "http_retries", 0, 5, 2)
 
-    if not isinstance(out.get("symbols"), list):
-        out["symbols"] = list(DEFAULTS["symbols"])
+    out["symbols"] = _coerce_list(out.get("symbols"), "symbols", DEFAULTS["symbols"])
     if not isinstance(out.get("profiles"), dict):
         out["profiles"] = {}
     if not isinstance(out.get("active_profile"), str):
         out["active_profile"] = ""
-    sc = out.setdefault("schedule", {})
+
+    sc = _section(out, "schedule", DEFAULTS["schedule"])
     sc["interval_sec"] = _coerce_int(sc.get("interval_sec"), "schedule.interval_sec",
                                      30, 86400, 300)
+    sc["symbols"] = _coerce_list(sc.get("symbols"), "schedule.symbols",
+                                 DEFAULTS["schedule"]["symbols"])
+    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing") else "intraday"
+    uni = _section(sc, "universe", DEFAULTS["schedule"]["universe"])
+    uni["batch_size"] = _coerce_int(uni.get("batch_size"),
+                                    "schedule.universe.batch_size", 1, 500, 20)
+    uni["workers"] = _coerce_int(uni.get("workers"),
+                                 "schedule.universe.workers", 1, 32, 4)
+    _section(uni, "filters", {})
+    ver = _section(sc, "verify", DEFAULTS["schedule"]["verify"])
+    ver["max_per_run"] = _coerce_int(ver.get("max_per_run"),
+                                     "schedule.verify.max_per_run", 1, 5000, 50)
+    ded = _section(sc, "dedupe", DEFAULTS["schedule"]["dedupe"])
+    ded["cooldown_sec"] = _coerce_num(ded.get("cooldown_sec"),
+                                      "schedule.dedupe.cooldown_sec", 0, 86400, 3600.0)
+    ded["score_delta"] = _coerce_num(ded.get("score_delta"),
+                                     "schedule.dedupe.score_delta", 0, 100, 5.0)
+
+    st = _section(out, "storage", DEFAULTS["storage"])
+    st["keep_days"] = _coerce_int(st.get("keep_days"), "storage.keep_days", 1, 3650, 30)
+    bk = _section(out, "backup", DEFAULTS["backup"])
+    bk["keep"] = _coerce_int(bk.get("keep"), "backup.keep", 1, 999, 14)
+    bk["hours"] = _coerce_num(bk.get("hours"), "backup.hours", 0.1, 8760, 24.0)
+    _section(out, "notify", DEFAULTS["notify"])
+    _section(out, "universe", DEFAULTS["universe"])
+    _section(out, "auth", DEFAULTS["auth"])
     return out
 
 
@@ -287,7 +354,17 @@ def _write_json(path: Path, obj: Any) -> None:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    _write_json(CONFIG_PATH, cfg)
+    """原子写 config.json：先写临时文件再替换，崩溃/并发写不会把用户配置打回默认。
+
+    直接 open(..., "w") 里写入，写一半崩掉就只剩一个残缺 JSON ——
+    下次启动 load_config 会读出一行 "读取失败，使用默认配置"，
+    用户的通知 token、账户参数、全部方案静默丢失。
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, CONFIG_PATH)
 
 
 def ensure_example() -> None:

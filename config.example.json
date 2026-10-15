@@ -50,6 +50,7 @@
       "1day"
     ],
     "kline_size": 300,
+    "plan_cache_max": 128,
     "score_threshold": 30,
     "cache_ttl_sec": 20,
     "snapshot_ttl_sec": 20,

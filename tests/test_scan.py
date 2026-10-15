@@ -126,6 +126,34 @@ class ScanTest(unittest.TestCase):
         adv.scan(["C1-USDT"], workers=32)      # 不能因为 workers 大就起 32 个线程
         self.assertLessEqual(client.peak, 1)
 
+    def test_callback_exception_does_not_abort_batch(self):
+        """on_result 负责落库+推送+SSE，它自己抛异常（比如 SQLite 锁、通知超时）
+        不该把整轮扫描带下：剩下的合约全被丢弃，调用方连 run_done 都发不出去，
+        前端永远等不到"这轮结束"。"""
+        seen = []
+
+        def cb(sym, plan, err):
+            seen.append(sym)
+            if sym == "C2-USDT":
+                raise RuntimeError("store exploded")
+
+        plans, errs = self._advisor(FakeClient()).scan(
+            [f"C{i}-USDT" for i in range(1, 7)], workers=2, on_result=cb)
+        self.assertEqual(len(seen), 6, "回调异常导致后续合约没被处理")
+        self.assertEqual(len(plans), 6)
+        self.assertTrue(any("回调异常" in e for e in errs))
+
+    def test_callback_exception_on_error_path_does_not_abort(self):
+        """失败路径上的回调抛异常，同样不能中断。"""
+        def cb(sym, plan, err):
+            if err:
+                raise RuntimeError("notifier down")
+
+        plans, errs = self._advisor(FakeClient(fail=["C2-USDT"])).scan(
+            [f"C{i}-USDT" for i in range(1, 6)], on_result=cb)
+        self.assertEqual(len(plans), 4)
+        self.assertEqual(len(errs), 2)   # 1 个真实失败 + 1 个回调异常
+
     def test_on_result_called_for_every_symbol(self):
         adv = self._advisor(FakeClient(fail=["C2-USDT"]))
         seen = []

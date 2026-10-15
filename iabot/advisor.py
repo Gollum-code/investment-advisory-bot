@@ -83,7 +83,9 @@ class Advisor:
             cfg = {**cfg, "account": {**(cfg.get("account") or {}), **account}}
         plan = build_plan(snap, cfg, mode=mode)
         with self._lock:
-            self._plan_cache[key] = (now, snap.fetched_at, plan)
+            # 写入时刻用"现在"而不是函数入口的 now：并发抓行情时单次可能要好几秒，
+            # 按开始时刻算会让条目一落地就"过期大半"（与 MarketClient._cached 同理）。
+            self._plan_cache[key] = (time.time(), snap.fetched_at, plan)
             self._trim_locked(self._plan_cache, self._plan_cache_max)
         return plan
 
@@ -97,7 +99,7 @@ class Advisor:
                     return hit[1]
         snap = self.client.snapshot(sym, periods=self.periods, kline_size=self.kline_size)
         with self._lock:
-            self._snap_cache[sym] = (now, snap)
+            self._snap_cache[sym] = (time.time(), snap)
             self._trim_locked(self._snap_cache, self._snap_cache_max)
         return snap
 
@@ -164,6 +166,17 @@ class Advisor:
         def work(sym: str) -> dict:
             return self.plan_payload(sym, mode=mode, account=account, force=force)
 
+        def _notify(sym, plan, err):
+            # on_result 是调用方给的回调（落库 + 推送 + SSE），它自己抛异常
+            # 不该把整轮扫描带下——否则剩下的合约全被丢弃，调用方连
+            # run_done 都发不出去，前端永远等不到"这轮结束"。
+            if not on_result:
+                return
+            try:
+                on_result(sym, plan, err)
+            except Exception as exc:
+                errors.append(f"{sym}: 回调异常 {type(exc).__name__}: {exc}")
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {pool.submit(work, s): s for s in symbols}
             for fut in as_completed(futs):
@@ -177,13 +190,11 @@ class Advisor:
                 except Exception as exc:
                     msg = f"{sym}: {type(exc).__name__}: {exc}"
                     errors.append(msg)
-                    if on_result:
-                        on_result(sym, None, msg)
+                    _notify(sym, None, msg)
                     continue
                 if not only_signal or p.get("direction") != "wait":
                     plans.append(p)
-                if on_result:
-                    on_result(sym, p, None)
+                _notify(sym, p, None)
         plans.sort(key=lambda p: -abs(p.get("score") or 0))
         return plans, errors
 

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__, netutil, symbols as sym_mod
 from .advisor import Advisor
-from .config import load_config, save_config
+from .config import load_config, save_config, validate_config
 from .scheduler import Scheduler
 from .signals import FACTOR_DEFAULTS, MODES
 from .profiles import ProfileStore, cfg_with_profile
@@ -54,7 +54,9 @@ def _universe_override(q: dict) -> dict:
     """把查询串里的一次性全市场筛选参数转成 universe 覆盖项（不写回配置）。"""
     out: dict = {}
     if q.get("top"):
-        out["max_symbols"] = int(q["top"])
+        # 必须封顶：?top=1000000 会展开成全交易所 400 个合约，
+        # 每个约 11 个请求，把这个 HTTP 线程占住好几分钟，还必然触发 429。
+        out["max_symbols"] = max(1, min(200, int(q["top"])))
     if q.get("min_turnover") not in (None, ""):
         out["min_turnover_usdt"] = float(q["min_turnover"])
     if q.get("all_assets") in ("1", "true"):
@@ -67,6 +69,11 @@ def _universe_override(q: dict) -> dict:
 class App:
     def __init__(self, cfg: dict) -> None:
         self.cfg = cfg
+        # ThreadingHTTPServer 里每个请求一个线程，而 app.cfg 是所有 handler、
+        # Advisor、Scheduler 共享的同一个 dict。改它（尤其 profiles 的增删）
+        # 与遍历它并发，会抛 RuntimeError: dictionary changed size during
+        # iteration。所有 cfg 读改写都要走这把锁。
+        self.cfg_lock = threading.RLock()
         self.advisor = Advisor(cfg)
         self.store = SignalStore((cfg.get("storage") or {}).get("db_file", "data/signals.db"),
                                  int((cfg.get("storage") or {}).get("keep_days", 30)))
@@ -245,9 +252,16 @@ def make_handler(app: App):
                 return {}
             raw = self.rfile.read(n)
             try:
-                return json.loads(raw.decode("utf-8"))
+                obj = json.loads(raw.decode("utf-8"))
             except Exception:
                 return {}
+            # json.loads('"abc"') / '[1,2]' 都合法，但下游一律按 dict 用
+            # （body.get(...)），不挡就是 AttributeError -> 500。
+            # 这是客户端发错了形状，应回 400 而不是打堆栈。
+            if not isinstance(obj, dict):
+                self._body_error = "请求体必须是 JSON 对象"
+                return {}
+            return obj
 
         # ---------------- GET ----------------
         def do_GET(self):
@@ -438,9 +452,11 @@ def make_handler(app: App):
                                    "resonance_enabled": bool((an.get("resonance") or {}).get("enabled"))})
 
             if path == "/api/profiles":
-                ps = ProfileStore(app.cfg)
-                return self._json({"ok": True, "profiles": ps.list(),
-                                   "active": ps.active, "current": ps.current_params()})
+                with app.cfg_lock:        # list() 会遍历 profiles 字典
+                    ps = ProfileStore(app.cfg)
+                    return self._json({"ok": True, "profiles": ps.list(),
+                                       "active": ps.active,
+                                       "current": ps.current_params()})
 
             if path == "/api/positions":
                 from .paper import pnl_of
@@ -548,29 +564,30 @@ def make_handler(app: App):
 
         # ---------------- POST handlers ----------------
         def _handle_profiles(self, body: dict):
-            ps = ProfileStore(app.cfg)
             action = (body.get("action") or "").strip()
             name = (body.get("name") or "").strip()
-            if action == "save":
-                p = ps.save(name,
-                            factor_weights=body.get("factor_weights") or {},
-                            score_threshold=body.get("score_threshold") or 30,
-                            mode=body.get("mode") or "intraday",
-                            note=body.get("note") or "")
-                # 手动保存当前参数 -> 缓存里的旧计划按旧权重算的，全部作废
-                app.advisor.invalidate()
-                save_config(app.cfg)
-                return self._json({"ok": True, "profile": p})
-            if action == "delete":
-                ok = ps.delete(name)
-                save_config(app.cfg)
-                return self._json({"ok": True, "deleted": ok})
-            if action == "apply":
-                p = ps.apply(name)
-                app.advisor.invalidate()
-                save_config(app.cfg)
-                return self._json({"ok": True, "profile": p,
-                                   "applied": True})
+            with app.cfg_lock:      # 增删会改变 profiles 字典的条目数
+                ps = ProfileStore(app.cfg)
+                if action == "save":
+                    p = ps.save(name,
+                                factor_weights=body.get("factor_weights") or {},
+                                score_threshold=body.get("score_threshold") or 30,
+                                mode=body.get("mode") or "intraday",
+                                note=body.get("note") or "")
+                    # 手动保存当前参数 -> 缓存里的旧计划按旧权重算的，全部作废
+                    app.advisor.invalidate()
+                    save_config(app.cfg)
+                    return self._json({"ok": True, "profile": p})
+                if action == "delete":
+                    ok = ps.delete(name)
+                    save_config(app.cfg)
+                    return self._json({"ok": True, "deleted": ok})
+                if action == "apply":
+                    p = ps.apply(name)
+                    app.advisor.invalidate()
+                    save_config(app.cfg)
+                    return self._json({"ok": True, "profile": p,
+                                       "applied": True})
             return self._err("action 必须是 save/delete/apply", 400)
 
         def _profiles_backtest(self, body: dict):
@@ -713,9 +730,19 @@ def make_handler(app: App):
             if path.startswith("/api/") and not app.authorized(self.headers):
                 return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
             body = self._body()
+            if getattr(self, "_body_error", None):
+                return self._err(self._body_error, 400)
             try:
                 if path == "/api/schedule":
                     uni = body.get("universe") if isinstance(body.get("universe"), dict) else None
+                    # 边界校验：configure() 之前拦掉垃圾入参。
+                    # symbols 若传字符串，configure 里 [s for s in symbols]
+                    # 会把 "BTC-USDT" 拆成 8 个单字符"合约"并写进 config.json。
+                    if body.get("symbols") is not None and not isinstance(
+                            body["symbols"], list):
+                        return self._err("symbols 必须是数组", 400)
+                    if body.get("mode") is not None and body["mode"] not in MODES:
+                        return self._err(f"mode 必须是 {list(MODES)}", 400)
                     st = app.scheduler.configure(
                         enabled=body.get("enabled"),
                         interval_sec=body.get("interval_sec"),
@@ -730,17 +757,26 @@ def make_handler(app: App):
                     saved = {"enabled": st["enabled"], "interval_sec": st["interval_sec"],
                              "symbols": st["symbols"], "mode": st["mode"],
                              "only_on_signal": st["only_on_signal"]}
-                    if uni is not None:
-                        merged_uni = dict(app.cfg.get("schedule", {}).get("universe") or {})
-                        merged_uni.update({k: v for k, v in uni.items() if v is not None})
-                        merged_uni.update(st["universe"])
-                        saved["universe"] = merged_uni
-                    app.cfg.setdefault("schedule", {}).update(saved)
-                    save_config(app.cfg)
+                    with app.cfg_lock:
+                        if uni is not None:
+                            merged_uni = dict(
+                                (app.cfg.get("schedule") or {}).get("universe") or {})
+                            merged_uni.update({k: v for k, v in uni.items()
+                                               if v is not None})
+                            # 只回写配置项，不把运行态（total/cursor）也存进去
+                            merged_uni.update({k: st["universe"][k] for k in
+                                               ("enabled", "batch_size", "workers")})
+                            merged_uni["filters"] = st["universe"]["filters"]
+                            saved["universe"] = merged_uni
+                        app.cfg.setdefault("schedule", {}).update(saved)
+                        save_config(app.cfg)
                     return self._json({"ok": True, "schedule": st})
 
                 if path == "/api/schedule/run":
                     results = app.scheduler.run_now()
+                    if not results and app.scheduler.busy():
+                        # 上一轮还在跑，不能让前端弹"已执行，共分析 0 个合约"
+                        return self._err("上一轮还在执行中，请等它跑完再试", 409, count=0)
                     return self._json({"ok": True, "count": len(results),
                                        "plans": results})
 
@@ -764,15 +800,24 @@ def make_handler(app: App):
 
                 if path == "/api/config":
                     acc = body.get("account")
-                    if isinstance(acc, dict):
-                        app.cfg.setdefault("account", {}).update(acc)
                     an = body.get("analysis")
-                    if isinstance(an, dict):
-                        app.cfg.setdefault("analysis", {}).update(an)
                     uni = body.get("universe")
-                    if isinstance(uni, dict):
-                        app.cfg.setdefault("universe", {}).update(uni)
-                    save_config(app.cfg)
+                    with app.cfg_lock:
+                        if isinstance(acc, dict):
+                            app.cfg.setdefault("account", {}).update(acc)
+                        if isinstance(an, dict):
+                            app.cfg.setdefault("analysis", {}).update(an)
+                        if isinstance(uni, dict):
+                            app.cfg.setdefault("universe", {}).update(uni)
+                        # 手改的配置也要过一遍强转：否则 score_threshold="abc"
+                        # 会直接落盘，并在上次运行时被 float 比较炸掉
+                        # （validate_config 只在重启时兜底）。
+                        fixed = validate_config(app.cfg)
+                        app.cfg.clear()
+                        app.cfg.update(fixed)
+                        # 权重/阈值改了，缓存里的旧计划是按旧参数算的
+                        app.advisor.invalidate()
+                        save_config(app.cfg)
                     return self._json({"ok": True, "config": app.cfg})
 
                 if path == "/api/history/clear":
