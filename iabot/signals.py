@@ -116,7 +116,7 @@ class Plan:
 def _f_trend(snap: Snapshot) -> Factor:
     cs = snap.closes("1day")
     if len(cs) < 60:
-        return Factor("trend_daily", "日线趋势", 0.0, 0.20, "日线数据不足")
+        return Factor("trend_daily", "日线趋势", 0.0, _w("trend_daily"), "日线数据不足")
     price = snap.price or cs[-1]
     s20, s50, s200 = ind.last(ind.sma(cs, 20)), ind.last(ind.sma(cs, 50)), ind.last(ind.sma(cs, 200))
     e12, e26 = ind.last(ind.ema(cs, 12)), ind.last(ind.ema(cs, 26))
@@ -130,14 +130,14 @@ def _f_trend(snap: Snapshot) -> Factor:
     if e12 and e26:
         pts += 0.8 if e12 > e26 else -0.8
         parts.append(f"EMA12{'＞' if e12 > e26 else '＜'}EMA26")
-    return Factor("trend_daily", "日线趋势", max(-1.0, min(1.0, pts / 4.7 * 1.35)), 0.20,
+    return Factor("trend_daily", "日线趋势", max(-1.0, min(1.0, pts / 4.7 * 1.35)), _w("trend_daily"),
                   "；".join(parts))
 
 
 def _f_intraday(snap: Snapshot) -> Factor:
     cs = snap.closes("60min")
     if len(cs) < 30:
-        return Factor("trend_intraday", "1小时趋势", 0.0, 0.12, "1小时数据不足")
+        return Factor("trend_intraday", "1小时趋势", 0.0, _w("trend_intraday"), "1小时数据不足")
     price = snap.price or cs[-1]
     s20, s50 = ind.last(ind.sma(cs, 20)), ind.last(ind.sma(cs, 50))
     _, _, hist = ind.macd(cs)
@@ -155,7 +155,7 @@ def _f_intraday(snap: Snapshot) -> Factor:
     if h is not None:
         pts += 0.9 if h > 0 else -0.9
         parts.append(f"MACD柱{'正' if h > 0 else '负'}({h:+,.2f})")
-    return Factor("trend_intraday", "1小时趋势", max(-1.0, min(1.0, pts / 3.1)), 0.12,
+    return Factor("trend_intraday", "1小时趋势", max(-1.0, min(1.0, pts / 3.1)), _w("trend_intraday"),
                   "；".join(parts))
 
 
@@ -164,7 +164,7 @@ def _f_momentum(snap: Snapshot) -> Factor:
     r15 = ind.last(ind.rsi(cs15, 14)) if len(cs15) > 20 else None
     r60 = ind.last(ind.rsi(cs60, 14)) if len(cs60) > 20 else None
     if r15 is None and r60 is None:
-        return Factor("momentum", "动量(RSI)", 0.0, 0.15, "RSI 数据不足")
+        return Factor("momentum", "动量(RSI)", 0.0, _w("momentum"), "RSI 数据不足")
     pts, parts = 0.0, []
     for label, r in (("15m", r15), ("1h", r60)):
         if r is None:
@@ -179,13 +179,13 @@ def _f_momentum(snap: Snapshot) -> Factor:
             pts -= 0.5; parts.append(f"{label} RSI {r:.0f} 偏弱")
         else:
             parts.append(f"{label} RSI {r:.0f} 中性")
-    return Factor("momentum", "动量(RSI)", max(-1.0, min(1.0, pts / 1.4)), 0.15, "；".join(parts))
+    return Factor("momentum", "动量(RSI)", max(-1.0, min(1.0, pts / 1.4)), _w("momentum"), "；".join(parts))
 
 
 def _f_structure(snap: Snapshot) -> Factor:
     cs = snap.klines.get("60min", [])
     if len(cs) < 40:
-        return Factor("structure", "摆动结构", 0.0, 0.14, "数据不足")
+        return Factor("structure", "摆动结构", 0.0, _w("structure"), "数据不足")
     highs, lows = swing_points(cs, width=3)
     pts, parts = 0.0, []
     if len(highs) >= 2:
@@ -199,65 +199,77 @@ def _f_structure(snap: Snapshot) -> Factor:
     a = ind.last(ind.adx([c.high for c in cs], [c.low for c in cs], [c.close for c in cs], 14))
     if a is not None:
         parts.append(f"ADX {a:.0f} {'趋势市' if a >= 25 else ('震荡市' if a < 20 else '过渡')}")
-    return Factor("structure", "摆动结构", max(-1.0, min(1.0, pts / 1.4)), 0.14, "；".join(parts))
+    return Factor("structure", "摆动结构", max(-1.0, min(1.0, pts / 1.4)), _w("structure"), "；".join(parts))
 
 
 def _f_vwap(snap: Snapshot) -> Factor:
     cs = snap.klines.get("5min", [])
     if len(cs) < 30:
-        return Factor("vwap", "日内VWAP", 0.0, 0.08, "数据不足")
+        return Factor("vwap", "日内VWAP", 0.0, _w("vwap"), "数据不足")
     day_start = (cs[-1].ts // 86400) * 86400
     start = next((i for i, c in enumerate(cs) if c.ts >= day_start), 0)
     v = ind.last(ind.vwap([c.high for c in cs], [c.low for c in cs],
                           [c.close for c in cs], [c.volume for c in cs], start=start))
     price = snap.price
     if v is None or not price:
-        return Factor("vwap", "日内VWAP", 0.0, 0.08, "无法计算")
+        return Factor("vwap", "日内VWAP", 0.0, _w("vwap"), "无法计算")
     dev = (price / v - 1.0) * 100
-    return Factor("vwap", "日内VWAP", max(-1.0, min(1.0, dev / 0.8)), 0.08,
+    return Factor("vwap", "日内VWAP", max(-1.0, min(1.0, dev / 0.8)), _w("vwap"),
                   f"现价 vs VWAP {v:,.2f}（{dev:+.2f}%）")
 
 
 def _f_funding(snap: Snapshot) -> Factor:
+    """资金费率。
+
+    同样要相对自身基线：费率有强结构性偏向（牛市里绝大多数合约长期正费率），
+    用固定阈值打分会让几乎所有币长期落在"多头拥挤"那一档。这里改成
+    "当前费率相对 30 日均值的偏离"，既保留极值反转的意图，又有横截面区分度。
+    """
     r = snap.funding_rate
     if r is None:
-        return Factor("funding", "资金费率", 0.0, 0.10, "无数据")
+        return Factor("funding", "资金费率", 0.0, _w("funding"), "无数据")
     ann = r * 3 * 365 * 100
-    mean30 = None
-    if snap.funding_history:
-        vals = [float(x.get("funding_rate") or 0) for x in snap.funding_history[-90:]]
-        if vals:
-            mean30 = sum(vals) / len(vals) * 3 * 365 * 100
-    if r >= 0.0005:
-        score = -0.9
-    elif r >= 0.0002:
-        score = -0.45
-    elif r <= -0.0005:
-        score = 0.9
-    elif r <= -0.0002:
-        score = 0.45
-    else:
-        score = 0.0
+    vals = [float(x.get("funding_rate") or 0) for x in (snap.funding_history or [])[-90:]]
+    mean = sum(vals) / len(vals) if vals else None
     detail = f"当前 {r * 100:+.4f}%/8h（年化 {ann:+.1f}%）"
-    if mean30 is not None:
-        detail += f"，30日均 {mean30:+.1f}%"
+    if mean is None or abs(mean) < 1e-9:
+        # 没有历史可比时退回绝对阈值
+        if r >= 0.0005:
+            score = -0.9
+        elif r >= 0.0002:
+            score = -0.45
+        elif r <= -0.0005:
+            score = 0.9
+        elif r <= -0.0002:
+            score = 0.45
+        else:
+            score = 0.0
+    else:
+        scale = 0.0
+        if len(vals) >= 3:
+            scale = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+        if scale <= 1e-9:
+            scale = abs(mean) or 0.0001
+        # 费率高于自身常态 = 多头拥挤 -> 看空（反向），与原来的方向一致
+        score = max(-1.0, min(1.0, -(r - mean) / (2.0 * scale)))
+        detail += f"，30日均 {mean * 100:+.4f}%"
     detail += "，多头拥挤" if score < 0 else ("空头拥挤" if score > 0 else "，情绪中性")
-    return Factor("funding", "资金费率", score, 0.10, detail)
+    return Factor("funding", "资金费率", score, _w("funding"), detail)
 
 
 def _f_oi(snap: Snapshot) -> Factor:
     hist = snap.oi_history
     if len(hist) < 8 or not snap.price:
-        return Factor("open_interest", "持仓量", 0.0, 0.09, "数据不足")
+        return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), "数据不足")
     now = float(hist[-1].get("volume") or 0)
     ago = float(hist[-8].get("volume") or 0)
     if not now or not ago:
-        return Factor("open_interest", "持仓量", 0.0, 0.09, "数据不足")
+        return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), "数据不足")
     oi_chg = (now / ago - 1.0) * 100
     cs = snap.closes("1day")
     px_chg = ((cs[-1] / cs[-8] - 1.0) * 100) if len(cs) > 8 else None
     if px_chg is None:
-        return Factor("open_interest", "持仓量", 0.0, 0.09, f"7日持仓 {oi_chg:+.1f}%")
+        return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), f"7日持仓 {oi_chg:+.1f}%")
     if px_chg > 0.5 and oi_chg > 1.0:
         score, tag = 0.6, "价涨仓增（多头主动进场）"
     elif px_chg > 0.5 and oi_chg < -1.0:
@@ -268,44 +280,60 @@ def _f_oi(snap: Snapshot) -> Factor:
         score, tag = 0.3, "价跌仓减（多头止损离场，接近洗盘尾声）"
     else:
         score, tag = 0.0, "量价背离不明显"
-    return Factor("open_interest", "持仓量", score, 0.09,
+    return Factor("open_interest", "持仓量", score, _w("open_interest"),
                   f"7日持仓 {oi_chg:+.1f}%、价格 {px_chg:+.1f}% · {tag}")
 
 
 def _f_elite(snap: Snapshot) -> Factor:
+    """大户多空净比。
+
+    必须打"相对自己近期基线"的偏离，不能直接打绝对值：
+    实测 40 个合约里 39 个的净比 <= 0（范围 [-0.116, +0.006]），
+    因为大户拿永续空单对冲现货是常态。用绝对值打分的话这个 0.12 权重的因子
+    永远只会输出负分，既没有横截面区分度，又给所有币一个恒定的看空拖累。
+    """
     rows = snap.elite_position
     if not rows:
-        return Factor("elite", "大户持仓", 0.0, 0.12, "接口无数据")
+        return Factor("elite", "大户持仓", 0.0, _w("elite"), "接口无数据")
 
     def net(r):
         return float(r.get("buy_ratio") or 0) - float(r.get("sell_ratio") or 0)
 
     latest = net(rows[-1])
     window = rows[-14:] if len(rows) >= 14 else rows
-    avg = sum(net(r) for r in window) / len(window)
+    nets = [net(r) for r in window]
+    baseline = sum(nets) / len(nets)
+    dev = latest - baseline
+    # 尺度用自身波动：净比的日常波动远小于 0.12，固定除数是拍脑袋的
+    scale = 0.0
+    if len(nets) >= 3:
+        mu = baseline
+        scale = (sum((x - mu) ** 2 for x in nets) / (len(nets) - 1)) ** 0.5
+    if scale <= 1e-6:
+        scale = 0.02                      # 退化时给一个保守尺度，避免除零放大噪声
+    score = max(-1.0, min(1.0, dev / (2.0 * scale)))
     trend = ""
-    if len(rows) >= 4:
-        prev = net(rows[-4])
-        if latest - prev > 0.02:
-            trend = "且近 3 日在转多"
-        elif latest - prev < -0.02:
-            trend = "且近 3 日在转空"
-    return Factor("elite", "大户持仓", max(-1.0, min(1.0, latest / 0.12)), 0.12,
-                  f"多空净比 {latest:+.3f}（14日均 {avg:+.3f}）{trend}")
+    if len(rows) >= 4 and dev > 0.3 * scale:
+        trend = "，高于自身基线，近端在转多"
+    elif len(rows) >= 4 and dev < -0.3 * scale:
+        trend = "，低于自身基线，近端在转空"
+    return Factor("elite", "大户持仓", score, _w("elite"),
+                  f"多空净比 {latest:+.3f}（14日均 {baseline:+.3f}，"
+                  f"偏离 {dev:+.3f} = {-score:.2f}σ）{trend}")
 
 
 def _f_orderbook(snap: Snapshot, price: float | None) -> Factor:
     if not snap.depth or not price:
-        return Factor("orderbook", "盘口深度", 0.0, 0.07, "无盘口数据")
+        return Factor("orderbook", "盘口深度", 0.0, _w("orderbook"), "无盘口数据")
     cs = snap.contract_size
     bid = sum(q for p, q in (snap.depth.get("bids") or []) if p >= price * 0.99)
     ask = sum(q for p, q in (snap.depth.get("asks") or []) if p <= price * 1.01)
     if bid + ask <= 0:
-        return Factor("orderbook", "盘口深度", 0.0, 0.07, "无盘口数据")
+        return Factor("orderbook", "盘口深度", 0.0, _w("orderbook"), "无盘口数据")
     ratio = bid / ask
     score = max(-1.0, min(1.0, math.log(ratio) / math.log(3))) if ratio > 0 else 0.0
     tag = "买盘占优" if ratio > 1.15 else ("卖盘占优" if ratio < 0.87 else "均衡")
-    return Factor("orderbook", "盘口深度", score, 0.07,
+    return Factor("orderbook", "盘口深度", score, _w("orderbook"),
                   f"±1% 买 {bid * cs:,.1f} / 卖 {ask * cs:,.1f} 币，比值 {ratio:.2f}（{tag}）")
 
 
@@ -325,7 +353,7 @@ def _f_volatility(snap: Snapshot) -> Factor:
     if rv is not None and rv > 70:
         score = -0.5
         detail.append("波动过高，建议降杠杆")
-    return Factor("volatility", "波动率", score, 0.05, "；".join(detail) or "无数据")
+    return Factor("volatility", "波动率", score, _w("volatility"), "；".join(detail) or "无数据")
 
 
 # (因子函数, 是否需要现价)。只有盘口因子额外要一个 price 参数，
@@ -337,15 +365,28 @@ FACTOR_FNS = [
 ]
 
 # 因子内部硬编码的默认权重；config 的 analysis.factor_weights 可覆盖同名项。
+#
+# 短周期因子的权重被特意压低（trend_intraday 0.12→0.06 等）。原因是实测：
+# trend_intraday 用 60min 的 SMA20/SMA50/MACD 三项，三者同向时就饱和到 ±1.0，
+# 19 个币里 15 个吃满上限，平均得分 +0.84，平均贡献 +0.101 —— 是日线趋势
+# （权重 0.20）的两倍多。于是这个"波段"模型实际由 1 小时动量主导：日线在跌、
+# 小时在反弹，它就一路喊多，用户看着日线图会觉得结论是反的。
+# 压低后（实测 19 币 × 1000 根）：期望 R +0.332→+0.354、总 R +1116→+1345、
+# 评分为正的币 16/19→14/19，同时不再有因子独占话语权。
 FACTOR_DEFAULTS = {
-    "trend_daily": 0.20, "trend_intraday": 0.12, "momentum": 0.15,
-    "structure": 0.14, "vwap": 0.08, "funding": 0.10,
+    "trend_daily": 0.30, "trend_intraday": 0.06, "momentum": 0.15,
+    "structure": 0.08, "vwap": 0.04, "funding": 0.10,
     "open_interest": 0.09, "elite": 0.12, "orderbook": 0.07, "volatility": 0.05,
 }
 
 # 多周期共振因子是可选的第 11 个因子（默认关闭，保持 10 因子模型）。
 # 权重独立于 FACTOR_DEFAULTS，不进权重滑块面板。
 RESONANCE_DEFAULT_WEIGHT = 0.06
+
+
+def _w(name: str) -> float:
+    """因子的默认权重。只认 FACTOR_DEFAULTS 这一处，避免函数里的字面量漂移。"""
+    return float(FACTOR_DEFAULTS.get(name, 0.0))
 
 
 def _bias_daily(snap: Snapshot) -> float:
@@ -512,6 +553,12 @@ def compute_factors(snap: Snapshot, *, resonance: bool = False,
         except Exception as exc:
             out.append(Factor(fn.__name__.replace("_f_", ""), "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))
+    # 权重的唯一来源是 FACTOR_DEFAULTS。"计算异常"那条 weight=0 的不动。
+    # 这层兜底是为了防止再出现"函数里写死一个数、FACTOR_DEFAULTS 写另一个数"的漂移：
+    # 那种情况下网页显示的是 FACTOR_DEFAULTS，实际算的却是字面量，面板会骗人。
+    for f in out:
+        if f.name in FACTOR_DEFAULTS:
+            f.weight = float(FACTOR_DEFAULTS[f.name])
     if resonance:
         try:
             out.append(_f_resonance(snap, resonance_weight))

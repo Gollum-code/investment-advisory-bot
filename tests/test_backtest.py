@@ -102,20 +102,52 @@ class TestFundingRateAt(unittest.TestCase):
         self.assertEqual(_funding_rate_at([], 1_700_000_000), 0.0)
 
     def test_backtest_uses_history_when_available(self):
-        from iabot.backtest import _funding_rate_at
-        snap = _make_snapshot(200)
-        # 给一个"全正费率"的历史序列，多头要付更多 -> 成本不低于无历史
-        t0 = snap.klines["15min"][0].ts
-        snap.funding_history = [
-            {"funding_time": int((t0 + i * 8 * 3600) * 1000), "funding_rate": 0.0005}
-            for i in range(20)
-        ]
-        with_hist = backtest(snap, _cfg(), mode="intraday", step=6, warmup=30).to_dict()
-        snap2 = _make_snapshot(200)
-        snap2.funding_history = []
-        without = backtest(snap2, _cfg(), mode="intraday", step=6, warmup=30).to_dict()
-        # 有历史费率时，平均资金费成本不应为负（多头正费率要付钱）
-        self.assertGreaterEqual(with_hist["avg_funding_r"], without["avg_funding_r"] - 1e-9)
+        """有历史费率序列时，成本模型要用它，而不是快照上的当前费率。
+
+        断言方式与"做多还是做空"解耦：给全 0 的历史 -> 资金费成本应为 0；
+        给全正的历史 -> 只要成交了就应非 0。资金费因子本身也会读这段历史
+        （决定方向），所以不能拿"有没有历史"去比总 R。
+        """
+        def run(rate: float):
+            snap = _trading_snapshot()          # 三周期齐全，才会真的出交易
+            snap.funding_rate = 0.0             # 关掉快照费率兜底
+            snap.funding_history = [
+                {"funding_time": int((BASE + i * 8 * 3600) * 1000),
+                 "funding_rate": rate} for i in range(40)
+            ]
+            return _bt(snap)
+
+        zero = run(0.0)
+        pos = run(0.0005)
+        self.assertEqual(zero.avg_funding_r, 0.0)
+        self.assertGreater(zero.trades, 0, "夹具没出交易，测不了")
+        # 正的历史费率必须体现到成本里。若成本模型忽略历史、退回快照费率
+        # （这里已设为 0），avg_funding_r 也会是 0，就抓不出来了。
+        self.assertNotEqual(pos.avg_funding_r, 0.0)
+
+    def test_funding_factor_uses_deviation_not_absolute_level(self):
+        """资金费因子要相对自身基线，不能用绝对阈值。
+
+        费率有强结构性偏向（牛市里几乎所有合约长期正费率），
+        固定阈值会让所有币长期落在同一档，0.10 的权重等于没有区分度。
+        """
+        from iabot.signals import _f_funding
+        from iabot.market import Snapshot
+
+        def mk(rate, hist):
+            s = Snapshot(symbol="X-USDT", price=100.0, funding_rate=rate,
+                         funding_history=[{"funding_time": i * 8 * 3600_000,
+                                           "funding_rate": v}
+                                          for i, v in enumerate(hist)])
+            return _f_funding(s)
+
+        # 同一绝对费率，历史基线不同 -> 分数应当不同
+        flat_high = mk(0.0003, [0.0003] * 30)      # 等于自己常态
+        below = mk(0.0001, [0.0003] * 30)          # 明显低于自己常态
+        above = mk(0.0006, [0.0003] * 30)          # 明显高于自己常态
+        self.assertEqual(flat_high.score, 0.0)
+        self.assertGreater(below.score, 0.0)        # 不拥挤 -> 偏多
+        self.assertLess(above.score, 0.0)           # 多头拥挤 -> 偏空
 
 
 class TestBacktest(unittest.TestCase):

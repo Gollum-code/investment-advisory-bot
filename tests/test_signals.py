@@ -30,7 +30,7 @@ PERIOD_BARS = {
 TAIL_HOURS = 6.0
 
 # 因子权重是相对值（打分时再除以权重和），README 的表格就是这个口径
-DOCUMENTED_WEIGHT_SUM = 1.12
+DOCUMENTED_WEIGHT_SUM = 1.06
 
 # 场景：net_pct = 整段净涨跌%，tail_pct = 最后 6 小时的额外涨跌%（负数=顺着趋势再走一段）
 UP = dict(net_pct=8.0, tail_pct=-0.2)          # 日内 + 波段都给多头

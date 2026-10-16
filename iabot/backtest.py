@@ -76,9 +76,34 @@ class BacktestResult:
         }
 
 
+def _upto(rows: list[dict], ts_field: str, ts: float,
+          keep: int | None = None) -> list[dict]:
+    """取"时间戳 <= ts"的那些行（输入已按时间正序）。
+
+    回测要复现"当时能看到什么"。之前只切了 K 线，持仓量/大户持仓/资金费历史
+    一律为空，于是 _f_oi、_f_elite、_f_funding 在回测里恒为 0 分——
+    合起来 0.31 的权重从来没被验证过，回测的期望值并不代表 live 的表现。
+    """
+    out = []
+    for r in rows:
+        try:
+            v = float(r.get(ts_field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if v / (1000.0 if v > 1e11 else 1.0) <= ts:
+            out.append(r)
+        else:
+            break                     # 正序，遇到未来就停
+    return out[-keep:] if keep else out
+
+
 def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
-                    idx_by_period: dict[str, int], price: float) -> Snapshot:
-    """构造"截至 idx_by_period 那一刻"的快照：只含各周期 idx 及之前的 K 线。"""
+                    idx_by_period: dict[str, int], price: float,
+                    ts: float | None = None) -> Snapshot:
+    """构造"截至 idx_by_period 那一刻"的快照：只含各周期 idx 及之前的 K 线。
+
+    ts 给出时，持仓量/大户/资金费历史也一并切到该时刻（无未来函数）。
+    """
     snap = Snapshot(
         symbol=base.symbol,
         price=price,
@@ -90,6 +115,16 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
     for period, idx in idx_by_period.items():
         rows = klines.get(period) or []
         snap.klines[period] = rows[: idx + 1]
+    if ts is not None:
+        snap.oi_history = _upto(base.oi_history, "ts", ts, keep=90)
+        snap.elite_position = _upto(base.elite_position, "ts", ts, keep=90)
+        snap.funding_history = _upto(base.funding_history, "funding_time", ts, keep=90)
+        if snap.oi_history:
+            try:
+                snap.open_interest = float(
+                    snap.oi_history[-1].get("volume") or 0) or base.open_interest
+            except (TypeError, ValueError):
+                pass
     return snap
 
 
@@ -217,7 +252,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             idx_by_period[period] = j if j >= 0 else -1
 
         price = main[i].close
-        snap = _slice_snapshot(base, base.klines, idx_by_period, price)
+        snap = _slice_snapshot(base, base.klines, idx_by_period, price, ts=ts)
         # 判定用"之后"的 K 线：从 i+1 开始
         future = main[i + 1:]
 
