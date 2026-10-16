@@ -308,16 +308,17 @@ class SignalStore:
             return d
         rows = [_rich(r) for r in rows]
 
-        resolved = [r for r in rows if r["outcome"] != "timeout"]
+        resolved = [r for r in rows if r["outcome"] not in ("timeout", "no_fill")]
         wins = [r for r in resolved if (r["outcome"] or "").startswith("tp")]
         losses = [r for r in resolved if r["outcome"] == "stopped"]
         timeouts = [r for r in rows if r["outcome"] == "timeout"]
+        no_fills = [r for r in rows if r["outcome"] == "no_fill"]
 
         def _agg(rs) -> dict:
             # timeout（到期未了结）不是亏损，不该计入分母——但分组时仍要保留它，
             # 否则"只有 timeout 的币/方案"会整个从分组里消失。
             # outcomes.py 的口径也是"timeout 不参与胜率统计"。
-            rs = [r for r in rs if r["outcome"] != "timeout"]
+            rs = [r for r in rs if r["outcome"] not in ("timeout", "no_fill")]
             n = len(rs)
             if not n:
                 return {"n": 0, "wins": 0, "losses": 0, "win_rate": None, "avg_r": None,
@@ -351,6 +352,7 @@ class SignalStore:
             "wins": len(wins),
             "losses": len(losses),
             "timeouts": len(timeouts),
+            "no_fills": len(no_fills),
             **_agg(resolved),
             "by_mode": _group(lambda r: r["mode"]),
             "by_symbol": _group(lambda r: r["symbol"]),

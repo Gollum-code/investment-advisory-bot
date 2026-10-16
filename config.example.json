@@ -61,13 +61,13 @@
     },
     "gate": {
       "measure": "tp1",
-      "min_rr": 1.0,
+      "min_rr": 0.8,
       "weights": [
         0.5,
         0.3,
         0.2
       ],
-      "min_target_rr": 0.8
+      "min_target_rr": 0.5
     },
     "backtest": {
       "enabled": true,

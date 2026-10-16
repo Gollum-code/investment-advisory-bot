@@ -92,6 +92,7 @@ busy: false,
       tp3: { label: '命中 TP3', good: true },
       stopped: { label: '触发止损', good: false },
       timeout: { label: '到期未了结', good: false },
+      no_fill: { label: '挂单未成交', good: false },
     }[o] || { label: o, good: false };
   }
 
@@ -1044,7 +1045,7 @@ busy: false,
         let oc = '';
         if (p.outcome) {
           const o = outcomeLabel(p.outcome);
-          oc = '<span class="oc ' + (p.outcome === 'stopped' ? 'bad' : (p.outcome === 'timeout' ? 'warn' : 'good')) +
+          oc = '<span class="oc ' + (p.outcome === 'stopped' ? 'bad' : (p.outcome === 'timeout' || p.outcome === 'no_fill' ? 'warn' : 'good')) +
             '">' + esc(o.label) + '</span>';
         }
         return '<div class="h-item" data-sym="' + esc(p.symbol) + '">' +

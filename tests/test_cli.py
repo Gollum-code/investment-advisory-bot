@@ -57,7 +57,10 @@ class TestRenderPlan(unittest.TestCase):
         self.assertIn("不给", wait)
 
     def test_explains_why_a_high_score_still_waits(self):
-        plan = build_plan(make_snapshot(**NO_ROOM), cfg_with(), mode="intraday")
+        # 把门槛调高来构造"被闸门拦下"的场景（门槛可配，别写死某个数值）
+        cfg = cfg_with()
+        cfg["analysis"]["gate"]["min_rr"] = 3.0
+        plan = build_plan(make_snapshot(**NO_ROOM), cfg, mode="intraday")
         text = cli.render_plan(plan.to_dict())
         self.assertIn("其实指向做多", text)
         self.assertIn("盈亏比", text)

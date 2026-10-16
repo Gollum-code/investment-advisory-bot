@@ -2,6 +2,11 @@
 
 只读公开行情，不做任何假设；判定规则保持保守：
 
+- **先要求挂单成交**：入场是一个"回撤区间"，价格没进过区间就是没做上，
+  返回 outcome="no_fill"，不该计进任何胜负统计。多单挂在现价下方，
+  价格直接涨走就永远不会成交——不判成交的话，这些单会因为"后来涨到了止盈"
+  被算成胜利，只往里灌水（实测 14% 的信号从未成交，其中 99.7% 被判胜利，
+  把胜率从 46.7% 虚抬到 54.0%）。
 - 多头：某根 K 线 low <= 止损 -> 止损；high >= 某档目标 -> 命中该档
 - 空头：反过来
 - 同一根 K 线同时碰止损和目标（插针/宽幅）-> 按止损算（更悲观）
@@ -16,12 +21,18 @@ from .market import Candle
 DEFAULT_WINDOW_HOURS = {"intraday": 48.0, "swing": 21 * 24.0}
 EXTRA_BUFFER_SEC = 300  # 信号生成到 K 线根结束之间的余量
 
-OUTCOMES_OK = ("tp1", "tp2", "tp3", "stopped", "timeout")
+# no_fill = 挂单从未成交；它不是"没结果"，而是"这笔单不存在"
+OUTCOMES_OK = ("tp1", "tp2", "tp3", "stopped", "timeout", "no_fill")
 
 
 def evaluate_outcome(plan: dict, candles: list[Candle],
-                     *, max_hours: float | None = None) -> dict | None:
-    """返回 {outcome, ts, price, rr, mfe_pct, mae_pct, bars}，无法判定时返回 None。"""
+                     *, max_hours: float | None = None,
+                     require_fill: bool = True) -> dict | None:
+    """返回 {outcome, ts, price, rr, mfe_pct, mae_pct, bars}，无法判定时返回 None。
+
+    require_fill=True 时，价格必须先进入 [entry_low, entry_high] 才算成交，
+    未成交返回 outcome="no_fill"（调用方应把它排除在胜率/期望之外）。
+    """
     direction = plan.get("direction")
     if direction not in ("long", "short"):
         return None
@@ -46,12 +57,19 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
     best_mfe = 0.0
     best_mae = 0.0
     bars = 0
+    filled = not require_fill
     for c in candles:
         if c.ts <= start + EXTRA_BUFFER_SEC:
             continue
         if c.ts > horizon:
             break
         bars += 1
+        if not filled:
+            # 挂单要价格进过入场区间才算成交（区间有重叠即视为触及）。
+            # 没成交就不看止损/止盈 —— 这笔单根本不存在。
+            if not (c.low <= entry_high and c.high >= entry_low):
+                continue
+            filled = True
         if direction == "long":
             mfe = (c.high - mid) / mid * 100.0
             mae = (c.low - mid) / mid * 100.0
@@ -75,6 +93,10 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
 
     if bars == 0:
         return None  # 还没有任何后续 K 线，等下一轮再说
+    if not filled:
+        # 窗口内价格从没进过挂单区 -> 这笔单不存在，不计胜负
+        return {"outcome": "no_fill", "ts": horizon, "price": None, "rr": None,
+                "mfe_pct": 0.0, "mae_pct": 0.0, "bars": bars}
     return {"outcome": "timeout", "ts": horizon, "price": None, "rr": None,
             "mfe_pct": round(best_mfe, 3), "mae_pct": round(best_mae, 3),
             "bars": bars}

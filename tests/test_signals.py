@@ -113,6 +113,10 @@ def cfg_with(**account):
     return cfg
 
 
+def gate_min_rr(cfg=None):
+    return float(((cfg or DEFAULTS)["analysis"].get("gate") or {}).get("min_rr", 1.0))
+
+
 def plan_for(scenario, mode="intraday", **account):
     return build_plan(make_snapshot(**scenario), cfg_with(**account), mode=mode)
 
@@ -141,16 +145,22 @@ class TestDirection(unittest.TestCase):
         self.assertLess(abs(plan.score), 30.0)
 
     def test_score_ok_but_no_room_is_blocked_by_gate(self):
-        """评分指向做多，但第一目标盈亏比 < 1.0 时必须降级，并把原因写清楚。"""
-        plan = plan_for(NO_ROOM, "intraday")
+        """评分指向做多，但第一目标盈亏比不够时必须降级，并把原因写清楚。
+
+        把门槛调高来构造"空间不够"的场景——这样测试的是闸门机制本身，
+        而不是某个特定的门槛数值（门槛是可配的，别写死）。
+        """
+        cfg = cfg_with()
+        cfg["analysis"]["gate"]["min_rr"] = 3.0
+        plan = build_plan(make_snapshot(**NO_ROOM), cfg, mode="intraday")
         self.assertEqual(plan.direction, "wait")
         self.assertGreater(plan.score, 30.0, "前提是评分确实过了阈值")
         gate = plan.gate
         self.assertTrue(gate.get("blocked"))
         self.assertEqual(gate.get("reason"), "rr")
         self.assertEqual(gate.get("would_be"), "long")
-        self.assertLess(gate.get("rr"), 1.0)
-        self.assertEqual(gate.get("need"), 1.0)
+        self.assertLess(gate.get("rr"), 3.0)
+        self.assertEqual(gate.get("need"), 3.0)
         self.assertAlmostEqual(gate.get("score"), plan.score, places=1)
 
     def test_plain_wait_has_no_gate(self):
@@ -282,14 +292,16 @@ class TestLevelsAndRisk(unittest.TestCase):
         self.assertEqual(plan.targets, [])
         self.assertIsNone(plan.rr)
 
-    def test_rr_never_below_one_for_real_signals(self):
+    def test_rr_never_below_gate_threshold_for_real_signals(self):
+        """给了方向的计划，第一目标盈亏比必须达到配置的闸门门槛。"""
+        thr = gate_min_rr()
         for scenario in (UP, DOWN_INTRADAY, DOWN_SWING):
             for mode in ("intraday", "swing"):
                 plan = plan_for(scenario, mode)
                 if plan.direction == "wait":
                     continue
                 self.assertIsNotNone(plan.rr)
-                self.assertGreaterEqual(plan.rr, 1.0)
+                self.assertGreaterEqual(plan.rr, thr - 1e-9)
 
 
 class TestSizing(unittest.TestCase):

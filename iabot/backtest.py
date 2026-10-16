@@ -31,6 +31,7 @@ class BacktestResult:
     wins: int
     losses: int
     timeouts: int               # 窗口内既没到目标也没碰止损
+    no_fills: int               # 挂单从未成交（价格没进过入场区），不计胜负
     total_r: float              # 所有已了结交易的 R 之和（用满仓单风险）
     avg_win_r: float
     avg_loss_r: float
@@ -48,12 +49,14 @@ class BacktestResult:
     risk_pct: float             # 单笔风险占权益 %
     risk_amount_usdt: float     # 单笔风险金额
     equity_curve_usdt: list[float]  # 累计权益曲线（按单笔风险金额折算成 U）
+    insufficient_data: bool = False  # True = 主周期 K 线不够，一笔都没跑
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol, "mode": self.mode, "bars": self.bars,
             "trades": self.trades, "wins": self.wins, "losses": self.losses,
-            "timeouts": self.timeouts,
+            "timeouts": self.timeouts, "no_fills": self.no_fills,
+            "insufficient_data": self.insufficient_data,
             "win_rate": round(self.win_rate, 4),
             "expectancy_r": round(self.expectancy_r, 3),
             "avg_win_r": round(self.avg_win_r, 3),
@@ -195,14 +198,20 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     main = base.klines.get(m_period) or []
     n = len(main)
     if n < warmup + step + 30:
+        # 数据不足：这里曾经把 `timeouts` 填成 K 线根数 n。那是个假值——
+        # 一笔信号都没有，"超时"从何而来？后果是任何用
+        # wins/(trades-timeouts) 算胜率的消费方都会拿到错误的分母
+        # （实测 ZEC 只有 370 根日线，凭空多出 372 个"超时"，
+        #   把一段真实胜率 48.5% 的区间算成 65.4%）。
+        # 现在用 insufficient_data 明确表达，timeouts 归零。
         return BacktestResult(
             symbol=base.symbol, mode=mode, bars=n, trades=0, wins=0, losses=0,
-            timeouts=n, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
+            timeouts=0, no_fills=0, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
             avg_cost_r=0.0, avg_fee_r=0.0, avg_slippage_r=0.0, avg_funding_r=0.0,
             avg_holding_h=0.0, win_rate=0.0, expectancy_r=0.0,
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
-            equity_curve_usdt=[])
+            equity_curve_usdt=[], insufficient_data=True)
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -223,6 +232,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         return ans
 
     wins = losses = timeouts = 0
+    no_fills = 0
     total_r = 0.0
     win_rs: list[float] = []
     loss_rs: list[float] = []
@@ -266,6 +276,10 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         res = evaluate_outcome(plan.to_dict(), future)
         if not res:
             continue  # 后续 K 线不足以判定窗口，跳过（不算交易）
+        if res["outcome"] == "no_fill":
+            # 价格从没进过挂单区 -> 这笔单根本没做上，既不记胜负也不算成本
+            no_fills += 1
+            continue
         trades += 1
         outcome = res["outcome"]
         mfes.append(res["mfe_pct"])
@@ -326,7 +340,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     mean = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
     return BacktestResult(
         symbol=base.symbol, mode=mode, bars=n, trades=trades,
-        wins=wins, losses=losses, timeouts=timeouts,
+        wins=wins, losses=losses, timeouts=timeouts, no_fills=no_fills,
         total_r=total_r,
         avg_win_r=mean(win_rs),
         avg_loss_r=mean(loss_rs),
