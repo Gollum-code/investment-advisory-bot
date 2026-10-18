@@ -50,14 +50,21 @@ class TestWeightSingleSource(unittest.TestCase):
             S.FACTOR_DEFAULTS.update(old)
 
     def test_total_weight_is_documented_sum(self):
-        self.assertAlmostEqual(sum(FACTOR_DEFAULTS.values()), 1.06, places=9)
+        self.assertAlmostEqual(sum(FACTOR_DEFAULTS.values()), 1.00, places=9)
 
-    def test_short_term_factors_downgraded(self):
-        """短周期因子权重必须明显低于日线趋势，否则 1h 饱和项会主导评分。"""
-        self.assertGreater(FACTOR_DEFAULTS["trend_daily"],
-                           FACTOR_DEFAULTS["trend_intraday"] * 3)
-        self.assertGreater(FACTOR_DEFAULTS["trend_daily"],
-                           FACTOR_DEFAULTS["structure"] * 3)
+    def test_validated_signals_dominate_weights(self):
+        """权重必须压在"样本外符号稳定"的信号上。
+
+        时序切分显示趋势类因子（均线位置、摆动结构、VWAP、RSI）的 IC 符号
+        会随行情翻转，没有稳定方向能力；稳定的只有低波动、放量、MACD 弱反转。
+        所以波动率+成交量应占主导，趋势类总和应明显更小。
+        """
+        stable = FACTOR_DEFAULTS["volatility"] + FACTOR_DEFAULTS["volume"]
+        trend = (FACTOR_DEFAULTS["trend_daily"] + FACTOR_DEFAULTS["trend_intraday"]
+                 + FACTOR_DEFAULTS["structure"] + FACTOR_DEFAULTS["vwap"]
+                 + FACTOR_DEFAULTS["momentum"])
+        self.assertGreater(stable, trend)
+        self.assertGreaterEqual(FACTOR_DEFAULTS["volatility"], 0.25)
 
 
 class TestEliteCentered(unittest.TestCase):

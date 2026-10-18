@@ -11,7 +11,7 @@ import unittest
 
 from iabot.config import DEFAULTS
 from iabot.market import Candle, Snapshot
-from iabot.signals import MODES, build_plan
+from iabot.signals import FACTOR_DEFAULTS, MODES, build_plan
 
 BASE_TS = 1_700_000_000
 CONTRACT_SIZE = 0.001
@@ -30,7 +30,7 @@ PERIOD_BARS = {
 TAIL_HOURS = 6.0
 
 # 因子权重是相对值（打分时再除以权重和），README 的表格就是这个口径
-DOCUMENTED_WEIGHT_SUM = 1.06
+DOCUMENTED_WEIGHT_SUM = 1.00
 
 # 场景：net_pct = 整段净涨跌%，tail_pct = 最后 6 小时的额外涨跌%（负数=顺着趋势再走一段）
 UP = dict(net_pct=8.0, tail_pct=-0.2)          # 日内 + 波段都给多头
@@ -206,7 +206,7 @@ class TestFactors(unittest.TestCase):
     def test_factor_table_is_well_formed(self):
         plan = plan_for(UP)
         names = [f.name for f in plan.factors]
-        self.assertEqual(len(names), 10)
+        self.assertEqual(len(names), len(FACTOR_DEFAULTS))
         self.assertEqual(len(names), len(set(names)), "因子名不能重复")
         for f in plan.factors:
             self.assertGreaterEqual(f.score, -1.0)

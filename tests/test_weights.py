@@ -34,7 +34,7 @@ class TestApplyWeights(unittest.TestCase):
     def test_unknown_name_ignored(self):
         snap = make_snapshot(**UP)
         factors = apply_factor_weights(compute_factors(snap), {"not_a_factor": 0.9})
-        self.assertEqual(len(factors), 10)
+        self.assertEqual(len(factors), len(FACTOR_DEFAULTS))
 
     def test_build_plan_reads_config_weights(self):
         cfg = copy.deepcopy(DEFAULTS)
@@ -60,13 +60,13 @@ class TestResonance(unittest.TestCase):
         # 默认 10 因子，resonance 不在列表里（保持文档口径）
         factors = compute_factors(make_snapshot(**UP))
         self.assertNotIn("resonance", {f.name for f in factors})
-        self.assertEqual(len(factors), 10)
+        self.assertEqual(len(factors), len(FACTOR_DEFAULTS))
 
     def test_enabled_adds_factor(self):
         factors = compute_factors(make_snapshot(**UP), resonance=True)
         names = [f.name for f in factors]
         self.assertIn("resonance", names)
-        self.assertEqual(len(factors), 11)
+        self.assertEqual(len(factors), len(FACTOR_DEFAULTS) + 1)
 
     def test_build_plan_respects_resonance_flag(self):
         cfg = copy.deepcopy(DEFAULTS)

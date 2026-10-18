@@ -7,6 +7,7 @@ from pathlib import Path
 
 from iabot.btlog import build_params, diff_params, summarize_result
 from iabot.config import DEFAULTS
+from iabot.signals import FACTOR_DEFAULTS
 from iabot.store import SignalStore
 
 
@@ -23,7 +24,8 @@ class TestBuildParams(unittest.TestCase):
         self.assertEqual(p["score_threshold"], 30.0)
         self.assertIn("momentum", p["factor_weights"])
         self.assertIn("trend_daily", p["factor_weights"])  # 未覆盖的也要补默认
-        self.assertEqual(p["factor_weights"]["trend_daily"], 0.30)
+        self.assertEqual(p["factor_weights"]["trend_daily"],
+                         FACTOR_DEFAULTS["trend_daily"])
         self.assertIn("resonance", p)
         self.assertIn("taker_fee_bps", p["costs"])
         self.assertEqual(p["equity_usdt"], 450.0)

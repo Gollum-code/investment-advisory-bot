@@ -50,6 +50,9 @@ def _trading_snapshot(n=300):
     _make_snapshot 只给一个周期，其余因子因缺数据全部降权为 0，
     结果永远是 0 笔交易 —— 用它写的成本测试其实一直在空转。
     这里把 15min/60min/1day 都填上，才能真的比较成本。
+
+    噪声刻意"前段大、后段小"：波动率因子打的是"当前 ATR 在自身历史里的分位"，
+    平直噪声的序列会落在中位（分数≈0）。要让它给出正分，末段必须比前段平静。
     """
     from iabot.market import Snapshot
     import random
@@ -57,11 +60,15 @@ def _trading_snapshot(n=300):
     rnd = random.Random(17)
     closes = [START]
     for i in range(1, n):
-        drift = -0.004 if i < n // 3 else 0.005
-        closes.append(closes[-1] * (1 + drift + rnd.uniform(-0.012, 0.012)))
+        noise = 0.016 * (1.0 - 0.85 * i / n)     # 越往后越平静
+        drift = -0.002 if i < n // 3 else 0.004
+        closes.append(closes[-1] * (1 + drift + rnd.uniform(-noise, noise)))
     series = {}
+    # 影线按价格比例给（约 0.6%）：多单挂在现价下方的回撤区，
+    # 影线太小时价格永远碰不到挂单区，会全部记成 no_fill。
     for period, secs in (("15min", 900), ("60min", 3600), ("1day", 86400)):
-        series[period] = [_bar(BASE + i * secs, c) for i, c in enumerate(closes)]
+        series[period] = [_bar(BASE + i * secs, c, wick=c * 0.006)
+                          for i, c in enumerate(closes)]
     return Snapshot(symbol="BTC-USDT", price=closes[-1], klines=series,
                     contract_size=0.001, funding_rate=0.0001, open_interest=1e6,
                     funding_history=[
@@ -108,22 +115,22 @@ class TestFundingRateAt(unittest.TestCase):
         给全正的历史 -> 只要成交了就应非 0。资金费因子本身也会读这段历史
         （决定方向），所以不能拿"有没有历史"去比总 R。
         """
-        def run(rate: float):
+        def run(rates):
             snap = _trading_snapshot()          # 三周期齐全，才会真的出交易
             snap.funding_rate = 0.0             # 关掉快照费率兜底
             snap.funding_history = [
                 {"funding_time": int((BASE + i * 8 * 3600) * 1000),
-                 "funding_rate": rate} for i in range(40)
+                 "funding_rate": rates[i % len(rates)]} for i in range(40)
             ]
             return _bt(snap)
 
-        zero = run(0.0)
-        pos = run(0.0005)
+        # 历史正负交替 -> 均值 0 -> 资金费因子判为"等于自身常态"，方向中性。
+        zero = run([0.0])
+        mixed = run([0.0005, -0.0005])
         self.assertEqual(zero.avg_funding_r, 0.0)
         self.assertGreater(zero.trades, 0, "夹具没出交易，测不了")
-        # 正的历史费率必须体现到成本里。若成本模型忽略历史、退回快照费率
-        # （这里已设为 0），avg_funding_r 也会是 0，就抓不出来了。
-        self.assertNotEqual(pos.avg_funding_r, 0.0)
+        # 成本会改变持仓时长与止损判定，所以不比 trades；只比成本项本身。
+        self.assertNotEqual(mixed.avg_funding_r, 0.0)
 
     def test_funding_factor_uses_deviation_not_absolute_level(self):
         """资金费因子要相对自身基线，不能用绝对阈值。

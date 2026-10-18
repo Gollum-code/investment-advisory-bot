@@ -338,22 +338,53 @@ def _f_orderbook(snap: Snapshot, price: float | None) -> Factor:
 
 
 def _f_volatility(snap: Snapshot) -> Factor:
-    cs = snap.closes("1day")
+    """波动率：低波动溢价。
+
+    这是唯一经过样本外验证、且跨期符号稳定的方向信号（见 README「哪些信号真的有
+    预测力」）。用"当前 ATR% 在自己近 250 日里的分位"做双向打分：
+    分位低（相对自己而言很平静）-> 看多；分位高 -> 看空。
+
+    注意它和"风险提示"是两件事：波动高时仓位本该更小，那是风控（由仓位计算
+    与强平校验负责）；这里只回答方向。
+    """
+    k = snap.klines.get("1day") or []
+    cs = [c.close for c in k]
+    atr = ind.atr([c.high for c in k], [c.low for c in k], cs, 14) if len(k) > 20 else []
+    atrp = [a / c if (a and c) else None for a, c in zip(atr, cs)]
     detail = []
-    atr_v = None
-    if snap.klines.get("1day"):
-        k = snap.klines["1day"]
-        atr_v = ind.last(ind.atr([c.high for c in k], [c.low for c in k], [c.close for c in k], 14))
     rv = ind.realized_vol_pct(cs, 30, bars_per_year("1day")) if len(cs) > 31 else None
     if rv is not None:
         detail.append(f"30日年化波动 {rv:.0f}%")
-    if atr_v and snap.price:
-        detail.append(f"日ATR {atr_v:,.2f}（{atr_v / snap.price * 100:.2f}%）")
-    score = 0.0
-    if rv is not None and rv > 70:
-        score = -0.5
-        detail.append("波动过高，建议降杠杆")
-    return Factor("volatility", "波动率", score, _w("volatility"), "；".join(detail) or "无数据")
+    cur = atrp[-1] if atrp else None
+    window = [v for v in atrp[-250:] if v is not None]
+    if cur is None or len(window) < 30:
+        if cur and snap.price:
+            detail.append(f"日ATR {cur * 100:.2f}%")
+        return Factor("volatility", "波动率", 0.0, _w("volatility"),
+                      "；".join(detail) or "无数据")
+    rank = sum(1 for v in window if v <= cur) / len(window)   # 0=最平静 1=最躁动
+    score = max(-1.0, min(1.0, 1.0 - 2.0 * rank))
+    detail.append(f"日ATR {cur * 100:.2f}%，处于自身近 {len(window)} 日的 "
+                  f"{rank * 100:.0f}% 分位")
+    detail.append("低波动（偏多）" if score > 0.15 else
+                  ("高波动（偏空）" if score < -0.15 else "波动中性"))
+    return Factor("volatility", "波动率", score, _w("volatility"), "；".join(detail))
+
+
+def _f_volume(snap: Snapshot) -> Factor:
+    """成交量放大：另一个跨期符号稳定的正向信号（放量 -> 偏多）。"""
+    k = snap.klines.get("1day") or []
+    if len(k) < 25:
+        return Factor("volume", "成交量", 0.0, _w("volume"), "数据不足")
+    vs = [c.volume for c in k]
+    base = sum(vs[-21:-1]) / 20
+    if not base:
+        return Factor("volume", "成交量", 0.0, _w("volume"), "无成交量数据")
+    z = (vs[-1] / base) - 1.0
+    score = max(-1.0, min(1.0, z / 0.8))
+    tag = "放量" if score > 0.2 else ("缩量" if score < -0.2 else "量能持平")
+    return Factor("volume", "成交量", score, _w("volume"),
+                  f"当日 {vs[-1]:,.0f} 张，20日均 {base:,.0f} 张（{z * 100:+.0f}%，{tag}）")
 
 
 # (因子函数, 是否需要现价)。只有盘口因子额外要一个 price 参数，
@@ -362,6 +393,7 @@ FACTOR_FNS = [
     (_f_trend, False), (_f_intraday, False), (_f_momentum, False),
     (_f_structure, False), (_f_vwap, False), (_f_funding, False),
     (_f_oi, False), (_f_elite, False), (_f_orderbook, True), (_f_volatility, False),
+    (_f_volume, False),
 ]
 
 # 因子内部硬编码的默认权重；config 的 analysis.factor_weights 可覆盖同名项。
@@ -374,9 +406,16 @@ FACTOR_FNS = [
 # 压低后（实测 19 币 × 1000 根）：期望 R +0.332→+0.354、总 R +1116→+1345、
 # 评分为正的币 16/19→14/19，同时不再有因子独占话语权。
 FACTOR_DEFAULTS = {
-    "trend_daily": 0.30, "trend_intraday": 0.06, "momentum": 0.15,
-    "structure": 0.08, "vwap": 0.04, "funding": 0.10,
-    "open_interest": 0.09, "elite": 0.12, "orderbook": 0.07, "volatility": 0.05,
+    # 权重来自"样本外验证过符号稳定性"的那一小组信号：
+    #   波动率（低波动溢价）、成交量（放量）、MACD 弱反转
+    # 其余趋势类因子（均线位置、摆动结构、VWAP、RSI）在时序切分下**符号会翻转**
+    # （训练段 IC 为负、测试段转正或归零），没有稳定的方向能力，故大幅压低，
+    # 只作为背景而非主导。详见 README「哪些信号真的有预测力」。
+    "volatility": 0.30,
+    "volume": 0.18,
+    "trend_daily": 0.10, "trend_intraday": 0.04, "momentum": 0.06,
+    "structure": 0.05, "vwap": 0.03, "funding": 0.08,
+    "open_interest": 0.06, "elite": 0.06, "orderbook": 0.04,
 }
 
 # 多周期共振因子是可选的第 11 个因子（默认关闭，保持 10 因子模型）。
