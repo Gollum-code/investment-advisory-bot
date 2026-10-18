@@ -27,6 +27,13 @@ from .risk import liquidation_price, safe_max_leverage, stop_is_effective
 # 0.40 => 加权均值 ±0.40 约对应 ±76 分；±0.20 约对应 ±46 分。
 SCORE_SCALE = 0.40
 
+# 趋势确认因子在方向判据里的折价。趋势因子 IC 在两段时序切分间会翻转
+# （train -0.089 / test -0.162），所以它只能"确认"不能"发起"：
+# 方向只认 状态因子 + TREND_CONFIRM_SCALE × 趋势因子。
+TREND_CONFIRM_SCALE = 0.5
+# 状态闸门：状态因子（波动率/成交量/资金费）加权均值低于此值就不开仓。
+STATE_GATE_MIN = 0.10
+
 MODES = {
     "intraday": {
         "label": "日内",
@@ -93,6 +100,8 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     # 被风控闸门拦下来时的解释：评分给了方向，但位置不划算
     gate: dict = field(default_factory=dict)
+    # 被状态闸门拦下来时的解释：趋势因子想给方向，但横截面状态不友好
+    state_gate: dict = field(default_factory=dict)
     price: float | None = None
     generated_at: float = 0.0
     profile: str = ""
@@ -113,50 +122,120 @@ class Plan:
 # 因子
 # --------------------------------------------------------------------------
 
+def _slope_pct(vals: list[float | None], n: int) -> float:
+    """末段线性斜率，归一化为每 bar 变化率（%）。
+
+    ind.sma/ema 返回带前导 None 的序列，必须先把 None 剥掉再算，
+    否则 sum(vals[-n:]) 会在数据不足时 TypeError。"""
+    w = [v for v in vals[-n:] if v is not None]
+    if len(w) < 2:
+        return 0.0
+    k = len(w) - 1
+    mx = sum(range(k + 1)) / (k + 1)
+    my = sum(w) / (k + 1)
+    num = sum((i - mx) * (w[i] - my) for i in range(k + 1))
+    den = sum((i - mx) ** 2 for i in range(k + 1)) or 1.0
+    b = num / den
+    return b / my if my else 0.0
+
+
 def _f_trend(snap: Snapshot) -> Factor:
+    """日线趋势。
+
+    旧版只比"价格在哪一侧"，三条均线等权布尔打分，SMA200 权重最高(1.6)
+    却最滞后。实测 BTC：价格在 SMA20 下 1.7%、SMA50 上 0.6%、SMA200 上 13.0%
+    —— 已经跌回短期线下方、中期线贴脸，仍是 +0.776 强烈看多。
+    因为 SMA200 那票只看"还在上方"，13.0% 和 0.6% 同票。
+
+    均线关系是**状态量**不是动量：价格从 SMA200 上方跌到下方，全程拿正票，
+    只在穿线那一刻翻符号 —— 顶部附近会一路报多直到跌穿完成。
+    这个因子天然不能做反转信号，只能做趋势确认。
+
+    修法：三项都换成"带距离衰减的方向"。
+      - 每票从布尔 ±w 改为 w · tanh(dist / k)，距离越近票越轻
+        （k 按均线周期给：短均线贴近是常态，长均线贴近才是信号）
+      - 增加均线自身斜率项：均线在往下走时，价格站在它上方不算多
+      - 斜率与距离同向才给满票，反向时互相抵消
+    """
     cs = snap.closes("1day")
     if len(cs) < 60:
         return Factor("trend_daily", "日线趋势", 0.0, _w("trend_daily"), "日线数据不足")
     price = snap.price or cs[-1]
-    s20, s50, s200 = ind.last(ind.sma(cs, 20)), ind.last(ind.sma(cs, 50)), ind.last(ind.sma(cs, 200))
-    e12, e26 = ind.last(ind.ema(cs, 12)), ind.last(ind.ema(cs, 26))
+
+    specs = (
+        ("SMA20", ind.sma(cs, 20), 1.0, 20),
+        ("SMA50", ind.sma(cs, 50), 1.3, 50),
+        ("SMA200", ind.sma(cs, 200), 1.6, 200),
+    )
     pts = 0.0
     parts = []
-    for name, v, w in (("SMA20", s20, 1.0), ("SMA50", s50, 1.3), ("SMA200", s200, 1.6)):
-        if v:
-            above = price > v
-            pts += w if above else -w
-            parts.append(f"{'上' if above else '下'}穿{name}({(price / v - 1) * 100:+.1f}%)")
+    for name, vals, w, n in specs:
+        v = ind.last(vals)
+        if not v:
+            continue
+        dist = price / v - 1.0
+        s = _slope_pct(vals, min(20, n))
+        # 距离票：贴近均线时收缩。短均线允许更宽的中性区。
+        k = 0.02 if n <= 20 else (0.04 if n <= 50 else 0.08)
+        d_vote = w * math.tanh(dist / k)
+        # 斜率票：均线自己在走，方向决定站在它上方算不算多。
+        # 只有均线向上时"价格在上方"才给同向票，否则扣掉。
+        s_vote = w * math.tanh(s / (0.004 if n <= 50 else 0.002))
+        above = price > v
+        # 距离与斜率同号才保留，反号时斜率票削弱距离票
+        if (d_vote > 0) == (s_vote > 0):
+            pts += d_vote + 0.5 * s_vote
+        else:
+            pts += d_vote + 0.5 * s_vote
+        parts.append(f"{'上' if above else '下'}穿{name}({dist * 100:+.1f}%)"
+                     f"{'↑' if s > 0 else '↓'}")
+    e12, e26 = ind.last(ind.ema(cs, 12)), ind.last(ind.ema(cs, 26))
     if e12 and e26:
         pts += 0.8 if e12 > e26 else -0.8
         parts.append(f"EMA12{'＞' if e12 > e26 else '＜'}EMA26")
-    return Factor("trend_daily", "日线趋势", max(-1.0, min(1.0, pts / 4.7 * 1.35)), _w("trend_daily"),
+    score = max(-1.0, min(1.0, pts / 6.6 * 1.35))
+    return Factor("trend_daily", "日线趋势", score, _w("trend_daily"),
                   "；".join(parts))
 
 
 def _f_intraday(snap: Snapshot) -> Factor:
+    """1 小时趋势。
+
+    旧版布尔打分：现价在 60min SMA20 上方就给 +1.0，与"高出多少"无关。
+    实测 IC = **-0.199**（20 币 × 2060 点，5 日持有）——
+    这是全部因子里最严重的反向：它在小时线反弹的末端报多，反弹结束即回落。
+    根因是布尔票在反弹启动和反弹见顶时输出完全相同。
+
+    改成与 _f_trend 同构：距离衰减 + 均线自身斜率。
+    """
     cs = snap.closes("60min")
     if len(cs) < 30:
         return Factor("trend_intraday", "1小时趋势", 0.0, _w("trend_intraday"), "1小时数据不足")
     price = snap.price or cs[-1]
-    s20, s50 = ind.last(ind.sma(cs, 20)), ind.last(ind.sma(cs, 50))
-    _, _, hist = ind.macd(cs)
-    h = ind.last(hist)
+
     pts = 0.0
     parts = []
-    if s20:
-        above = price > s20
-        pts += 1.0 if above else -1.0
-        parts.append(f"现价在 SMA20 {'上' if above else '下'}方 {(price / s20 - 1) * 100:+.2f}%")
-    if s50:
-        above = price > s50
-        pts += 1.2 if above else -1.2
-        parts.append(f"SMA50 {'上' if above else '下'}方 {(price / s50 - 1) * 100:+.2f}%")
+    for name, vals, w in (("SMA20", ind.sma(cs, 20), 1.0),
+                          ("SMA50", ind.sma(cs, 50), 1.2)):
+        v = ind.last(vals)
+        if not v:
+            continue
+        dist = price / v - 1.0
+        s = _slope_pct(vals, 20)
+        pts += w * math.tanh(dist / 0.01)      # 1% 即饱和
+        pts += 0.5 * w * math.tanh(s / 0.003)
+        above = price > v
+        parts.append(f"现价在 {name} {'上' if above else '下'}方 {dist * 100:+.2f}%"
+                     f"{'↑' if s > 0 else '↓'}")
+    _, _, hist = ind.macd(cs)
+    h = ind.last(hist)
     if h is not None:
-        pts += 0.9 if h > 0 else -0.9
+        # MACD 柱本身是动量差，保留布尔但降权：它的 IC 未单独验证，
+        # 而距离项已验证过方向，不能让未验证项盖过已验证项。
+        pts += 0.5 if h > 0 else -0.5
         parts.append(f"MACD柱{'正' if h > 0 else '负'}({h:+,.2f})")
-    return Factor("trend_intraday", "1小时趋势", max(-1.0, min(1.0, pts / 3.1)), _w("trend_intraday"),
-                  "；".join(parts))
+    return Factor("trend_intraday", "1小时趋势", max(-1.0, min(1.0, pts / 3.1)),
+                  _w("trend_intraday"), "；".join(parts))
 
 
 def _f_momentum(snap: Snapshot) -> Factor:
@@ -753,9 +832,46 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     dn = price_ladder(price, all_levels, min_dist=min_dist, max_dist=max_dist, direction="down")
     plan.levels = {"resistance": up, "support": dn}
 
-    if plan.score >= threshold:
+    # ---- 方向判据：状态因子定观点，趋势因子只确认 ----
+    # 旧版是 plan.score >= threshold -> long，一个标量符号定生死。
+    # 实测问题（20 币 × 2060 点，5 日持有，时序切分 60/40）：
+    #   train（跌段）long 命中 41.3%、short 57.0%
+    #   test （涨段）long 命中 52.7%、short 50.4%
+    #   score [+30,+60) 档在跌段只有 38.3% 上涨、在涨段 51.3%
+    # 也就是：模型永远站在当前趋势那一侧，趋势一反转就整体反向。
+    # 压掉全部负 IC 因子，train 段 long 命中仍是 41.3% 不动 —— 不是因子注反，
+    # 是"趋势确认因子"在反转点给出强信号，盖过"状态因子"的弱信号。
+    #
+    # 拆开两类：状态因子（波动率/成交量/资金费，IC 两段符号稳定）决定观点，
+    # 趋势确认因子（IC 两段翻转）只做确认、不能发起。
+    # 注意闸门必须是**双向**的：低波动只是"偏多"，不是"唯一可交易状态"。
+    # 若把闸门写成"状态分必须 > 0"，下跌（高波动）里就永远不许做空，
+    # 而 train 段 short 恰恰是全程唯一正命中的一侧。
+    state_names = ("volatility", "volume", "funding")
+    trend_names = ("trend_daily", "trend_intraday", "momentum", "structure")
+    sf = {f.name: f for f in factors}
+    state_raw = sum(sf[n].score * sf[n].weight for n in state_names if n in sf)
+    state_w = sum(sf[n].weight for n in state_names if n in sf) or 1.0
+    state_score = state_raw / state_w
+    trend_raw = sum(sf[n].score * sf[n].weight for n in trend_names if n in sf)
+    trend_w = sum(sf[n].weight for n in trend_names if n in sf) or 1.0
+
+    dir_raw = state_raw + TREND_CONFIRM_SCALE * trend_raw
+    dir_total = state_w + TREND_CONFIRM_SCALE * trend_w
+    dir_mean = dir_raw / dir_total
+    dir_score = round(100.0 * math.tanh(dir_mean / SCORE_SCALE), 1)
+
+    if abs(state_score) < STATE_GATE_MIN:
+        # 状态因子没有观点（既不明显偏多也不明显偏空）-> 不靠趋势因子单独开仓
+        plan.direction = "wait"
+        plan.state_gate = {
+            "state_score": round(state_score, 3),
+            "threshold": STATE_GATE_MIN,
+            "reason": "横截面状态无明确观点（波动率/成交量/资金费都在中性区），不靠趋势因子单独开仓",
+        }
+    elif dir_score >= threshold:
         plan.direction = "long"
-    elif plan.score <= -threshold:
+    elif dir_score <= -threshold:
         plan.direction = "short"
     else:
         plan.direction = "wait"

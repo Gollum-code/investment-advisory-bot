@@ -39,6 +39,8 @@ DOWN_SWING = dict(net_pct=-8.0, tail_pct=-0.2)      # 波段给空头
 RANGE = dict(chop_pct=0.6, cycles=4.0)              # 没有净方向 -> 观望
 # 评分够（+55），但头顶阻力太近，止损放不下 -> 被盈亏比闸门拦下
 NO_ROOM = dict(net_pct=10.0, tail_pct=-0.2)
+# 急涨后横盘：价格远在均线上方，但均线自身已走平
+UP_FLAT = dict(net_pct=8.0, tail_pct=0.0)
 
 
 def _trend_profile(n, start, net_pct, tail_pct, ts_step, wiggle_pct=0.15):
@@ -222,8 +224,24 @@ class TestFactors(unittest.TestCase):
 
     def test_daily_trend_factor_follows_direction(self):
         pick = lambda p: next(f.score for f in p.factors if f.name == "trend_daily")
-        self.assertGreater(pick(plan_for(UP)), 0.5)
-        self.assertLess(pick(plan_for(DOWN_INTRADAY)), -0.5)
+        # 线性上涨序列上 SMA 紧贴价格，距离项 tanh(dist/k) 会收缩，
+        # 拿不到旧版那种布尔满分。要 >0.5 的强趋势得让价格真正拉开距离。
+        up = plan_for(UP)
+        self.assertGreater(pick(up), 0.2, "持续上涨至少该给偏多")
+        dn = plan_for(DOWN_INTRADAY)
+        self.assertLess(pick(dn), -0.2, "持续下跌至少该给偏空")
+
+    def test_daily_trend_slope_overrides_distance(self):
+        """价格站在均线上方但均线自己在往下走，不能再给强多。
+
+        这是旧版的硬缺陷：SMA200 那票只看"还在上方"，13% 和 0.6% 同票，
+        顶部附近会一路报多直到跌穿。斜率项必须能把它压下来。
+        """
+        pick = lambda p: next(f.score for f in p.factors if f.name == "trend_daily")
+        # 急涨后横盘：价格远在 SMA 上方，但均线已走平
+        flat = plan_for(UP_FLAT)
+        self.assertLess(pick(flat), 0.5,
+                        "价格虽在均线上方但均线走平，不该给强多")
 
 
 class TestLevelsAndRisk(unittest.TestCase):

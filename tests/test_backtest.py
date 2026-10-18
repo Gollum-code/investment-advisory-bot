@@ -11,9 +11,9 @@ BASE = 1_700_000_000
 START = 30000.0
 
 
-def _bar(ts, close, wick=10.0):
+def _bar(ts, close, wick=10.0, volume=1000.0):
     return Candle(ts=ts, open=close - 5.0, high=close + wick,
-                  low=close - wick, close=close, volume=1000.0)
+                  low=close - wick, close=close, volume=volume)
 
 
 def _make_snapshot(n=240, period="15min"):
@@ -44,15 +44,21 @@ def _cfg():
     return cfg
 
 
-def _trading_snapshot(n=300):
+def _trading_snapshot(n=6000):
     """三周期齐全、真能出交易的夹具。
 
     _make_snapshot 只给一个周期，其余因子因缺数据全部降权为 0，
     结果永远是 0 笔交易 —— 用它写的成本测试其实一直在空转。
     这里把 15min/60min/1day 都填上，才能真的比较成本。
 
-    噪声刻意"前段大、后段小"：波动率因子打的是"当前 ATR 在自身历史里的分位"，
-    平直噪声的序列会落在中位（分数≈0）。要让它给出正分，末段必须比前段平静。
+    各周期必须是同一条走势的**降采样**，不能共用同一串收盘价：
+    共用时 15min 走完 n 根，1day 只走了 n/96 根，
+    于是日线/小时因子永远"数据不足"，只有 15m 动量在动。
+
+    状态因子（波动率/成交量/资金费）要在整段里都有观点，状态闸门才会开：
+    所以噪声整体压低、并且逐段轻微衰减，让波动率落在自身历史的低分位
+    （当前 ATR% 相对 250 日偏低 -> 正分）；成交量前低后高 -> z-score 正。
+    否则夹具整段都是"中性状态"，状态闸门会把所有点都拦成观望，测不了成本。
     """
     from iabot.market import Snapshot
     import random
@@ -60,15 +66,30 @@ def _trading_snapshot(n=300):
     rnd = random.Random(17)
     closes = [START]
     for i in range(1, n):
-        noise = 0.016 * (1.0 - 0.85 * i / n)     # 越往后越平静
-        drift = -0.002 if i < n // 3 else 0.004
+        # 波动率单调衰减（前高后低）："当前 ATR% 相对自身历史偏低" -> 波动率因子正分。
+        # 末段再叠一段明确上行趋势，让方向判据给出做多。整段都要有观点，
+        # 否则状态闸门会把所有点拦成观望，测不了成本。
+        phase = i / n
+        noise = 0.008 * (1.0 - 0.85 * phase)          # 前段噪声大、末段平静
+        drift = 0.001 if phase > 0.6 else 0.0002       # 末 40% 缓涨，前面近乎横盘
         closes.append(closes[-1] * (1 + drift + rnd.uniform(-noise, noise)))
-    series = {}
+
     # 影线按价格比例给（约 0.6%）：多单挂在现价下方的回撤区，
     # 影线太小时价格永远碰不到挂单区，会全部记成 no_fill。
-    for period, secs in (("15min", 900), ("60min", 3600), ("1day", 86400)):
-        series[period] = [_bar(BASE + i * secs, c, wick=c * 0.006)
-                          for i, c in enumerate(closes)]
+    def bars(period, factor):
+        # factor: 每根 bar 对应多少根 15min（60min=4, 1day=96）
+        src = [closes[i] for i in range(0, n, factor)]
+        secs = {"15min": 900, "60min": 3600, "1day": 86400}[period]
+        # 成交量前低后高（z-score 为正），且全段都有变化。
+        return [_bar(BASE + i * secs, c, wick=c * 0.006,
+                     volume=1000.0 * (0.5 + 1.0 * i / max(1, len(src) - 1)))
+                for i, c in enumerate(src)]
+
+    series = {
+        "15min": bars("15min", 1),
+        "60min": bars("60min", 4),
+        "1day": bars("1day", 96),
+    }
     return Snapshot(symbol="BTC-USDT", price=closes[-1], klines=series,
                     contract_size=0.001, funding_rate=0.0001, open_interest=1e6,
                     funding_history=[
@@ -77,8 +98,12 @@ def _trading_snapshot(n=300):
 
 
 def _bt(snap, cfg=None, **kw):
+    # 默认放开 max_points：夹具是 6000 根 15min，step=3 约 2000 个建仓点，
+    # 而 backtest() 默认只取前 400 个 -> 只会测到序列前半段（高波动区、全观望），
+    # 测不出成本。放开后覆盖整段，末尾的平静+趋势区才有信号可比较成本。
+    kw.setdefault("max_points", 100000)
     return backtest(snap, cfg or _cfg(), mode="intraday",
-                    step=kw.pop("step", 3), warmup=30, **kw)
+                    step=kw.pop("step", 10), warmup=30, **kw)
 
 
 class TestFundingRateAt(unittest.TestCase):

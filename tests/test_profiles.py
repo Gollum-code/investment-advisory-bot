@@ -140,18 +140,29 @@ class TestBacktestAllUsesProfileWeights(unittest.TestCase):
         ps.save("趋势派", factor_weights={"momentum": 0.01, "trend_daily": 0.95},
                 score_threshold=12, mode="intraday")
 
+        # 三周期必须是同一条走势的降采样，且要带成交量，状态闸门才会开。
+        # 共用同一串收盘价时 1day 只有 ~2 根 -> 日线因子永远"数据不足"，
+        # 两个方案自然得出相同结果，测不出权重差异。
         rnd = random.Random(11)
+        n = 6000
         closes = [100.0]
-        for _ in range(150):
-            closes.append(closes[-1] * (1 + rnd.uniform(-0.03, 0.03)))
-        k = [Candle(ts=1_700_000_000 + i * 900, open=c, high=c * 1.012,
-                    low=c * 0.988, close=c, volume=1000.0)
-             for i, c in enumerate(closes)]
-        snap = Snapshot(symbol="BTC-USDT", price=closes[-1],
-                        klines={"15min": k, "60min": k, "1day": k},
-                        contract_size=0.001)
+        for i in range(1, n):
+            noise = 0.008 * (1.0 - 0.85 * (i / n))
+            drift = 0.001 if (i / n) > 0.6 else 0.0002
+            closes.append(closes[-1] * (1 + drift + rnd.uniform(-noise, noise)))
 
-        rows = backtest_all(cfg, snapshot=snap, symbol="BTC-USDT", step=6)
+        def bars(period, factor):
+            src = [closes[i] for i in range(0, n, factor)]
+            secs = {"15min": 900, "60min": 3600, "1day": 86400}[period]
+            return [Candle(ts=1_700_000_000 + i * secs, open=c, high=c * 1.012,
+                          low=c * 0.988, close=c,
+                          volume=1000.0 * (0.5 + 1.0 * i / max(1, len(src) - 1)))
+                    for i, c in enumerate(src)]
+        snap = Snapshot(symbol="BTC-USDT", price=closes[-1], contract_size=0.001,
+                       klines={p: bars(p, f) for p, f in
+                               (("15min", 1), ("60min", 4), ("1day", 96))})
+
+        rows = backtest_all(cfg, snapshot=snap, symbol="BTC-USDT", step=10)
         by_name = {r["name"]: r["result"] for r in rows}
         a, b = by_name["动量派"], by_name["趋势派"]
         # 用上了权重 => 两套参数产生的交易不会一模一样
