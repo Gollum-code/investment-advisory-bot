@@ -439,6 +439,15 @@ def cmd_backtest(args) -> int:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
         return 0
     print("=" * 66)
+    if res.insufficient_data:
+        # 残缺/不足的样本必须显式报出来，不能让人把 0 笔当成"策略不交易"
+        why = "主周期 K 线不足"
+        if res.missing_periods:
+            why = f"这些周期没抓全: {'、'.join(res.missing_periods)}"
+        print(f"  数据不足：{why}。")
+        print(f"  这段回测没有产生任何可评估的结果（{res.bars} 根 {main_period}）。")
+        print("=" * 66)
+        return 1
     print(f"  回测 {sym}  |  {MODES.get(res.mode, {}).get('label', res.mode)}"
           f"  |  {res.bars} 根 {main_period} K线  |  {ms:.0f}ms")
     print(f"  建仓点       : {res.trades}（观望/被闸门拦下不计）")
@@ -799,8 +808,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_bk.add_argument("--step", type=int, default=10,
                       help="每隔多少根主周期 K 线构造一个建仓点（默认 10）")
     p_bk.add_argument("--warmup", type=int, default=60, help="跳过前多少根（指标预热）")
-    p_bk.add_argument("--bars", type=int, default=300,
-                      help="取多少根主周期 K 线做历史（日内 15min / 波段 1day）")
+    p_bk.add_argument("--bars", type=int, default=2000,
+                      help="取多少根主周期 K 线做历史（日内 15min / 波段 1day）。"
+                           "接口上限 2000；低于 500 的样本不足以判断策略好坏")
     p_bk.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置，用于金额换算）")
     p_bk.add_argument("--risk", type=float, help="单笔风险 %（默认取配置，用于金额换算）")
     p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")

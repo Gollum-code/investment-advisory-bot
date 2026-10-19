@@ -55,8 +55,23 @@ class TestConfigHardening(unittest.TestCase):
     def test_numeric_fields_are_coerced(self):
         out = self._v(lambda c: c["analysis"].update({"kline_size": "abc",
                                                       "plan_cache_max": None}))
-        self.assertEqual(out["analysis"]["kline_size"], 300)
+        # 非法值回落到接口上限 2000（不是 300：300 根的样本不足以验证策略）
+        self.assertEqual(out["analysis"]["kline_size"], 2000)
         self.assertEqual(out["analysis"]["plan_cache_max"], 128)
+
+    def test_kline_size_default_is_api_max(self):
+        # 默认值直接决定回测样本长度，锁死在接口上限，防止又被调回 300
+        self.assertEqual(DEFAULTS["analysis"]["kline_size"], 2000)
+        out = self._v(lambda c: c["analysis"].update({"kline_size": 99999}))
+        self.assertEqual(out["analysis"]["kline_size"], 2000)
+
+    def test_snapshot_default_kline_size_is_api_max(self):
+        # snapshot 自己的默认值也曾是 300：Advisor 之外的调用方（含测试与脚本）
+        # 不显式传 kline_size 时，会悄悄退回 300 根的短样本
+        from iabot.market import MarketClient
+        import inspect
+        sig = inspect.signature(MarketClient.snapshot)
+        self.assertEqual(sig.parameters["kline_size"].default, 2000)
 
     def test_schedule_symbols_string_is_not_split_into_chars(self):
         """"BTC-USDT" 曾被 [s for s in s] 拆成 8 个单字符"合约"，
@@ -336,6 +351,40 @@ class TestMarketCacheBound(unittest.TestCase):
             self.assertLessEqual(len(c._cache), 64)
         finally:
             c.pool = None
+
+
+class TestEmptyKlineIsNotSilent(unittest.TestCase):
+    """抓回空 K 线必须留痕，否则回测会拿残缺快照算出正常数字。"""
+
+    def test_empty_response_recorded_as_error(self):
+        from iabot.market import MarketClient
+        c = MarketClient(["https://api.hbdm.com"])
+        orig = c.kline
+
+        def fake(symbol, period, size=300):
+            return [] if period == "60min" else orig(symbol, period, size)
+
+        c.kline = fake
+        try:
+            snap = c.snapshot("BTC-USDT", with_depth=False, with_extra=False)
+        except Exception:
+            self.skipTest("网络不可用")
+        errs = [e for e in snap.errors if e.startswith("kline:")]
+        self.assertTrue(any("60min" in e for e in errs),
+                        f"空响应没有被记录: {errs}")
+        self.assertNotIn("60min", snap.klines)
+
+    def test_backtest_flags_it(self):
+        from iabot.backtest import backtest
+        from iabot.config import DEFAULTS as D
+        from iabot.market import Snapshot
+        snap = Snapshot(symbol="X-USDT", price=100.0,
+                        klines={"1day": [], "60min": []})
+        snap.errors.append("kline:60min: empty response")
+        r = backtest(snap, D, mode="swing", step=10, warmup=60)
+        self.assertTrue(r.insufficient_data)
+        self.assertIn("60min", r.missing_periods)
+        self.assertEqual(r.trades, 0)
 
 
 if __name__ == "__main__":

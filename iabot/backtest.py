@@ -50,6 +50,7 @@ class BacktestResult:
     risk_amount_usdt: float     # 单笔风险金额
     equity_curve_usdt: list[float]  # 累计权益曲线（按单笔风险金额折算成 U）
     insufficient_data: bool = False  # True = 主周期 K 线不够，一笔都没跑
+    missing_periods: tuple = ()       # 快照里缺失/过短的周期（抓取失败导致）
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +58,7 @@ class BacktestResult:
             "trades": self.trades, "wins": self.wins, "losses": self.losses,
             "timeouts": self.timeouts, "no_fills": self.no_fills,
             "insufficient_data": self.insufficient_data,
+            "missing_periods": list(self.missing_periods),
             "win_rate": round(self.win_rate, 4),
             "expectancy_r": round(self.expectancy_r, 3),
             "avg_win_r": round(self.avg_win_r, 3),
@@ -197,13 +199,34 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     fallback_funding = 0.0 if (use_history or not funding_on) else float(base.funding_rate or 0.0)
     main = base.klines.get(m_period) or []
     n = len(main)
-    if n < warmup + step + 30:
+
+    # 快照残缺检测：某个周期抓取失败时 Snapshot 只把那几根丢掉、记进 errors，
+    # 回测会照常用剩下的数据跑出一个"看起来正常"的数字——这正是最危险的
+    # 失败模式（15min 全空的币会跑 0 笔，1day 缺失则因子静默降级）。
+    # 这里把缺失/过短的周期显式标出来；只要主周期或关键周期不全，就明确
+    # 标 insufficient_data，不给出可被误读的期望值。
+    missing: list[str] = []
+    for period, rows in (base.klines or {}).items():
+        if rows is not None and len(rows) < 2:
+            missing.append(period)
+    kline_errors = [e for e in (getattr(base, "errors", None) or [])
+                    if str(e).startswith("kline:")]
+    for err in kline_errors:
+        # "kline:15min: ..." -> "15min"
+        parts = str(err).split(":", 2)
+        if len(parts) >= 2 and parts[1] not in missing:
+            missing.append(parts[1])
+    if n < warmup + step + 30 or missing:
         # 数据不足：这里曾经把 `timeouts` 填成 K 线根数 n。那是个假值——
         # 一笔信号都没有，"超时"从何而来？后果是任何用
         # wins/(trades-timeouts) 算胜率的消费方都会拿到错误的分母
         # （实测 ZEC 只有 370 根日线，凭空多出 372 个"超时"，
         #   把一段真实胜率 48.5% 的区间算成 65.4%）。
         # 现在用 insufficient_data 明确表达，timeouts 归零。
+        #
+        # `missing` 非空时同样拒绝出结果：只要有一个周期没抓全，因子就在
+        # 静默降级，跑出来的期望值看似正常却不可信。宁可明确报缺失，也不
+        # 让调用方把一个残缺快照算出的数字当真。
         return BacktestResult(
             symbol=base.symbol, mode=mode, bars=n, trades=0, wins=0, losses=0,
             timeouts=0, no_fills=0, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
@@ -211,7 +234,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             avg_holding_h=0.0, win_rate=0.0, expectancy_r=0.0,
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
-            equity_curve_usdt=[], insufficient_data=True)
+            equity_curve_usdt=[], insufficient_data=True,
+            missing_periods=tuple(missing))
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}

@@ -292,5 +292,44 @@ class TestBacktest(unittest.TestCase):
                                    1000.0 + r["total_r"] * 20.0, places=0)
 
 
+class TestPartialSnapshotRefused(unittest.TestCase):
+    """残缺快照（某个周期抓取失败）不能算出一个看似正常的期望值。"""
+
+    def test_healthy_snapshot_has_no_missing_and_trades(self):
+        # 反空转：先证明"好快照"确实能出交易、且 missing 为空。
+        # 否则下面几条测试可能因为夹具本来就出不了交易而恒过。
+        res = _bt(_trading_snapshot())
+        self.assertEqual(res.missing_periods, ())
+        self.assertFalse(res.insufficient_data)
+        self.assertGreater(res.trades, 0)
+
+    def test_kline_error_marks_missing_and_refuses(self):
+        snap = _trading_snapshot()
+        # 模拟 60min 周期抓取失败：数据被丢掉，只在 errors 里留痕
+        snap.klines.pop("60min", None)
+        snap.errors.append("kline:60min: HTTPError: 429")
+        res = _bt(snap)
+        self.assertIn("60min", res.missing_periods)
+        self.assertTrue(res.insufficient_data)
+        self.assertEqual(res.trades, 0)
+        self.assertEqual(res.total_r, 0.0)
+        self.assertIn("60min", res.to_dict()["missing_periods"])
+
+    def test_expired_period_short_is_caught(self):
+        # 周期键还在但只剩 <2 根（接口返回空尾巴）也要算缺失
+        snap = _trading_snapshot()
+        snap.klines["1day"] = snap.klines["1day"][:1]
+        res = _bt(snap)
+        self.assertIn("1day", res.missing_periods)
+        self.assertTrue(res.insufficient_data)
+
+    def test_complete_snapshot_not_flagged(self):
+        snap = _trading_snapshot()
+        snap.errors.append("funding: HTTPError: timeout")  # 非 K 线错误不该误伤
+        res = _bt(snap)
+        self.assertEqual(res.missing_periods, ())
+        self.assertFalse(res.insufficient_data)
+
+
 if __name__ == "__main__":
     unittest.main()

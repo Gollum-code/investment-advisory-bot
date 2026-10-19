@@ -77,7 +77,7 @@ DEFAULTS: dict[str, Any] = {
     # 分析参数
     "analysis": {
         "tf_periods": ["1min", "5min", "15min", "60min", "1day"],
-        "kline_size": 300,
+        "kline_size": 2000,
         "plan_cache_max": 128,       # 计划缓存条数上限（长跑服务防止无限膨胀）
         "score_threshold": 30,       # |score| 达到该值才给方向（tanh 归一化后）
         "cache_ttl_sec": 20,          # 同一合约多久内重复查询直接复用结果
@@ -282,8 +282,12 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),
                                          "analysis.snapshot_ttl_sec", 1, 3600, 20.0)
     # 下面两个会被 Advisor 直接 int() 一次，没校验过就是启动即崩
+    # 默认取接口上限 2000：300 根日线只有 0.8 年、15min 只有 3 天，样本不足
+    # 会让任何回测结论都不可信（reversion 就是被 300 根的短样本骗过的）。
+    # 实测每个周期取 2000 根与取 300 根的抓取耗时几乎一样——请求并行且受网络
+    # 往返限制，多出来的数据量不是瓶颈。
     an["kline_size"] = _coerce_int(an.get("kline_size"), "analysis.kline_size",
-                                   30, 2000, 300)
+                                   30, 2000, 2000)
     an["plan_cache_max"] = _coerce_int(an.get("plan_cache_max"),
                                        "analysis.plan_cache_max", 1, 100000, 128)
     tf = an.get("tf_periods")

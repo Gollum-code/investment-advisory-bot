@@ -155,7 +155,7 @@ def cfg_with_profile(cfg: dict, profile: dict | None) -> dict:
     return out
 
 
-def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 300,
+def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 2000,
                  step: int = 10) -> list[dict]:
     """对当前参数 + 所有已保存方案，在同一段历史上逐个回测并排序。
 
@@ -182,5 +182,7 @@ def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 300,
         rows.append({"name": p["name"], "active": p["active"], "mode": p["mode"],
                      "score_threshold": p["score_threshold"],
                      "profile": p, "result": r.to_dict()})
-    rows.sort(key=lambda x: -_exp_key(x["result"].get("expectancy_r")))
+    # 数据不足的方案排到最后：expectancy 0 不该被当成"最好的方案"
+    rows.sort(key=lambda x: (not x["result"].get("insufficient_data"),
+                             -_exp_key(x["result"].get("expectancy_r"))))
     return rows

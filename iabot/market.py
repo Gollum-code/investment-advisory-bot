@@ -300,7 +300,7 @@ class MarketClient:
 
     # ---------- 组合 ----------
     def snapshot(self, symbol: str, *, periods: list[str] | None = None,
-                 kline_size: int = 300, with_depth: bool = True,
+                 kline_size: int = 2000, with_depth: bool = True,
                  with_extra: bool = True) -> Snapshot:
         """一次性抓齐分析所需的全部数据，单个接口失败只记录不抛错。"""
         periods = periods or ["1min", "5min", "15min", "60min", "1day"]
@@ -346,6 +346,12 @@ class MarketClient:
                     rows = []
                 if rows:
                     snap.klines[p] = rows
+                else:
+                    # 空响应必须留痕：之前的写法只在 rows 非空时写入，抓回来
+                    # 空数组就当"这个周期没有数据"静默略过，下游回测/因子会
+                    # 拿一份缺周期的快照算出看似正常的结果（实测 AVAX 一整轮
+                    # 0 笔、missing 为空，就是被这里吞掉的）。
+                    snap.errors.append(f"kline:{p}: empty response")
 
         if with_depth:
             snap.depth = guard("depth", lambda: self.depth(symbol, "step2"), {}) or {}

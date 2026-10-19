@@ -25,7 +25,9 @@ class Advisor:
         self.cfg = cfg
         a = cfg.get("analysis") or {}
         self.periods: list[str] = a.get("tf_periods") or ["1min", "5min", "15min", "60min", "1day"]
-        self.kline_size = int(a.get("kline_size") or 300)
+        # 默认取接口上限。300 根日线只有 0.8 年、15min 只有 3 天，
+        # 样本不足会让回测结论不可信。抓取耗时不受影响（请求并行）。
+        self.kline_size = int(a.get("kline_size") or 2000)
         self.client = MarketClient(
             cfg.get("rest_bases") or [],
             timeout=float(cfg.get("http_timeout_sec") or 12.0),

@@ -604,7 +604,7 @@ def make_handler(app: App):
                 profile = None  # 用当前运行时参数
             symbol = _to_contract(body.get("symbol") or "BTC-USDT")
             mode = body.get("mode") or (profile or {}).get("mode") or DEFAULT_MODE
-            bars = max(120, min(500, int(body.get("bars") or 300)))
+            bars = max(120, min(2000, int(body.get("bars") or 2000)))
             step = max(1, min(50, int(body.get("step") or 10)))
             prof_cfg = cfg_with_profile(app.cfg, profile)
             periods = (app.cfg.get("analysis") or {}).get("tf_periods") or ["60min", "1day"]
@@ -618,6 +618,11 @@ def make_handler(app: App):
             res = backtest(snap, prof_cfg, mode=mode, step=step, max_points=2000)
             ms = round((_t.time() - t0) * 1000)
             d = res.to_dict()
+            # 残缺样本：宁可报错，也不要让前端显示一个看似正常的期望值
+            if res.insufficient_data:
+                why = "、".join(res.missing_periods) if res.missing_periods else "主周期数据不足"
+                return self._err(f"回测样本不足（{why}），结果不可用。"
+                                 f"请调大 bars 或换一个合约。", 422)
             if body.get("save"):
                 from .btlog import build_params, summarize_result
                 try:
@@ -685,7 +690,7 @@ def make_handler(app: App):
             from .profiles import backtest_all
 
             symbol = _to_contract(body.get("symbol") or "BTC-USDT")
-            bars = max(120, min(500, int(body.get("bars") or 300)))
+            bars = max(120, min(2000, int(body.get("bars") or 2000)))
             step = max(1, min(50, int(body.get("step") or 10)))
             periods = (app.cfg.get("analysis") or {}).get("tf_periods") or ["60min", "1day"]
             try:

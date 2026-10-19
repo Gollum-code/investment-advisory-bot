@@ -49,7 +49,7 @@
       "60min",
       "1day"
     ],
-    "kline_size": 300,
+    "kline_size": 2000,
     "plan_cache_max": 128,
     "score_threshold": 30,
     "cache_ttl_sec": 20,

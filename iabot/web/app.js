@@ -1551,7 +1551,7 @@ busy: false,
     try {
       const d = await api('/api/profiles/backtest', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 300, step: 10,
+        body: JSON.stringify({ name, symbol: $('symbol').value, bars: 2000, step: 10,
                                save: $('prof-archive').checked }),
       });
       const r = d.result || {};
@@ -1570,7 +1570,7 @@ busy: false,
     try {
       const d = await api('/api/profiles/compare', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: $('symbol').value, bars: 300, step: 10,
+        body: JSON.stringify({ symbol: $('symbol').value, bars: 2000, step: 10,
                                save: $('prof-archive').checked }),
       });
       const rows = d.rows || [];
