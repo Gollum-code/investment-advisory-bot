@@ -456,6 +456,14 @@ def cmd_backtest(args) -> int:
     print(f"  胜率         : {res.win_rate * 100:.1f}%")
     print(f"  期望值       : {res.expectancy_r:+.3f} R/笔"
           f"（已扣成本，正 = 长期按规则做有优势）")
+    if res.expectancy_ci:
+        lo, hi = res.expectancy_ci
+        verdict = "显著" if res.significant else (
+            "样本不足，不能判定" if len(res.trade_rs or []) < 30 else "不显著（跨 0）")
+        print(f"  95% 区间     : [{lo:+.3f}, {hi:+.3f}] R/笔  t={res.t_stat:+.2f}"
+              f"  -> {verdict}")
+    else:
+        print("  95% 区间     : 样本不足，无法估计")
     print(f"  平均盈亏 R   : 胜 {res.avg_win_r:.2f} / 负 {res.avg_loss_r:.2f}")
     print(f"  成本明细     : 手续费 {res.avg_fee_r:.3f} + 滑点 {res.avg_slippage_r:.3f}"
           f" + 资金费 {res.avg_funding_r:.3f} = {res.avg_cost_r:.3f} R/笔")

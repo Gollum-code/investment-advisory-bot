@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 from .market import Candle, period_seconds, Snapshot
@@ -20,6 +21,33 @@ from .signals import build_plan
 
 # 成本模型默认值（bps = 万分之一）。一次往返 = 开仓一次 + 平仓一次。
 DEFAULT_COSTS = {"taker_fee_bps": 5.0, "slippage_bps": 2.0, "funding_rate": 0.0}
+
+# 自助法重采样次数。固定种子，保证同一份数据每次跑出同一个区间
+# （回测结论要可复现，否则"上次 CI 是正的"这种话没有意义）。
+BOOTSTRAP_ITERS = 2000
+BOOTSTRAP_SEED = 20240501
+# 少于这个样本量，即使区间不跨 0 也不宣称"显著"：几笔同向交易会让方差
+# 近似为 0、区间极窄，但那是小样本假象，不是 edge。
+MIN_TRADES_FOR_SIGNIFICANCE = 30
+
+
+def _bootstrap_mean_ci(xs: list[float], *, iters: int = BOOTSTRAP_ITERS,
+                       seed: int = BOOTSTRAP_SEED,
+                       alpha: float = 0.05) -> tuple[float, float] | None:
+    """单笔 R 的均值的百分位自助置信区间。
+
+    点估计（一个 +0.3R）本身说明不了任何事：样本 70 笔、方差又大时，
+    +0.3R 和 0 可能无法区分。reversion 就是拿一个点估计当结论用的。
+    """
+    n = len(xs)
+    if n < 2:
+        return None
+    rnd = random.Random(seed)
+    means = [sum(rnd.choices(xs, k=n)) / n for _ in range(iters)]
+    means.sort()
+    lo_i = max(0, int(alpha / 2 * iters))
+    hi_i = min(iters - 1, int((1 - alpha / 2) * iters) - 1)
+    return (means[lo_i], means[hi_i])
 
 
 @dataclass
@@ -51,6 +79,28 @@ class BacktestResult:
     equity_curve_usdt: list[float]  # 累计权益曲线（按单笔风险金额折算成 U）
     insufficient_data: bool = False  # True = 主周期 K 线不够，一笔都没跑
     missing_periods: tuple = ()       # 快照里缺失/过短的周期（抓取失败导致）
+    # 每笔已判定交易的 R（超时按 0 计入，与 expectancy_r 的分母口径一致）。
+    # 用来算置信区间，也让下游能做组合级统计。
+    trade_rs: list[float] | None = None
+    expectancy_ci: tuple[float, float] | None = None   # 自助法 95% 区间
+    std_err: float = 0.0
+    t_stat: float = 0.0
+
+    @property
+    def significant(self) -> bool:
+        """95% 区间不跨 0 才算"这个 edge 能和噪声区分开"。
+
+        注意：显著 != 能赚钱。它只回答"样本里看到的正/负期望，是否可能是
+        运气"。样本不够时这里恒为 False，这是有意的——几笔同向交易方差近似
+        为 0、区间极窄，但那是小样本假象。
+        """
+        if len(self.trade_rs or []) < MIN_TRADES_FOR_SIGNIFICANCE:
+            return False
+        ci = self.expectancy_ci
+        if not ci:
+            return False
+        lo, hi = ci
+        return lo > 0.0 or hi < 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +111,11 @@ class BacktestResult:
             "missing_periods": list(self.missing_periods),
             "win_rate": round(self.win_rate, 4),
             "expectancy_r": round(self.expectancy_r, 3),
+            "expectancy_ci": ([round(x, 3) for x in self.expectancy_ci]
+                              if self.expectancy_ci else None),
+            "significant": self.significant,
+            "std_err": round(self.std_err, 4),
+            "t_stat": round(self.t_stat, 2),
             "avg_win_r": round(self.avg_win_r, 3),
             "avg_loss_r": round(self.avg_loss_r, 3),
             "avg_cost_r": round(self.avg_cost_r, 3),
@@ -235,7 +290,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
             equity_curve_usdt=[], insufficient_data=True,
-            missing_periods=tuple(missing))
+            missing_periods=tuple(missing), trade_rs=[])
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -260,6 +315,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     total_r = 0.0
     win_rs: list[float] = []
     loss_rs: list[float] = []
+    trade_rs: list[float] = []
     mfes: list[float] = []
     maes: list[float] = []
     curve: list[float] = []
@@ -347,14 +403,19 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             total_r += r
             cum_r += r
             win_rs.append(r)
+            trade_rs.append(r)
         elif outcome == "stopped":
             r = -1.0 - cost_r
             losses += 1
             total_r += r
             cum_r += r
             loss_rs.append(r)
+            trade_rs.append(r)
         else:  # timeout
             timeouts += 1
+            # 超时在 expectancy 里按 0 R 计入（total_r/trades），自助法也要
+            # 用同一个口径，否则区间会比点估计"好看"。
+            trade_rs.append(0.0)
         curve.append(cum_r)
         curve_usdt.append(cum_r * risk_amount)
 
@@ -362,6 +423,13 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     win_rate = wins / resolved if resolved else 0.0
     expectancy = total_r / trades if trades else 0.0
     mean = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
+    ci = _bootstrap_mean_ci(trade_rs)
+    std_err = t_stat = 0.0
+    if len(trade_rs) >= 2:
+        m = mean(trade_rs)
+        var = sum((x - m) ** 2 for x in trade_rs) / (len(trade_rs) - 1)
+        std_err = (var / len(trade_rs)) ** 0.5
+        t_stat = (m / std_err) if std_err > 0 else 0.0
     return BacktestResult(
         symbol=base.symbol, mode=mode, bars=n, trades=trades,
         wins=wins, losses=losses, timeouts=timeouts, no_fills=no_fills,
@@ -379,4 +447,5 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         equity_curve=curve,
         equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
         equity_curve_usdt=curve_usdt,
+        trade_rs=trade_rs, expectancy_ci=ci, std_err=std_err, t_stat=t_stat,
     )

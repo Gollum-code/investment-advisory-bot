@@ -331,5 +331,55 @@ class TestPartialSnapshotRefused(unittest.TestCase):
         self.assertFalse(res.insufficient_data)
 
 
+class TestBootstrapCI(unittest.TestCase):
+    """期望值的置信区间：点估计再漂亮，跨 0 就说明还分不清 edge 和噪声。"""
+
+    def test_ci_brackets_point_estimate(self):
+        r = _bt(_trading_snapshot())
+        self.assertGreater(r.trades, 20)          # 反空转
+        self.assertIsNotNone(r.expectancy_ci)
+        lo, hi = r.expectancy_ci
+        self.assertLessEqual(lo, r.expectancy_r)
+        self.assertGreaterEqual(hi, r.expectancy_r)
+        self.assertLess(lo, hi)
+
+    def test_ci_is_deterministic(self):
+        a = _bt(_trading_snapshot())
+        b = _bt(_trading_snapshot())
+        self.assertEqual(a.expectancy_ci, b.expectancy_ci)
+
+    def test_significant_matches_ci(self):
+        r = _bt(_trading_snapshot())
+        if len(r.trade_rs or []) >= 30:
+            lo, hi = r.expectancy_ci
+            self.assertEqual(r.significant, lo > 0 or hi < 0)
+
+    def test_tiny_sample_is_not_significant(self):
+        # 样本不足 30 笔时不宣称显著，即使区间不跨 0
+        from iabot.backtest import MIN_TRADES_FOR_SIGNIFICANCE
+        r = _bt(_trading_snapshot(), step=800)
+        # 反空转：确认这个夹具确实只跑出小样本，否则下面的断言恒过
+        self.assertLess(len(r.trade_rs or []), MIN_TRADES_FOR_SIGNIFICANCE)
+        self.assertFalse(r.significant)
+
+    def test_helper_on_known_arrays(self):
+        from iabot.backtest import _bootstrap_mean_ci
+        # 明显为负、无方差：CI 应整体 < 0
+        lo, hi = _bootstrap_mean_ci([-1.0] * 50)
+        self.assertLess(hi, 0)
+        # 明显为正、无方差：CI 应整体 > 0
+        lo, hi = _bootstrap_mean_ci([+1.0] * 50)
+        self.assertGreater(lo, 0)
+        # 样本过少 -> None
+        self.assertIsNone(_bootstrap_mean_ci([1.0]))
+
+    def test_to_dict_exposes_ci(self):
+        d = _bt(_trading_snapshot()).to_dict()
+        self.assertIn("expectancy_ci", d)
+        self.assertIn("significant", d)
+        self.assertIn("t_stat", d)
+        self.assertEqual(len(d["expectancy_ci"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
