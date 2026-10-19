@@ -34,6 +34,35 @@ TREND_CONFIRM_SCALE = 0.5
 # 状态闸门：状态因子（波动率/成交量/资金费）加权均值低于此值就不开仓。
 STATE_GATE_MIN = 0.10
 
+# ---- 模式定位：谁是主策略、谁是从属 ----
+# 这是用历史数据定的，不是拍的。同一批 20 币日线、同一套真实规则
+# （build_plan + evaluate_outcome + 手续费滑点资金费），逐笔记录：
+#
+#   swing      n=737  期望 +0.302R  95%CI [+0.222, +0.386]  前后 60/40：+0.286 / +0.313
+#   reversion  n= 71  期望 +0.367R  95%CI [+0.041, +0.697]  前后 60/40：-0.274 / +1.193
+#
+# 四条判据都不支持给 reversion 和 swing 同等的权重：
+#   1) 样本量差 10 倍，reversion 的 CI 下界只有 +0.041（刚过 0）
+#   2) 时序不稳定：前段亏、后段赚；swing 两段都赚
+#   3) 集中度：总 R 的 52% 来自 2 个币（DOT/UNI 共 7 笔）
+#   4) 互补性差：reversion 有 63% 的点 ±2 根内 swing 也给了 long，
+#      那部分没有分散价值；真正独占的只有 26 笔
+#
+# 另外那个"留出法一致"的说法是错的，这里更正：每币日线只有 300 根，
+# SMA200 一成立就只剩约 95 天可评估，前段样本是 0 —— 所谓"两段都 65.6%"
+# 是拿一个空集当验证，不是验证。把制度均线换成 SMA100 能换回约两倍样本，
+# 但优势同时消失（2 日正比例 61.2% -> 54.6%，均 +2.65% -> +0.22%），
+# 说明这条 alpha 只在"深跌破 SMA200"这一个窄区制里存在。
+#
+# 结论：swing 保持主策略；reversion 只作为**实验性补充通道**，
+# 默认只在 swing 不给方向时才有资格出手，且单笔风险减半。
+PRIMARY_MODE = "swing"
+# 从属模式的默认单笔风险系数（相对主策略）。1.0 = 同权重；0.5 = 半仓。
+SUBORDINATE_RISK_SCALE = 0.5
+# 主策略已给出同向信号时，从属模式是否仍允许出手。
+# False = 只有主策略观望时才轮到它（避免同一个点开两张同向单）。
+SUBORDINATE_NEEDS_PRIMARY_SILENT = True
+
 MODES = {
     "intraday": {
         "label": "日内",
@@ -59,21 +88,22 @@ MODES = {
         "stop_pct_range": (1.50, 6.00),
         "entry_width_pct": 0.50,
     },
-    # 超卖反弹通道：和 swing/intraday 是**不同策略**，不是同一套判据的调参。
+    # 超卖反弹通道：**从属、实验性**，不是和 swing 平级的策略。
     #
-    # 为什么单独开一个模式：swing 在跌段里做多是亏的（20 币 × 2060 点、5 日持有、
-    # 时序切分 60/40 实测 train 段 long 命中 41.3%、baseline 43.1%），而且试过五种
-    # 闸门都修不掉——因为该模型的 edge 是非对称的：做空两段都赚，做多只在涨段赚，
-    # 任何"拦一边"的闸门都是用一侧 edge 换另一侧。数据里不存在"跌段接飞刀还赚"的
-    # alpha。但有另一个 alpha：跌势里的**极度超卖反弹**，持有 1~2 天。
+    # 来源：swing 在跌段里做多是亏的，试过五种闸门都修不掉（根因见 README：
+    # edge 非对称，做空两段都赚、做多只在涨段赚）。于是另开这条补缺口。
     #
-    # 留出法验证（20 币日线，每币前 60% 定触发、后 40% 验证）：
-    #   RSI(2) < 10 且 close < SMA20×1.03 且 close < SMA200
-    #   hold 2d：train 65.6% / +6.59%，test 65.6% / +6.61%（n=32）—— 与训练集一致
-    #   对照"跌势任意点做多 hold 2d"：52.9% / +3.97%
-    # 也就是说这不是过拟合，是独立于 swing 的一条真信号。
+    # 但别被第一版的数字骗了——那版写过"留出法 train/test 都是 65.6%"，
+    # 是错的：每币日线只有 300 根，SMA200 一成立就只剩约 95 天可评估，
+    # "前 60% 训练段"其实是空集。用真实规则重测（20 币、逐笔、含成本）：
+    #   swing     n=736  期望 +0.305R  95%CI [+0.226, +0.387]  平稳
+    #   reversion n= 71  期望 +0.367R  95%CI [+0.041, +0.697]  前段亏后段赚
+    # 且 52% 的 R 来自 2 个币、63% 的触发点 swing 也在做多（无分散价值）。
+    # 换 SMA100 换两倍样本，优势即消失（61.2% -> 54.6%）——只在窄区制成立。
     #
-    # 只做多：反弹策略天然没有空头对应物（跌势里追空是趋势的事，归 swing）。
+    # 所以定位为从属通道：默认不启用，只在主策略观望/给空时出手，
+    # 单笔风险减半（见 PRIMARY_MODE / SUBORDINATE_RISK_SCALE）。
+    # 半仓下组合期望与只跑 swing 基本中性——这是给不确定信号该有的权重。
     "reversion": {
         "label": "超卖反弹",
         "atr_period": "1day",
@@ -909,6 +939,26 @@ def _oversold_reversion_plan(snap: Snapshot, cfg: dict, mode: str,
                f"（跌势中的反弹，不逆大势做趋势单）"),
     ]
 
+    # ---- 从属定位：只有主策略观望时，这个通道才有资格出手 ----
+    # 依据：reversion 有 63% 的触发点 ±2 根内 swing 也给了 long。那部分没有
+    # 分散价值——同一个点开两张同向单只是把同一笔风险放大一倍，不是两个策略。
+    # 去掉重叠后剩下的 26 笔期望 +0.709R，比全量的 +0.367R 高一倍。
+    if SUBORDINATE_NEEDS_PRIMARY_SILENT:
+        primary = build_plan(snap, cfg, mode=PRIMARY_MODE)
+        if primary.direction not in ("wait", "short"):
+            plan.direction = "wait"
+            plan.confidence = "低"
+            plan.confidence_score = 0.0
+            plan.entry_note = (f"超卖条件成立，但主策略「{MODES[PRIMARY_MODE]['label']}」"
+                               f"已给出同向 {primary.direction}，不重复开仓"
+                               f"（本通道是补充，不与主策略叠加）。")
+            plan.state_gate = {"subordinate_blocked": True,
+                               "primary_mode": PRIMARY_MODE,
+                               "primary_direction": primary.direction}
+            _attach_sizing(plan, snap, _equity, _risk, _lev, _maxm, None)
+            plan.warnings.extend(snap.errors)
+            return plan
+
     # 止损：日线 ATR。数据不足时退回 2.5%
     atr_v = ind.last(ind.atr([c.high for c in k], [c.low for c in k], cs, 14)) if len(k) > 15 else None
     if not atr_v:
@@ -962,8 +1012,13 @@ def _oversold_reversion_plan(snap: Snapshot, cfg: dict, mode: str,
     plan.confidence_score = conf
 
     account = cfg.get("account") or {}
+    # 从属模式单笔风险减半：它的样本量只有主策略的 1/10、CI 下界刚过 0、
+    # 且时序上不稳定（前段亏、后段赚）。拿它做等仓位赌注没依据。
+    risk_scale = SUBORDINATE_RISK_SCALE
+    plan.notes.append(f"从属通道：单笔风险按主策略的 {risk_scale:.0%} 计"
+                      f"（样本量与稳定性均不足）。")
     _attach_sizing(plan, snap, float(account.get("equity_usdt") or 0),
-                   float(account.get("risk_pct_per_trade") or 2.0),
+                   float(account.get("risk_pct_per_trade") or 2.0) * risk_scale,
                    int(account.get("preferred_leverage") or 5),
                    float(account.get("max_margin_pct") or 50.0), atr_v)
     plan.warnings.extend(snap.errors)

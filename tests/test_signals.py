@@ -309,6 +309,41 @@ class TestReversionChannel(unittest.TestCase):
         d = plan.to_dict()
         self.assertEqual(json.loads(json.dumps(d))["direction"], "long")
 
+    def test_subordinate_half_risk(self):
+        """从属通道单笔风险按主策略的一半计。"""
+        plan = self._plan(self._oversold_snapshot(), risk_pct_per_trade=2.0)
+        self.assertEqual(plan.direction, "long")
+        self.assertAlmostEqual(plan.sizing["risk_pct"], 1.0, places=6)
+        self.assertTrue(any("从属通道" in n for n in plan.notes))
+
+    def test_blocked_when_primary_also_long(self):
+        """主策略已给同向 long 时，本通道不重复开仓。"""
+        from unittest import mock
+        import iabot.signals as S
+        snap = self._oversold_snapshot()
+        fake = S.Plan(symbol=snap.symbol, mode="swing", price=snap.price)
+        fake.direction = "long"
+        plan = S.Plan(symbol=snap.symbol, mode="reversion", price=snap.price)
+        with mock.patch.object(S, "build_plan", return_value=fake):
+            out = S._oversold_reversion_plan(
+                snap, cfg_with(), "reversion", S.MODES["reversion"], plan)
+        self.assertEqual(out.direction, "wait")
+        self.assertIn("不重复开仓", out.entry_note)
+        self.assertTrue(out.state_gate.get("subordinate_blocked"))
+
+    def test_not_blocked_when_primary_short(self):
+        """主策略给 short 不拦——反弹与趋势做空方向本就相反，可以并存。"""
+        from unittest import mock
+        import iabot.signals as S
+        snap = self._oversold_snapshot()
+        fake = S.Plan(symbol=snap.symbol, mode="swing", price=snap.price)
+        fake.direction = "short"
+        plan = S.Plan(symbol=snap.symbol, mode="reversion", price=snap.price)
+        with mock.patch.object(S, "build_plan", return_value=fake):
+            out = S._oversold_reversion_plan(
+                snap, cfg_with(), "reversion", S.MODES["reversion"], plan)
+        self.assertEqual(out.direction, "long")
+
 
 
 class TestFactors(unittest.TestCase):
