@@ -8,6 +8,7 @@ from typing import Any
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .config import DEFAULT_MODE
 from .market import MarketClient, Snapshot
 from .signals import MODES, Plan, build_plan
 from .symbols import to_contract
@@ -61,10 +62,10 @@ class Advisor:
         for key in sorted(cache, key=lambda k: cache[k][0])[:len(cache) - limit]:
             del cache[key]
 
-    def analyze(self, symbol: str, *, mode: str = "intraday", force: bool = False,
+    def analyze(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
                 account: dict | None = None, snap: Snapshot | None = None) -> Plan:
         sym = to_contract(symbol)
-        mode = mode if mode in MODES else "intraday"
+        mode = mode if mode in MODES else DEFAULT_MODE
         key = self._plan_key(sym, mode, account)
         now = time.time()
         if not force:
@@ -115,11 +116,11 @@ class Advisor:
                 self._plan_cache.clear()
 
     # ------------------------------------------------------------------
-    def plan_payload(self, symbol: str, *, mode: str = "intraday", force: bool = False,
+    def plan_payload(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
                      account: dict | None = None) -> dict:
         return self.analyze(symbol, mode=mode, force=force, account=account).to_dict()
 
-    def full_payload(self, symbol: str, *, mode: str = "intraday", force: bool = False,
+    def full_payload(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
                      account: dict | None = None) -> dict:
         """前端一次拿全：交易计划 + 行情快照 + K线。
 
@@ -145,7 +146,7 @@ class Advisor:
         return [p.to_dict() for _, _, p in rows]
 
     # ------------------------------------------------------------------
-    def scan(self, symbols: list[str], *, mode: str = "intraday",
+    def scan(self, symbols: list[str], *, mode: str = DEFAULT_MODE,
              account: dict | None = None, workers: int = 4, force: bool = True,
              only_signal: bool = False,
              on_result: Any = None, should_stop: Any = None,

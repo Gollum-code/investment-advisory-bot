@@ -4,10 +4,10 @@ import copy
 import random
 import unittest
 
-from iabot.config import DEFAULTS
+from iabot.config import DEFAULT_MODE, DEFAULTS, SCHEDULABLE_MODES, validate_config
 from iabot.market import Candle, Snapshot
 from iabot.profiles import ProfileStore, cfg_with_profile, backtest_all
-from iabot.signals import FACTOR_DEFAULTS
+from iabot.signals import FACTOR_DEFAULTS, NO_EDGE_MODES
 
 
 class TestProfiles(unittest.TestCase):
@@ -19,6 +19,41 @@ class TestProfiles(unittest.TestCase):
         cfg, ps = self._store()
         self.assertEqual(ps.list(), [])
         self.assertIsNone(ps.active)
+
+    # ---- 无正期望模式不得被方案带进定时任务 ----
+    def test_whitelist_excludes_no_edge_modes(self):
+        for bad in NO_EDGE_MODES:
+            self.assertNotIn(bad, SCHEDULABLE_MODES)
+
+    def test_save_rejects_no_edge_mode(self):
+        _, ps = self._store()
+        ps.save("坏方案", factor_weights={}, score_threshold=30, mode="reversion")
+        self.assertEqual(ps.get("坏方案")["mode"], DEFAULT_MODE)
+
+    def test_save_rejects_garbage_mode(self):
+        _, ps = self._store()
+        for junk in ("scalp", "", None, "SWING", " swing"):
+            with self.subTest(mode=repr(junk)):
+                ps.save("x", factor_weights={}, score_threshold=30, mode=junk)
+                self.assertEqual(ps.get("x")["mode"], DEFAULT_MODE)
+
+    def test_stale_profile_corrected_on_read(self):
+        _, ps = self._store()
+        ps.cfg["profiles"]["老"] = {
+            "factor_weights": {}, "score_threshold": 30, "mode": "reversion"}
+        self.assertEqual(ps.get("老")["mode"], DEFAULT_MODE)
+        self.assertEqual(ps.list()[0]["mode"], DEFAULT_MODE)
+
+    def test_apply_never_writes_no_edge_mode_to_schedule(self):
+        _, ps = self._store()
+        ps.cfg["profiles"]["老"] = {
+            "factor_weights": {}, "score_threshold": 30, "mode": "reversion"}
+        ps.apply("老")
+        self.assertNotIn(ps.cfg["schedule"]["mode"], NO_EDGE_MODES)
+
+    def test_validate_config_clamps_no_edge_mode(self):
+        out = validate_config({"schedule": {"mode": "reversion"}})
+        self.assertEqual(out["schedule"]["mode"], DEFAULT_MODE)
 
     def test_save_normalizes_weights(self):
         cfg, ps = self._store()

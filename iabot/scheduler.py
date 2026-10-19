@@ -8,6 +8,7 @@ from collections import deque
 from typing import Any, Callable
 
 from .advisor import Advisor
+from .config import DEFAULT_MODE, SCHEDULABLE_MODES
 from .notify import Notifier
 from .outcomes import evaluate_outcome, window_atr_period
 from .paper import check_exit
@@ -32,7 +33,7 @@ class Scheduler:
         self.enabled: bool = bool(sc.get("enabled", False))
         self.interval: int = max(30, int(sc.get("interval_sec") or 300))
         self.symbols: list[str] = list(sc.get("symbols") or ["BTC-USDT"])
-        self.mode: str = sc.get("mode") or "intraday"
+        self.mode: str = sc.get("mode") if sc.get("mode") in SCHEDULABLE_MODES else DEFAULT_MODE
         self.only_on_signal: bool = bool(sc.get("only_on_signal", False))
         # 全市场轮询：每次只深挖分批的一批，游标跨轮推进，全市场转完一圈再回头。
         # 若每轮都扫全量，几十上百个合约 × 每轮 300 秒根本跑不完，还必被限流。
@@ -379,7 +380,8 @@ class Scheduler:
         if symbols is not None:
             self.symbols = [s for s in symbols if s]
         if mode is not None:
-            self.mode = mode
+            # 定时任务只跑白名单模式：reversion 完整历史为负期望，不该被排程。
+            self.mode = mode if mode in SCHEDULABLE_MODES else DEFAULT_MODE
         if only_on_signal is not None:
             self.only_on_signal = only_on_signal
         if universe_enabled is not None:

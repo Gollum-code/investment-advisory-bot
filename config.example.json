@@ -81,6 +81,7 @@
   "schedule": {
     "enabled": false,
     "interval_sec": 300,
+    "mode": "swing",
     "symbols": [
       "BTC-USDT"
     ],

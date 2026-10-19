@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from iabot.advisor import Advisor
-from iabot.config import DEFAULTS, validate_config
+from iabot.config import DEFAULTS, DEFAULT_MODE, validate_config
 from iabot.market import MarketClient
 from iabot.scheduler import Scheduler
 from iabot.server import build_server, make_app
@@ -74,7 +74,8 @@ class TestConfigHardening(unittest.TestCase):
 
     def test_bad_mode_falls_back(self):
         out = self._v(lambda c: c["schedule"].update({"mode": "scalp"}))
-        self.assertEqual(out["schedule"]["mode"], "intraday")
+        # 非法模式回落到 DEFAULT_MODE（swing），不能再落回负期望的 intraday。
+        self.assertEqual(out["schedule"]["mode"], DEFAULT_MODE)
 
     def test_verify_and_universe_numbers(self):
         def mut(c):

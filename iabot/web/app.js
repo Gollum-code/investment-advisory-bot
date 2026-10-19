@@ -7,7 +7,8 @@
     meta: null,
     watchlist: [],
     symbol: 'BTC-USDT',
-    mode: 'intraday',
+    // 默认 swing：与后端 DEFAULT_MODE 一致。intraday 完整历史实测 -0.094R。
+    mode: 'swing',
     plan: null,
     snapshot: null,
     klines: [],

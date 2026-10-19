@@ -18,7 +18,7 @@ import webbrowser
 
 from . import __version__, netutil
 from .advisor import Advisor
-from .config import ensure_example, load_config
+from .config import DEFAULT_MODE, ensure_example, load_config
 from .server import build_server, make_app
 from .signals import MODES
 from .symbols import to_contract
@@ -752,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_an = sub.add_parser("analyze", help="分析单个合约")
     p_an.add_argument("symbol", help="合约代码，如 BTC-USDT（也支持 btc / 比特币）")
-    p_an.add_argument("--mode", choices=list(MODES), default="intraday",
+    p_an.add_argument("--mode", choices=list(MODES), default=DEFAULT_MODE,
                       help="intraday=日内（默认），swing=波段")
     p_an.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置）")
     p_an.add_argument("--leverage", type=int, help="杠杆倍数（默认取配置）")
@@ -767,7 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sc = sub.add_parser("scan", help="批量扫描多个合约，或全市场（all）")
     p_sc.add_argument("symbols",
                       help="逗号分隔，如 BTC-USDT,ETH-USDT；写 all/全部 则扫描全市场")
-    p_sc.add_argument("--mode", choices=list(MODES), default="intraday")
+    p_sc.add_argument("--mode", choices=list(MODES), default=DEFAULT_MODE)
     p_sc.add_argument("--equity", type=float)
     p_sc.add_argument("--leverage", type=int)
     p_sc.add_argument("--risk", type=float)
@@ -795,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_bk = sub.add_parser("backtest", help="历史回测：用真实 K 线评估策略胜率与期望值")
     p_bk.add_argument("symbol", help="合约代码，如 BTC-USDT")
-    p_bk.add_argument("--mode", choices=list(MODES), default="intraday")
+    p_bk.add_argument("--mode", choices=list(MODES), default=DEFAULT_MODE)
     p_bk.add_argument("--step", type=int, default=10,
                       help="每隔多少根主周期 K 线构造一个建仓点（默认 10）")
     p_bk.add_argument("--warmup", type=int, default=60, help="跳过前多少根（指标预热）")
@@ -818,7 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_wt = sub.add_parser("watch", help="终端监控：循环扫描，信号变化时提示（Ctrl+C 退出）")
     p_wt.add_argument("--symbols", help="逗号分隔，默认取配置里的关注列表")
-    p_wt.add_argument("--mode", choices=list(MODES), default="intraday")
+    p_wt.add_argument("--mode", choices=list(MODES), default=DEFAULT_MODE)
     p_wt.add_argument("--interval", type=int, default=300, help="每轮间隔秒（默认 300）")
     p_wt.add_argument("--score-delta", type=float, default=8.0,
                       help="评分变化超过这个值才算变化（默认 8）")

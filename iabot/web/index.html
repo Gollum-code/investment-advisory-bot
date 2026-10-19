@@ -36,8 +36,10 @@
       <label class="fld">
         <span>模式</span>
         <select id="mode">
-          <option value="intraday">日内（持仓数小时）</option>
+          <!-- 与 iabot.config.DEFAULT_MODE 保持一致：swing 是完整历史回测里
+               唯一正期望的模式，intraday 实测为 -0.094R -->
           <option value="swing">波段（持仓数天~数周）</option>
+          <option value="intraday">日内（持仓数小时）</option>
         </select>
       </label>
       <label class="fld narrow">

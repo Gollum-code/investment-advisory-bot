@@ -9,7 +9,7 @@ import json
 import math
 import unittest
 
-from iabot.config import DEFAULTS
+from iabot.config import DEFAULT_MODE, DEFAULTS
 from iabot.market import Candle, Snapshot
 from iabot.signals import FACTOR_DEFAULTS, MODES, build_plan
 
@@ -193,8 +193,9 @@ class TestDirection(unittest.TestCase):
         plan = plan_for(UP, "swing")
         self.assertEqual(plan.market["atr_period"], MODES["swing"]["atr_period"])
 
-    def test_unknown_mode_falls_back_to_intraday(self):
-        self.assertEqual(plan_for(UP, "nope").mode, "intraday")
+    def test_unknown_mode_falls_back_to_default(self):
+        # 非法模式回落到 DEFAULT_MODE（swing），不是负期望的 intraday。
+        self.assertEqual(plan_for(UP, "nope").mode, DEFAULT_MODE)
 
 
 class TestReversionChannel(unittest.TestCase):

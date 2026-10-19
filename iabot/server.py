@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__, netutil, symbols as sym_mod
 from .advisor import Advisor
-from .config import load_config, save_config, validate_config
+from .config import DEFAULT_MODE, load_config, save_config, validate_config
 from .scheduler import Scheduler
 from .signals import FACTOR_DEFAULTS, MODES
 from .profiles import ProfileStore, cfg_with_profile
@@ -312,7 +312,7 @@ def make_handler(app: App):
 
             if path == "/api/analyze":
                 sym = q.get("symbol") or "BTC-USDT"
-                mode = q.get("mode") or "intraday"
+                mode = q.get("mode") or DEFAULT_MODE
                 force = q.get("force") == "1"
                 return self._json({"ok": True, **app.advisor.full_payload(
                     sym, mode=mode, force=force, account=app._account(q))})
@@ -320,13 +320,13 @@ def make_handler(app: App):
             if path == "/api/plan":
                 sym = q.get("symbol") or "BTC-USDT"
                 return self._json({"ok": True, "plan": app.advisor.plan_payload(
-                    sym, mode=q.get("mode") or "intraday",
+                    sym, mode=q.get("mode") or DEFAULT_MODE,
                     force=q.get("force") == "1", account=app._account(q))})
 
             if path == "/api/scan":
                 raw = q.get("symbols") or "BTC-USDT"
                 tokens = [s for s in raw.split(",") if s.strip()]
-                mode = q.get("mode") or "intraday"
+                mode = q.get("mode") or DEFAULT_MODE
                 only_sig = q.get("only_signal") == "1"
                 t_scan = time.time()
                 override = _universe_override(q)
@@ -402,7 +402,7 @@ def make_handler(app: App):
             if path == "/api/breadth":
                 raw = q.get("symbols") or ",".join(app.cfg.get("symbols") or ["BTC-USDT"])
                 syms = [s for s in raw.split(",") if s.strip()][:30]
-                mode = q.get("mode") or "intraday"
+                mode = q.get("mode") or DEFAULT_MODE
                 plans, errs = [], []
                 for s in syms:
                     try:
@@ -491,7 +491,7 @@ def make_handler(app: App):
             if path == "/api/report":
                 from .report import render_report
                 sym = q.get("symbol") or "BTC-USDT"
-                mode = q.get("mode") or "intraday"
+                mode = q.get("mode") or DEFAULT_MODE
                 try:
                     payload = app.advisor.full_payload(sym, mode=mode)
                 except Exception as exc:
@@ -572,7 +572,7 @@ def make_handler(app: App):
                     p = ps.save(name,
                                 factor_weights=body.get("factor_weights") or {},
                                 score_threshold=body.get("score_threshold") or 30,
-                                mode=body.get("mode") or "intraday",
+                                mode=body.get("mode") or DEFAULT_MODE,
                                 note=body.get("note") or "")
                     # 手动保存当前参数 -> 缓存里的旧计划按旧权重算的，全部作废
                     app.advisor.invalidate()
@@ -603,7 +603,7 @@ def make_handler(app: App):
             else:
                 profile = None  # 用当前运行时参数
             symbol = _to_contract(body.get("symbol") or "BTC-USDT")
-            mode = body.get("mode") or (profile or {}).get("mode") or "intraday"
+            mode = body.get("mode") or (profile or {}).get("mode") or DEFAULT_MODE
             bars = max(120, min(500, int(body.get("bars") or 300)))
             step = max(1, min(50, int(body.get("step") or 10)))
             prof_cfg = cfg_with_profile(app.cfg, profile)
@@ -705,9 +705,9 @@ def make_handler(app: App):
                 for row in rows:
                     try:
                         app.store.save_backtest_run(
-                            symbol=symbol, mode=row.get("mode") or "intraday",
+                            symbol=symbol, mode=row.get("mode") or DEFAULT_MODE,
                             params=build_params(
-                                app.cfg, symbol=symbol, mode=row.get("mode") or "intraday",
+                                app.cfg, symbol=symbol, mode=row.get("mode") or DEFAULT_MODE,
                                 bars=bars, step=step, warmup=60,
                                 equity_usdt=(row["result"].get("equity_usdt") or 450.0),
                                 risk_pct=(row["result"].get("risk_pct") or 2.0)),

@@ -21,6 +21,19 @@ REST_BASES = [
     "https://api.hbdm.vip",
 ]
 
+# 默认分析模式。选 swing 的唯一理由是历史数据：完整回测里 intraday 是负期望
+# （10056 笔 -0.094R），swing 是正期望（5418 笔 +0.184R）。所有"没指定模式"
+# 的入口（定时任务、CLI、网页 API、参数方案）都回落到这里，避免再把用户
+# 默认带进一个亏钱的模式。
+DEFAULT_MODE = "swing"
+
+# 能被定时任务/参数方案带进实盘扫描的模式白名单。
+# 与 config.validate_config 里对 schedule.mode 的钳制必须是同一个集合——
+# 参数方案会把它的 mode 直接写进 schedule.mode，绕开一次校验就会把
+# 用户带进 reversion（完整历史 -0.384R）之类没有正期望的通道。
+# reversion 仍可用于 backtest / 手动 analyze，只是不允许被排程。
+SCHEDULABLE_MODES = ("intraday", "swing")
+
 DEFAULTS: dict[str, Any] = {
     "host": "127.0.0.1",
     "port": 8972,
@@ -106,6 +119,10 @@ DEFAULTS: dict[str, Any] = {
     "schedule": {
         "enabled": False,
         "interval_sec": 300,         # 循环间隔（秒）
+        # 默认模式。必须是 swing：完整历史实测（20 币 × 2000 根日线，
+        # 真实规则逐笔）intraday 10056 笔期望 -0.094R、swing 5418 笔 +0.184R。
+        # 之前的默认值 intraday 是亏钱的，见 README「默认模式为什么是 swing」。
+        "mode": DEFAULT_MODE,
         "symbols": ["BTC-USDT"],
         "run_on_start": True,
         "only_on_signal": False,     # 只在有明确方向时落库
@@ -321,7 +338,7 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                  DEFAULTS["schedule"]["symbols"])
     # reversion 无正期望（完整历史回测为负），不放进定时任务可选模式：
     # 它仍可用于 backtest/手动 analyze，但不该被排程进实盘扫描。
-    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing") else "intraday"
+    sc["mode"] = sc.get("mode") if sc.get("mode") in SCHEDULABLE_MODES else DEFAULT_MODE
     uni = _section(sc, "universe", DEFAULTS["schedule"]["universe"])
     uni["batch_size"] = _coerce_int(uni.get("batch_size"),
                                     "schedule.universe.batch_size", 1, 500, 20)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 
+from .config import DEFAULT_MODE, SCHEDULABLE_MODES
 from .signals import FACTOR_DEFAULTS
 
 
@@ -34,6 +35,12 @@ def _thr(v) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 30.0
+
+
+def _mode(v) -> str:
+    """方案模式必须落在可排程白名单里。老配置文件里可能已经存了 reversion，
+    读的时候也要纠正，否则 apply() 会把负期望通道塞进 schedule.mode。"""
+    return v if v in SCHEDULABLE_MODES else DEFAULT_MODE
 
 
 def _exp_key(v) -> float:
@@ -69,7 +76,7 @@ class ProfileStore:
             out.append({
                 "name": name,
                 "note": p.get("note", ""),
-                "mode": p.get("mode") or "intraday",
+                "mode": _mode(p.get("mode")),
                 "score_threshold": _thr(p.get("score_threshold")),
                 "weights": w,
                 "custom": custom,
@@ -84,7 +91,7 @@ class ProfileStore:
         return {
             "name": name,
             "note": p.get("note", ""),
-            "mode": p.get("mode") or "intraday",
+            "mode": _mode(p.get("mode")),
             "score_threshold": _thr(p.get("score_threshold")),
             "factor_weights": _norm_weights(p.get("factor_weights")),
         }
@@ -94,6 +101,10 @@ class ProfileStore:
         name = (name or "").strip()
         if not name:
             raise ValueError("方案名不能为空")
+        # 方案里的模式会经 apply() 写进 schedule.mode 被定时任务真的用上，
+        # 所以这里必须和白名单校验：reversion 完整历史为负期望，scalp 之类
+        # 的拼写错误也要拦下，不能让存错的名字变成实盘扫描的模式。
+        mode = mode if mode in SCHEDULABLE_MODES else DEFAULT_MODE
         self.cfg.setdefault("profiles", {})[name] = {
             "factor_weights": _norm_weights(factor_weights),
             "score_threshold": float(score_threshold),
@@ -118,7 +129,7 @@ class ProfileStore:
         an = self.cfg.setdefault("analysis", {})
         an["factor_weights"] = p["factor_weights"]
         an["score_threshold"] = p["score_threshold"]
-        self.cfg.setdefault("schedule", {})["mode"] = p["mode"]
+        self.cfg.setdefault("schedule", {})["mode"] = _mode(p["mode"])
         self.cfg["active_profile"] = name
         return p
 
@@ -128,7 +139,7 @@ class ProfileStore:
         return {
             "factor_weights": _norm_weights(an.get("factor_weights")),
             "score_threshold": _thr(an.get("score_threshold")),
-            "mode": (self.cfg.get("schedule") or {}).get("mode") or "intraday",
+            "mode": _mode((self.cfg.get("schedule") or {}).get("mode")),
         }
 
 
@@ -140,7 +151,7 @@ def cfg_with_profile(cfg: dict, profile: dict | None) -> dict:
     an = out.setdefault("analysis", {})
     an["factor_weights"] = _norm_weights(profile.get("factor_weights"))
     an["score_threshold"] = _thr(profile.get("score_threshold"))
-    out.setdefault("schedule", {})["mode"] = profile.get("mode") or "intraday"
+    out.setdefault("schedule", {})["mode"] = _mode(profile.get("mode"))
     return out
 
 
@@ -155,7 +166,7 @@ def backtest_all(cfg: dict, *, snapshot, symbol: str, bars: int = 300,
     ps = ProfileStore(cfg)
     rows: list[dict] = []
     base = {"name": "当前参数", "active": True if ps.active else False,
-            "mode": (cfg.get("schedule") or {}).get("mode") or "intraday",
+            "mode": _mode((cfg.get("schedule") or {}).get("mode")),
             "score_threshold": _thr((cfg.get("analysis") or {}).get("score_threshold")),
             "profile": None}
     prof_cfg = cfg_with_profile(cfg, None)

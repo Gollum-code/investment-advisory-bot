@@ -5,7 +5,7 @@ import unittest
 
 from iabot import __main__ as cli
 from iabot.advisor import Advisor
-from iabot.config import DEFAULTS
+from iabot.config import DEFAULTS, DEFAULT_MODE
 from iabot.signals import build_plan
 
 try:  # `discover -s tests` 和 `discover -t .` 两种跑法都要能用
@@ -103,7 +103,9 @@ class TestRenderPlan(unittest.TestCase):
 class TestArgParsing(unittest.TestCase):
     def test_analyze_defaults(self):
         args = cli.build_parser().parse_args(["analyze", "BTC-USDT"])
-        self.assertEqual(args.mode, "intraday")
+        # 默认模式必须是 DEFAULT_MODE（swing）。之前是 intraday，而 intraday
+        # 完整历史回测是 -0.094R 的负期望，不能让用户默认踩进去。
+        self.assertEqual(args.mode, DEFAULT_MODE)
         self.assertFalse(args.json)
 
     def test_analyze_save_flag_parses(self):

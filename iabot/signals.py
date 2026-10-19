@@ -17,6 +17,7 @@ import time as _time
 from dataclasses import dataclass, field
 
 from . import indicators as ind
+from .config import DEFAULT_MODE
 from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
                      orderbook_walls, price_ladder, round_number_levels,
                      swing_points, top_volume_nodes)
@@ -667,6 +668,10 @@ def _confidence_label(cs: float) -> str:
 #   intraday tp1 -0.046R | weighted -0.047R | max -0.044R
 # 三者差异在噪声内，tp1 反而略优。所以默认值是 tp1 —— 换判据并不能提高期望值。
 # 真正的问题不在这里，见 README「为什么全是观望」。
+#
+# 补充：放宽到 20 币 × 2000 根 15min（约 20 天，该周期接口上限）复测 intraday，
+# 10056 笔了结单期望 -0.094R，18 个有数据的币里 14 个为负。这坐实了 intraday
+# 是负期望，所以 DEFAULT_MODE（config.py）取 swing 而非 intraday。
 GATE_MEASURES = ("tp1", "weighted", "max")
 GATE_DEFAULT_MEASURE = "tp1"
 GATE_DEFAULT_WEIGHTS = (0.5, 0.3, 0.2)
@@ -1021,8 +1026,8 @@ def _oversold_reversion_plan(snap: Snapshot, cfg: dict, mode: str,
     return plan
 
 
-def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
-    mode = mode if mode in MODES else "intraday"
+def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
+    mode = mode if mode in MODES else DEFAULT_MODE
     m = MODES[mode]
     account = cfg.get("account") or {}
     equity = float(account.get("equity_usdt") or 0)
