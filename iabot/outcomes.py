@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from .market import Candle
 
-# 信号最多等多久判结局。日内用 15m 周期（48h = 192 根），波段用日线（21 天）
-DEFAULT_WINDOW_HOURS = {"intraday": 48.0, "swing": 21 * 24.0}
+# 信号最多等多久判结局。日内用 15m 周期（48h = 192 根），波段用日线（21 天），
+# 超卖反弹也是日线、持有 1~2 天，给 10 天窗口让反弹要么回到 SMA20、要么打止损。
+DEFAULT_WINDOW_HOURS = {"intraday": 48.0, "swing": 21 * 24.0, "reversion": 10 * 24.0}
 EXTRA_BUFFER_SEC = 300  # 信号生成到 K 线根结束之间的余量
 
 # no_fill = 挂单从未成交；它不是"没结果"，而是"这笔单不存在"

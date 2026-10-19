@@ -365,7 +365,9 @@ busy: false,
     const seg = $('tf-seg');
     seg.innerHTML = keys.map((k) =>
       '<button class="seg-btn" data-tf="' + esc(k) + '">' + esc(k) + '</button>').join('');
-    const pref = state.mode === 'swing' ? ['1day', '60min', '4hour'] : ['15min', '5min', '60min'];
+    // 超卖反弹和波段都是日线判据，默认摊日线那几档
+    const pref = (state.mode === 'swing' || state.mode === 'reversion')
+      ? ['1day', '60min', '4hour'] : ['15min', '5min', '60min'];
     state.tf = pref.find((p) => keys.indexOf(p) >= 0) || keys[0] || '15min';
     markSeg();
   }

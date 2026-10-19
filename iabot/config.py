@@ -313,7 +313,7 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                      30, 86400, 300)
     sc["symbols"] = _coerce_list(sc.get("symbols"), "schedule.symbols",
                                  DEFAULTS["schedule"]["symbols"])
-    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing") else "intraday"
+    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing", "reversion") else "intraday"
     uni = _section(sc, "universe", DEFAULTS["schedule"]["universe"])
     uni["batch_size"] = _coerce_int(uni.get("batch_size"),
                                     "schedule.universe.batch_size", 1, 500, 20)

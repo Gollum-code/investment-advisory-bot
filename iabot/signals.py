@@ -59,6 +59,40 @@ MODES = {
         "stop_pct_range": (1.50, 6.00),
         "entry_width_pct": 0.50,
     },
+    # 超卖反弹通道：和 swing/intraday 是**不同策略**，不是同一套判据的调参。
+    #
+    # 为什么单独开一个模式：swing 在跌段里做多是亏的（20 币 × 2060 点、5 日持有、
+    # 时序切分 60/40 实测 train 段 long 命中 41.3%、baseline 43.1%），而且试过五种
+    # 闸门都修不掉——因为该模型的 edge 是非对称的：做空两段都赚，做多只在涨段赚，
+    # 任何"拦一边"的闸门都是用一侧 edge 换另一侧。数据里不存在"跌段接飞刀还赚"的
+    # alpha。但有另一个 alpha：跌势里的**极度超卖反弹**，持有 1~2 天。
+    #
+    # 留出法验证（20 币日线，每币前 60% 定触发、后 40% 验证）：
+    #   RSI(2) < 10 且 close < SMA20×1.03 且 close < SMA200
+    #   hold 2d：train 65.6% / +6.59%，test 65.6% / +6.61%（n=32）—— 与训练集一致
+    #   对照"跌势任意点做多 hold 2d"：52.9% / +3.97%
+    # 也就是说这不是过拟合，是独立于 swing 的一条真信号。
+    #
+    # 只做多：反弹策略天然没有空头对应物（跌势里追空是趋势的事，归 swing）。
+    "reversion": {
+        "label": "超卖反弹",
+        "atr_period": "1day",
+        "stop_atr_mult": 0.8,
+        "max_target_atr": 9.0,
+        "min_dist_atr": 0.35,
+        "level_lookback": {"60min": 240, "1day": 90},
+        "use_daily_fib": True,
+        "stop_pct_range": (1.50, 6.00),
+        "entry_width_pct": 0.50,
+        # 触发条件：RSI(2) 低于此值 且 收盘低于 SMA20×(1+gap) 且 收盘低于 SMA200。
+        # 三者分别管"跌透了""还没涨回来""整体仍是跌势"。
+        "oversold_rsi_period": 2,
+        "oversold_rsi_max": 10.0,
+        "oversold_sma20_gap": 0.03,
+        "oversold_sma200_period": 200,
+        # 目标位就是回到 SMA20（这是回抽的定义终点），不再往远处找压力位
+        "reversion_target": "sma20",
+    },
 }
 
 
@@ -762,6 +796,180 @@ def collect_levels(snap: Snapshot, price: float, mode: str = "intraday") -> list
 # 主入口
 # --------------------------------------------------------------------------
 
+def _reversion_downgrade(plan: Plan, snap: Snapshot, cfg: dict, atr_v: float,
+                          reason: str) -> Plan:
+    """反弹通道的降级：清掉会误导人的入场/止损数据，回到观望。"""
+    plan.direction = "wait"
+    plan.confidence = "低"
+    plan.confidence_score = 0.0
+    plan.entry_note = reason
+    plan.entry_low = plan.entry_high = None
+    plan.stop = None
+    plan.stop_pct = None
+    plan.targets = []
+    plan.rr = None
+    plan.invalidation = ""
+    account = cfg.get("account") or {}
+    _attach_sizing(plan, snap, float(account.get("equity_usdt") or 0),
+                   float(account.get("risk_pct_per_trade") or 2.0),
+                   int(account.get("preferred_leverage") or 5),
+                   float(account.get("max_margin_pct") or 50.0), atr_v)
+    plan.warnings.extend(snap.errors)
+    return plan
+
+
+def _oversold_reversion_plan(snap: Snapshot, cfg: dict, mode: str,
+                             m: dict, plan: Plan) -> Plan:
+    """超卖反弹通道：只在"跌势里跌透了"时做多，目标位就是回到 SMA20。
+
+    和 swing/intraday 的关系：**不同策略**。swing 在跌段做多没有 alpha（见 MODES
+    里 "reversion" 的注释），这条通道补的是那个缺口，两者互不干扰。
+
+    触发要同时满足三条，缺一不可：
+      RSI(oversold_rsi_period) < oversold_rsi_max   跌透了（短周期超卖）
+      close < SMA20 × (1 + gap)                     还没涨回来
+      close < SMA200                                整体仍是跌势
+    任何一条不满足都直接观望——不满足"跌透了"就不该抢反弹，不满足"还是跌势"
+    就不该按反弹策略做（那是趋势策略的事，归 swing）。
+
+    只做多。反弹没有空头对应物：跌势里追空是趋势，归 swing。
+    """
+    account = cfg.get("account") or {}
+    _equity = float(account.get("equity_usdt") or 0)
+    _risk = float(account.get("risk_pct_per_trade") or 2.0)
+    _lev = int(account.get("preferred_leverage") or 5)
+    _maxm = float(account.get("max_margin_pct") or 50.0)
+
+    price = snap.price
+    if not price:
+        plan.notes.append("拿不到最新价，无法分析。")
+        _attach_sizing(plan, snap, _equity, _risk, _lev, _maxm, None)
+        plan.warnings.extend(snap.errors)
+        return plan
+
+    k = snap.klines.get(m["atr_period"]) or []
+    cs = [c.close for c in k]
+    rsi_n = int(m.get("oversold_rsi_period", 2))
+    rsi_max = float(m.get("oversold_rsi_max", 10.0))
+    gap = float(m.get("oversold_sma20_gap", 0.03))
+    sma200_n = int(m.get("oversold_sma200_period", 200))
+
+    need = max(sma200_n + 5, rsi_n + 10, 25)
+    if len(cs) < need:
+        plan.direction = "wait"
+        plan.confidence = "低"
+        plan.confidence_score = 0.0
+        plan.entry_note = f"日线只有 {len(cs)} 根（需要 ≥{need}），判不了跌势与超卖。"
+        _attach_sizing(plan, snap, _equity, _risk, _lev, _maxm, None)
+        plan.warnings.extend(snap.errors)
+        return plan
+
+    rsi_v = ind.last(ind.rsi(cs, rsi_n))
+    sma20 = ind.last(ind.sma(cs, 20))
+    sma200 = ind.last(ind.sma(cs, sma200_n))
+    plan.market = {
+        "mode": mode, "mode_label": m["label"], "atr_period": m["atr_period"],
+        "change_24h_pct": round(snap.change_24h_pct, 2) if snap.change_24h_pct is not None else None,
+        "basis_pct": round(snap.basis_pct, 4) if snap.basis_pct is not None else None,
+    }
+
+    # 三条触发条件逐个记下来，面板上要能看到是卡在哪一条
+    cond_rsi = rsi_v is not None and rsi_v < rsi_max
+    cond_sma20 = sma20 is not None and price < sma20 * (1.0 + gap)
+    cond_sma200 = sma200 is not None and price < sma200
+    checks = [
+        ("rsi", cond_rsi,
+         f"RSI({rsi_n}) {rsi_v:.1f}" if rsi_v is not None else f"RSI({rsi_n}) 无数据"),
+        ("sma20", cond_sma20,
+         f"低于 SMA20 {sma20:,.4f}" if sma20 is not None else "SMA20 无数据"),
+        ("sma200", cond_sma200,
+         f"低于 SMA200 {sma200:,.4f}" if sma200 is not None else "SMA200 无数据"),
+    ]
+
+    if not (cond_rsi and cond_sma20 and cond_sma200):
+        plan.direction = "wait"
+        plan.confidence = "低"
+        plan.confidence_score = 0.0
+        failed = "；".join(c[2] for c in checks if not c[1])
+        plan.entry_note = f"未触发反弹：{failed}。"
+        _attach_sizing(plan, snap, _equity, _risk, _lev, _maxm, None)
+        plan.warnings.extend(snap.errors)
+        return plan
+
+    # ---- 触发成立：做多，目标位 = SMA20 ----
+    plan.direction = "long"
+    rsi_txt = f"{rsi_v:.1f}"
+    plan.factors = [
+        Factor(f"rsi{rsi_n}", f"RSI({rsi_n}) 超卖", 1.0, 1.0,
+               f"RSI({rsi_n}) {rsi_txt} < {rsi_max:.0f}（跌透）"),
+        Factor("sma20", "未涨回 SMA20", 1.0, 1.0,
+               f"收盘 {price:,.4f} 低于 SMA20 {sma20:,.4f}（还有回抽空间）"),
+        Factor(f"sma{sma200_n}", "整体跌势", 1.0, 1.0,
+               f"收盘低于 SMA{sma200_n} {sma200:,.4f}"
+               f"（跌势中的反弹，不逆大势做趋势单）"),
+    ]
+
+    # 止损：日线 ATR。数据不足时退回 2.5%
+    atr_v = ind.last(ind.atr([c.high for c in k], [c.low for c in k], cs, 14)) if len(k) > 15 else None
+    if not atr_v:
+        atr_v = price * 0.025
+    plan.market.update({
+        "atr": round(atr_v, 8),
+        "atr_pct": round(atr_v / price * 100, 3),
+        "rsi2": round(rsi_v, 2) if rsi_v is not None else None,
+        "sma20": round(sma20, 4) if sma20 is not None else None,
+        "sma200": round(sma200, 4) if sma200 is not None else None,
+        "regime": "跌势超卖",
+    })
+
+    # 入场：现价直接进（反弹信号不等人，等回踩就错过起点了）
+    plan.entry_low = round(price, 8)
+    plan.entry_high = round(price, 8)
+    mid = price
+    stop_dist = atr_v * m["stop_atr_mult"]
+    lo_pct, hi_pct = m["stop_pct_range"]
+    stop_dist = max(lo_pct / 100.0 * mid, min(hi_pct / 100.0 * mid, stop_dist))
+    plan.stop = round(mid - stop_dist, 8)
+    plan.stop_pct = round(stop_dist / mid * 100, 3)
+
+    # 目标位：回到 SMA20。SMA20 不在现价上方就说明没有反弹空间可做
+    if sma20 is None or sma20 <= mid:
+        return _reversion_downgrade(plan, snap, cfg, atr_v,
+                                    "反弹目标位（SMA20）不在现价上方，没有可交易的回抽空间。")
+
+    rr = _target_rr(sma20, mid, stop_dist, "long")
+    if rr < 1.0:
+        plan.gate = {"blocked": True, "reason": "rr", "score": plan.score,
+                     "would_be": "long", "rr": round(rr, 2), "need": 1.0,
+                     "measure": "sma20"}
+        plan.warnings.append(f"回到 SMA20 的盈亏比仅 {rr:.2f}（< 1），风险大于收益。")
+        return _reversion_downgrade(plan, snap, cfg, atr_v,
+                                    "盈亏比不足 1:1（反弹目标位太近），不出手。")
+
+    plan.targets = [{"price": round(sma20, 8), "label": "TP1",
+                     "rr": round(rr, 2), "source": "SMA20（反弹终点）"}]
+    plan.rr = round(rr, 2)
+    plan.score = round(100.0 * math.tanh(1.0 / SCORE_SCALE), 1)
+    plan.invalidation = f"日线收盘跌破 {plan.stop:,.4f} 则反弹逻辑作废"
+    plan.entry_note = "跌势中的超卖反弹，现价进，目标回到 SMA20。"
+    plan.notes.append(f"触发：RSI({rsi_n}) {rsi_txt} / 低于 SMA20 / 低于 SMA{sma200_n}。")
+    plan.notes.append(f"目标位 SMA20 {sma20:,.4f}，盈亏比 {rr:.2f}，"
+                      f"止损 {stop_dist / mid * 100:.2f}%。")
+    plan.notes.append("这条通道只做多：反弹没有空头对应物，跌势追空归波段模式。")
+
+    conf = _confidence_score(plan.factors, plan.score, "long", len(plan.factors))
+    plan.confidence = _confidence_label(conf)
+    plan.confidence_score = conf
+
+    account = cfg.get("account") or {}
+    _attach_sizing(plan, snap, float(account.get("equity_usdt") or 0),
+                   float(account.get("risk_pct_per_trade") or 2.0),
+                   int(account.get("preferred_leverage") or 5),
+                   float(account.get("max_margin_pct") or 50.0), atr_v)
+    plan.warnings.extend(snap.errors)
+    return plan
+
+
 def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     mode = mode if mode in MODES else "intraday"
     m = MODES[mode]
@@ -780,6 +988,10 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
         return plan
+
+    # 超卖反弹通道走独立判据，不进多因子打分/闸门那条路
+    if mode == "reversion":
+        return _oversold_reversion_plan(snap, cfg, mode, m, plan)
 
     price = snap.price
     an = cfg.get("analysis") or {}

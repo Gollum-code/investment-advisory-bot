@@ -197,6 +197,120 @@ class TestDirection(unittest.TestCase):
         self.assertEqual(plan_for(UP, "nope").mode, "intraday")
 
 
+class TestReversionChannel(unittest.TestCase):
+    """超卖反弹通道：独立判据，只做多，三条触发缺一不可。"""
+
+    def _oversold_snapshot(self, n=240, drop_pct=-35.0, last_bounce_pct=0.0):
+        """一路阴跌到 drop_pct，最后几根再砸一下，制造 RSI(2) 极值。
+
+        200 根跌势保证 close < SMA200；尾段加速下跌保证 RSI(2) 见底、
+        且 close 明显低于 SMA20（SMA20 还挂在高位）。
+        """
+        start = START_PRICE
+        closes = []
+        for i in range(n):
+            t = i / (n - 1)
+            closes.append(start * (1 + drop_pct / 100.0 * t))
+        # 尾段再砸一跤，把 RSI(2) 打到 10 以下
+        for j in range(3):
+            closes[-3 + j] = closes[-3 + j] * (1 - 0.02 * (j + 1))
+        if last_bounce_pct:
+            closes[-1] = closes[-2] * (1 + last_bounce_pct / 100.0)
+        ts_step = 86400
+        k = _candles(closes, ts_step, start * 0.002)
+        price = k[-1].close
+        return Snapshot(
+            symbol="TEST-USDT", price=price, index_price=price,
+            open24=k[-2].close, high=max(c.high for c in k[-20:]),
+            low=min(c.low for c in k[-20:]),
+            best_bid=price - 0.5, best_ask=price + 0.5,
+            bid_volume=1000.0, ask_volume=1000.0,
+            volume_24h=100000.0, turnover_24h=100000.0 * price,
+            contract_size=CONTRACT_SIZE, klines={"1day": k},
+            depth={"asks": [[price + (i + 1) * 5.0, 1.0] for i in range(40)],
+                   "bids": [[price - (i + 1) * 5.0, 2.0] for i in range(40)]},
+            funding_rate=0.0001, open_interest=10000.0)
+
+    def _plan(self, snap, **account):
+        return build_plan(snap, cfg_with(**account), mode="reversion")
+
+    def test_oversold_downtrend_gives_long(self):
+        plan = self._plan(self._oversold_snapshot())
+        self.assertEqual(plan.direction, "long")
+        self.assertEqual(plan.mode, "reversion")
+        self.assertTrue(plan.targets, "触发就必须给出目标位")
+        self.assertEqual(plan.targets[0]["label"], "TP1")
+        self.assertGreater(plan.targets[0]["price"], plan.price, "目标位必须在现价上方")
+        self.assertLess(plan.stop, plan.price, "多头止损必须在现价下方")
+        self.assertGreaterEqual(plan.rr, 1.0, "盈亏比不足 1 会被闸门拦下")
+
+    def test_target_is_sma20(self):
+        plan = self._plan(self._oversold_snapshot())
+        self.assertEqual(plan.targets[0]["source"], "SMA20（反弹终点）")
+
+    def test_needs_enough_history(self):
+        snap = self._oversold_snapshot(n=120)
+        plan = self._plan(snap)
+        self.assertEqual(plan.direction, "wait")
+        self.assertIn("日线只有", plan.entry_note)
+
+    def test_uptrend_does_not_trigger(self):
+        """涨势里不触发：三条里 SMA200 与 SMA20 都不满足。"""
+        plan = self._plan(make_snapshot(net_pct=30.0))
+        self.assertEqual(plan.direction, "wait")
+
+    def test_bounce_kills_the_setup(self):
+        """已经弹起来（贴近 SMA20）就不该再抢反弹——回抽空间没了。"""
+        snap = self._oversold_snapshot()
+        closes = [c.close for c in snap.klines["1day"]]
+        # 把最后几根拉到 SMA20 附近：造一个已反弹的状态
+        import iabot.indicators as ind
+        s20 = ind.last(ind.sma(closes[:-1], 20))
+        snap.klines["1day"][-1] = Candle(
+            ts=snap.klines["1day"][-1].ts, open=closes[-2], high=s20 * 1.002,
+            low=closes[-2], close=s20 * 1.001, volume=1000.0)
+        snap.price = s20 * 1.001
+        plan = self._plan(snap)
+        self.assertNotEqual(plan.direction, "long", "已贴回 SMA20 就没有反弹空间")
+
+    def test_rr_gate_blocks_thin_bounce(self):
+        """SMA20 离现价太近（盈亏比 < 1）-> 观望，不是硬发单。"""
+        snap = self._oversold_snapshot()
+        closes = [c.close for c in snap.klines["1day"]]
+        # 让 SMA20 只比现价高一点点，RSI 仍然极低
+        target = closes[-1] * 1.001
+        for i in range(19, 0, -1):
+            closes[-i] = target
+        snap.klines["1day"][-1] = Candle(
+            ts=snap.klines["1day"][-1].ts, open=closes[-2], high=target,
+            low=closes[-2] * 0.98, close=target, volume=1000.0)
+        snap.price = target
+        plan = self._plan(snap)
+        if plan.direction == "wait":
+            self.assertIn("盈亏比", plan.entry_note)
+        else:
+            self.assertGreaterEqual(plan.rr, 1.0)
+
+    def test_short_is_never_emitted(self):
+        """反弹通道只做多——任何输入都不能给出 short。"""
+        for drop in (-35.0, -8.0, 0.0):
+            snap = self._oversold_snapshot(drop_pct=drop)
+            plan = self._plan(snap)
+            self.assertNotEqual(plan.direction, "short")
+
+    def test_wait_states_carry_sizing(self):
+        """观望态也要有 sizing（网页"SIZE"栏不能空）。"""
+        plan = self._plan(make_snapshot(net_pct=30.0))
+        self.assertEqual(plan.direction, "wait")
+        self.assertIn("sizing", plan.to_dict())
+
+    def test_serialisation_round_trips(self):
+        plan = self._plan(self._oversold_snapshot())
+        d = plan.to_dict()
+        self.assertEqual(json.loads(json.dumps(d))["direction"], "long")
+
+
+
 class TestFactors(unittest.TestCase):
     def test_score_always_in_range(self):
         for scenario in (UP, DOWN_INTRADAY, DOWN_SWING, RANGE):
