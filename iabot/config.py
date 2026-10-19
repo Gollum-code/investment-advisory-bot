@@ -91,10 +91,15 @@ DEFAULTS: dict[str, Any] = {
         "backtest": {
             "enabled": True,
             "taker_fee_bps": 5.0,      # 单边手续费 0.05%（开平各一次）
-            "slippage_bps": 2.0,       # 单边滑点 0.02%（开平各一次）
+            "slippage_bps": 2.0,       # 单侧滑点 0.02%
             "funding": True,           # 按持仓时长累计资金费
             "funding_period_sec": 28800,  # 8 小时一次结算
         },
+        # 趋势否决闸门：方向定了之后，若日线趋势明确反对就降级观望。
+        # 默认关——完整历史（20 币 × 2000 根日线）显示它把 swing 期望从
+        # +0.183R 提到 +0.199R、long 从 +0.119R 提到 +0.165R，但同时砍掉
+        # 46% 的单量。等实盘/前向样本验证过再默认开。
+        "trend_veto": False,
     },
 
     # 定时任务
@@ -252,6 +257,7 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                         "account.max_margin_pct", 1, 100, 50.0)
 
     an = _section(out, "analysis", DEFAULTS["analysis"])
+    an["trend_veto"] = bool(an.get("trend_veto", False))
     an["score_threshold"] = _coerce_num(an.get("score_threshold"),
                                         "analysis.score_threshold", 0, 100, 30.0)
     an["cache_ttl_sec"] = _coerce_num(an.get("cache_ttl_sec"),
@@ -313,7 +319,9 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                      30, 86400, 300)
     sc["symbols"] = _coerce_list(sc.get("symbols"), "schedule.symbols",
                                  DEFAULTS["schedule"]["symbols"])
-    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing", "reversion") else "intraday"
+    # reversion 无正期望（完整历史回测为负），不放进定时任务可选模式：
+    # 它仍可用于 backtest/手动 analyze，但不该被排程进实盘扫描。
+    sc["mode"] = sc.get("mode") if sc.get("mode") in ("intraday", "swing") else "intraday"
     uni = _section(sc, "universe", DEFAULTS["schedule"]["universe"])
     uni["batch_size"] = _coerce_int(uni.get("batch_size"),
                                     "schedule.universe.batch_size", 1, 500, 20)

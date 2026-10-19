@@ -34,34 +34,31 @@ TREND_CONFIRM_SCALE = 0.5
 # 状态闸门：状态因子（波动率/成交量/资金费）加权均值低于此值就不开仓。
 STATE_GATE_MIN = 0.10
 
-# ---- 模式定位：谁是主策略、谁是从属 ----
-# 这是用历史数据定的，不是拍的。同一批 20 币日线、同一套真实规则
-# （build_plan + evaluate_outcome + 手续费滑点资金费），逐笔记录：
+# ---- 模式定位：谁是主策略、谁是实验品 ----
+# 用历史数据定的。关键教训：**样本窗口决定结论**。
 #
-#   swing      n=737  期望 +0.302R  95%CI [+0.222, +0.386]  前后 60/40：+0.286 / +0.313
-#   reversion  n= 71  期望 +0.367R  95%CI [+0.041, +0.697]  前后 60/40：-0.274 / +1.193
+# 第一次（每币 300 根日线，即最近约 3 个月）：
+#   swing      n=737  期望 +0.302R  95%CI [+0.222, +0.386]
+#   reversion  n= 71  期望 +0.367R  —— 看起来和 swing 一样好
+# 据此把 reversion 定为"从属、半仓"。**这个结论是被短窗口骗的。**
 #
-# 四条判据都不支持给 reversion 和 swing 同等的权重：
-#   1) 样本量差 10 倍，reversion 的 CI 下界只有 +0.041（刚过 0）
-#   2) 时序不稳定：前段亏、后段赚；swing 两段都赚
-#   3) 集中度：总 R 的 52% 来自 2 个币（DOT/UNI 共 7 笔）
-#   4) 互补性差：reversion 有 63% 的点 ±2 根内 swing 也给了 long，
-#      那部分没有分散价值；真正独占的只有 26 笔
+# 放宽到 2000 根日线（约 5.5 年、覆盖 2021-2026 四个区制）后：
+#   swing      n=5418  期望 +0.184R  95%CI [+0.150, +0.217]  三个区制全正
+#   reversion  n= 752  期望 -0.384R  95%CI [-0.478, -0.285]  20 个币全负
+# 而且 reversion 的**原始前向收益本来就是 0**（1 日 +0.08% / 2 日 -0.01% /
+# 3 日 +0.06%），正的只有 2025-2026 一段，2021-2022 熊市是负的。
+# 即：信号本身没有 edge，不是出场设计的问题——0% 的原始收益扣掉成本必为负。
+# 之前那个 +0.367R 纯属"最近三个月恰好顺手"+ 两个币撑起来的样本假象。
 #
-# 另外那个"留出法一致"的说法是错的，这里更正：每币日线只有 300 根，
-# SMA200 一成立就只剩约 95 天可评估，前段样本是 0 —— 所谓"两段都 65.6%"
-# 是拿一个空集当验证，不是验证。把制度均线换成 SMA100 能换回约两倍样本，
-# 但优势同时消失（2 日正比例 61.2% -> 54.6%，均 +2.65% -> +0.22%），
-# 说明这条 alpha 只在"深跌破 SMA200"这一个窄区制里存在。
-#
-# 结论：swing 保持主策略；reversion 只作为**实验性补充通道**，
-# 默认只在 swing 不给方向时才有资格出手，且单笔风险减半。
+# 结论：reversion 判为**无 edge，不建议实盘**。保留代码仅供研究/回测，
+# 默认不启用；它曾经那套"从属半仓"的定位作废（见下面常量注释）。
 PRIMARY_MODE = "swing"
-# 从属模式的默认单笔风险系数（相对主策略）。1.0 = 同权重；0.5 = 半仓。
+# 作废的定位参数：曾用于"从属半仓"，但完整历史证明该通道无 edge，
+# 保留只是为了不破坏既有测试与配置引用。不要据此认为它有正期望。
 SUBORDINATE_RISK_SCALE = 0.5
-# 主策略已给出同向信号时，从属模式是否仍允许出手。
-# False = 只有主策略观望时才轮到它（避免同一个点开两张同向单）。
 SUBORDINATE_NEEDS_PRIMARY_SILENT = True
+# 判为无 edge、不建议实盘的模式（信号在完整历史上原始收益为 0）。
+NO_EDGE_MODES = ("reversion",)
 
 MODES = {
     "intraday": {
@@ -88,22 +85,21 @@ MODES = {
         "stop_pct_range": (1.50, 6.00),
         "entry_width_pct": 0.50,
     },
-    # 超卖反弹通道：**从属、实验性**，不是和 swing 平级的策略。
+    # 超卖反弹通道：**无 edge，不建议实盘**。代码保留供研究/回测。
     #
     # 来源：swing 在跌段里做多是亏的，试过五种闸门都修不掉（根因见 README：
-    # edge 非对称，做空两段都赚、做多只在涨段赚）。于是另开这条补缺口。
+    # edge 非对称，做空两段都赚、做多只在涨段赚）。于是想另开一条补缺口。
     #
-    # 但别被第一版的数字骗了——那版写过"留出法 train/test 都是 65.6%"，
-    # 是错的：每币日线只有 300 根，SMA200 一成立就只剩约 95 天可评估，
-    # "前 60% 训练段"其实是空集。用真实规则重测（20 币、逐笔、含成本）：
-    #   swing     n=736  期望 +0.305R  95%CI [+0.226, +0.387]  平稳
-    #   reversion n= 71  期望 +0.367R  95%CI [+0.041, +0.697]  前段亏后段赚
-    # 且 52% 的 R 来自 2 个币、63% 的触发点 swing 也在做多（无分散价值）。
-    # 换 SMA100 换两倍样本，优势即消失（61.2% -> 54.6%）——只在窄区制成立。
+    # 结果是被短样本骗了两次，完整历史推翻了它：
+    #   300 根日线（最近约 3 个月）：n=71  期望 +0.367R  —— 看着能打
+    #   2000 根日线（约 5.5 年）：    n=752 期望 -0.384R  20 个币全负
+    # 更根本的是**原始前向收益就是 0**（1/2/3 日：+0.08% / -0.01% / +0.06%），
+    # 只有 2025-2026 一段为正、2021-2022 熊市为负。
+    # 0% 的原始信号扣掉手续费滑点必然为负，所以不是出场设计能救的。
     #
-    # 所以定位为从属通道：默认不启用，只在主策略观望/给空时出手，
-    # 单笔风险减半（见 PRIMARY_MODE / SUBORDINATE_RISK_SCALE）。
-    # 半仓下组合期望与只跑 swing 基本中性——这是给不确定信号该有的权重。
+    # 保留原因：触发逻辑（RSI2/SMA20/SMA200）本身是干净的实现，
+    # 后续若换标的/换市场（例如只在震荡市启用）仍可复用这套框架回测验证。
+    # 但默认不启用，且不要把它当成正期望策略来配仓位。
     "reversion": {
         "label": "超卖反弹",
         "atr_period": "1day",
@@ -1046,7 +1042,13 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
 
     # 超卖反弹通道走独立判据，不进多因子打分/闸门那条路
     if mode == "reversion":
-        return _oversold_reversion_plan(snap, cfg, mode, m, plan)
+        out = _oversold_reversion_plan(snap, cfg, mode, m, plan)
+        # 完整历史（2000 根日线 / 20 币）证明该信号原始收益为 0、扣成本后为负，
+        # 所以在任何输出上都挂一条明确警告，避免被当成正期望策略下单。
+        out.warnings.append(
+            "超卖反弹模式在完整历史回测中无正期望（原始收益≈0，扣成本后为负），"
+            "仅供研究，不建议实盘。主策略请用 swing。")
+        return out
 
     price = snap.price
     an = cfg.get("analysis") or {}
@@ -1128,6 +1130,30 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
     dir_mean = dir_raw / dir_total
     dir_score = round(100.0 * math.tanh(dir_mean / SCORE_SCALE), 1)
 
+    # ---- 趋势对齐闸门：只做与日线趋势同向的单 ----
+    # 由来：之前一直想修"跌段做多亏"，五种候选闸门（price vs SMA 锚、状态与趋势
+    # 同向、纯趋势跟随、long 需确认、rr 分桶）在 300 根窗口下全失败。放回 2000 根
+    # 日线（约 5.5 年）再测，发现真正的浪费在逆势 long：逆势 long n=1600 只有
+    # +0.085R（2021-2022 是 -0.002R），逆势 short 反而是 +0.312R。
+    # 也就是该砍的是"下跌里做多"，不是所有逆势单。
+    #
+    # 实测（20 币 × 2000 根日线，真实规则逐笔）：
+    #   swing 原样                n=5415  期望 +0.183R
+    #     其中 long               n=2799  期望 +0.119R  ← 拖后腿的在这里
+    #     其中 short              n=2616  期望 +0.252R
+    #   只保留与趋势同向          n=2941  期望 +0.199R
+    #     其中 long               n=1199  期望 +0.165R  ← 提升最明显
+    #     其中 short              n=1742  期望 +0.222R
+    # 砍掉的那部分逆势单总体 +0.165R，看着不亏，但它把 long 从 +0.119 稀释到 +0.085；
+    # 而同向过滤把 long 提到 +0.165、总体提到 +0.199。
+    #
+    # 注意这**不是**把 trend_daily 提成方向源：它只是"否决权"（veto），
+    # 方向仍然由状态因子 + 趋势确认因子共同决定。趋势因子只在方向已定后，
+    # 检查它是否强烈反对，强烈反对就降级为观望。
+    trend_veto = bool(an.get("trend_veto", False))
+    trend_daily_score = sf.get("trend_daily")
+    trend_daily_v = trend_daily_score.score if trend_daily_score else 0.0
+
     if abs(state_score) < STATE_GATE_MIN:
         # 状态因子没有观点（既不明显偏多也不明显偏空）-> 不靠趋势因子单独开仓
         plan.direction = "wait"
@@ -1142,6 +1168,26 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = "intraday") -> Plan:
         plan.direction = "short"
     else:
         plan.direction = "wait"
+
+    # 否决只落在"方向已定、且日线趋势明确反对"时（阈值 0.2 = 趋势因子轻微偏向不算）
+    if trend_veto and plan.direction != "wait" and abs(trend_daily_v) > 0.2:
+        opposed = ((plan.direction == "long" and trend_daily_v < 0)
+                   or (plan.direction == "short" and trend_daily_v > 0))
+        if opposed:
+            side_cn = "多" if plan.direction == "long" else "空"
+            plan.direction = "wait"
+            plan.state_gate = {
+                "trend_veto": True,
+                "trend_daily": round(trend_daily_v, 3),
+                "reason": (f"逆日线趋势（trend_daily {trend_daily_v:+.2f}）做{side_cn}，"
+                           f"完整历史上逆势单会稀释期望，降级观望。"),
+            }
+            plan.confidence = "低"
+            plan.confidence_score = 0.0
+            plan.entry_note = "逆日线趋势，本单不做（趋势否决闸门）。"
+            plan.warnings.extend(snap.errors)
+            _attach_sizing(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v)
+            return plan
 
     stop_mult = m["stop_atr_mult"]
     buf = atr_v * stop_mult

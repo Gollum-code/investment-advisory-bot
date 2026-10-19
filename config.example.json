@@ -75,7 +75,8 @@
       "slippage_bps": 2.0,
       "funding": true,
       "funding_period_sec": 28800
-    }
+    },
+    "trend_veto": false
   },
   "schedule": {
     "enabled": false,

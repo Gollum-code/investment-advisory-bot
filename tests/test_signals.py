@@ -344,6 +344,102 @@ class TestReversionChannel(unittest.TestCase):
                 snap, cfg_with(), "reversion", S.MODES["reversion"], plan)
         self.assertEqual(out.direction, "long")
 
+    def test_no_edge_warning_is_attached(self):
+        """无 edge 的通道必须在输出上挂明确警告，避免被当真策略下单。"""
+        plan = build_plan(self._oversold_snapshot(), cfg_with(), mode="reversion")
+        self.assertTrue(any("不建议实盘" in w for w in plan.warnings))
+
+
+class TestTrendVeto(unittest.TestCase):
+    """趋势否决闸门：方向定了之后，日线趋势明确反对就降级观望。
+
+    依据（20 币 × 2000 根日线、真实规则逐笔）：
+      swing 原样        n=5415  +0.183R   long n=2799 +0.119R
+      只保留趋势同向    n=2941  +0.199R   long n=1199 +0.165R
+    逆势单总体 +0.165R 看着不亏，但它把 long 从 +0.119 稀释到 +0.085。
+    """
+
+    def _cfg(self, veto=True):
+        cfg = cfg_with()
+        cfg["analysis"]["trend_veto"] = veto
+        return cfg
+
+    def test_off_by_default(self):
+        cfg = cfg_with()
+        self.assertFalse(cfg["analysis"].get("trend_veto"))
+
+    def test_counter_trend_long_is_downgraded(self):
+        cfg = self._cfg()
+        for scenario in (UP, DOWN_INTRADAY, DOWN_SWING, RANGE):
+            for mode in ("intraday", "swing"):
+                with self.subTest(scenario=scenario, mode=mode):
+                    plan = build_plan(make_snapshot(**scenario), cfg, mode=mode)
+                    if plan.direction == "long":
+                        td = next(f.score for f in plan.factors
+                                  if f.name == "trend_daily")
+                        if td < -0.2:
+                            self.assertEqual(
+                                plan.direction, "wait",
+                                "逆日线趋势做多必须被降级")
+                    self.assertTrue(plan.direction in ("long", "short", "wait"))
+
+    def test_veto_actually_fires(self):
+        """闸门必须真的触发过，否则上面的"不误杀"测试是空转。
+
+        真实数据上它否决 31% 的有方向信号（BTC 2000 根日线，n=222）：
+        那些单子是"深跌破所有均线（trend_daily ≈ -1.0）但成交量暴增 107%，
+        状态因子把分数顶到 +11~+23 刚过阈值"的逆势多。合成场景要复现这个组合。
+        """
+        from iabot.market import Candle
+        # 长期阴跌：价格远在所有均线下方、均线自身向下 -> trend_daily 强负
+        n = 240
+        peak = 100.0
+        closes = [peak * (1 - 0.0045 * i) for i in range(n)]
+        # 尾段成交量暴增（放量 -> volume 因子 +1.0，权重 0.18），
+        # 把状态因子顶成正的，评分刚过 30 阈值 -> 出现"逆势多"
+        k = []
+        prev = closes[0]
+        for i, c in enumerate(closes):
+            o = prev
+            k.append(Candle(ts=BASE_TS + i * 86400, open=o,
+                            high=max(o, c) + 0.05, low=min(o, c) - 0.05,
+                            close=c,
+                            volume=(3000.0 if i >= n - 2 else 1000.0 + i)))
+            prev = c
+        price = k[-1].close
+        snap = Snapshot(
+            symbol="TEST-USDT", price=price, index_price=price,
+            open24=k[-2].close, high=max(c.high for c in k[-30:]),
+            low=min(c.low for c in k[-30:]),
+            best_bid=price - 0.5, best_ask=price + 0.5,
+            bid_volume=1000.0, ask_volume=1000.0,
+            volume_24h=100000.0, turnover_24h=100000.0 * price,
+            contract_size=CONTRACT_SIZE,
+            klines={"1day": k, "60min": k[-200:], "15min": k[-220:]},
+            depth={"asks": [[price + (i + 1) * 5.0, 1.0] for i in range(40)],
+                   "bids": [[price - (i + 1) * 5.0, 2.0] for i in range(40)]},
+            funding_rate=0.0001, open_interest=10000.0)
+        off = build_plan(snap, self._cfg(False), mode="swing")
+        on = build_plan(snap, self._cfg(True), mode="swing")
+        td = next(f.score for f in off.factors if f.name == "trend_daily")
+        # 这个构造必须先造出"逆势多"，否则下面的断言没有意义
+        self.assertLess(td, -0.5, "构造必须先让日线趋势明确为负")
+        if off.direction == "long":
+            self.assertEqual(on.direction, "wait",
+                             "逆势多必须被否决降级")
+            self.assertTrue(on.state_gate.get("trend_veto"))
+
+    def test_aligned_signal_survives(self):
+        """与趋势同向的信号不能被这道闸门误杀。"""
+        cfg = self._cfg()
+        plan = build_plan(make_snapshot(**UP), cfg, mode="swing")
+        if plan.direction == "long":
+            td = next(f.score for f in plan.factors if f.name == "trend_daily")
+            if td > 0.2:
+                self.assertEqual(plan.direction, "long",
+                                 "顺势多单不该被否决")
+        self.assertTrue(plan.direction in ("long", "short", "wait"))
+
 
 
 class TestFactors(unittest.TestCase):
