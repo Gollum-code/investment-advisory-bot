@@ -450,5 +450,69 @@ class TestWalkForward(unittest.TestCase):
         self.assertIn("无法判断", _verdict(0.1, None, 0.0, usable[:1]))
 
 
+class TestValidation(unittest.TestCase):
+    """组合级验证：跨币合并 + 收益集中度。"""
+
+    def test_concentration_pairs_math(self):
+        from iabot.validation import _concentration_pairs
+        # 4 个赚钱的币，前 2 个占 80/100 = 80%
+        out = _concentration_pairs([("A", 50.0), ("B", 30.0),
+                                    ("C", 15.0), ("D", 5.0)])
+        self.assertEqual(out["positive_symbols"], 4)
+        self.assertAlmostEqual(out["top_share"], 0.8, places=3)
+        self.assertEqual(out["top_symbols"], ["A", "B"])
+        self.assertTrue(out["warning"])            # 超过 50% 必须报警
+
+    def test_no_warning_when_spread(self):
+        from iabot.validation import _concentration_pairs
+        out = _concentration_pairs([("A", 10), ("B", 10), ("C", 10), ("D", 10)])
+        self.assertAlmostEqual(out["top_share"], 0.5, places=3)
+        # 恰好 50% 且 >= 警戒线 -> 报；这里验证边界是有意为之
+        self.assertTrue(out["warning"])
+        out2 = _concentration_pairs([("A", 10), ("B", 10), ("C", 10),
+                                     ("D", 10), ("E", 10)])
+        self.assertLess(out2["top_share"], 0.5)
+        self.assertFalse(out2["warning"])
+
+    def test_losses_do_not_inflate_concentration(self):
+        from iabot.validation import _concentration_pairs
+        # 负收益的币不参与"正 R 贡献"的分母
+        out = _concentration_pairs([("A", 10), ("B", -100)])
+        self.assertEqual(out["positive_symbols"], 1)
+        self.assertAlmostEqual(out["top_share"], 1.0, places=3)
+        # 赚钱标的只有 1 个（<= TOP_N），不触发"集中"警告
+        self.assertFalse(out["warning"])
+
+    def test_multi_backtest_pools_trades(self):
+        from iabot.validation import multi_backtest
+        base = _trading_snapshot()
+        snaps = {}
+        for name in ("A-USDT", "B-USDT", "C-USDT"):
+            snap = copy.deepcopy(base)
+            snap.symbol = name
+            snaps[name] = snap
+        out = multi_backtest(snaps, _cfg(), mode="intraday", step=10, warmup=30)
+        per_sum = sum(r["trades"] for r in out["rows"])
+        self.assertEqual(out["pooled"]["trades"], per_sum)
+        self.assertGreater(per_sum, 0)            # 反空转
+        self.assertEqual(out["usable_symbols"], 3)
+        self.assertIn("concentration", out)
+
+    def test_validate_flags_and_reports(self):
+        from iabot.validation import validate
+        base = _trading_snapshot()
+        snaps = {}
+        for name in ("A-USDT", "B-USDT"):
+            snap = copy.deepcopy(base)
+            snap.symbol = name
+            snaps[name] = snap
+        out = validate(snaps, _cfg(), mode="intraday", folds=3,
+                       step=10, warmup=30)
+        self.assertIn("verdict", out)
+        self.assertIn("walkforward", out)
+        self.assertIn("notes", out)
+        self.assertGreater(out["walkforward"]["folds_total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,7 @@ def walk_forward(base: Snapshot, cfg: dict, *, mode: str = "swing",
 
     return {
         "ok": bool(usable_rows),
+        "symbol": base.symbol,
         "bars": n,
         "folds": rows,
         "usable_folds": len(usable_rows),
@@ -85,6 +86,7 @@ def walk_forward(base: Snapshot, cfg: dict, *, mode: str = "swing",
             "expectancy_r": round(pooled_exp, 4),
             "expectancy_ci": ([round(x, 4) for x in pooled_ci]
                               if pooled_ci else None),
+            "total_r": round(sum(pooled), 3),
             # 合并后的每笔 R：跨币汇总时要用（单个币的样本太小）
             "rs": pooled,
         },

@@ -24,6 +24,14 @@ from .signals import MODES
 from .symbols import to_contract
 from .universe import is_all_token, merge_spec, select
 
+# 组合验证的默认标的：主流、流动性够、历史长度够（新币历史太短会拖累折数）
+VALIDATE_SYMBOLS = (
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT",
+    "ADA-USDT", "LINK-USDT", "AVAX-USDT", "DOT-USDT", "LTC-USDT",
+    "UNI-USDT", "ATOM-USDT", "NEAR-USDT", "APT-USDT", "ARB-USDT",
+    "OP-USDT", "SUI-USDT", "TIA-USDT", "FIL-USDT", "TRX-USDT",
+)
+
 # --------------------------------------------------------------------------
 # 纯文本输出
 # --------------------------------------------------------------------------
@@ -538,6 +546,67 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_validate(args) -> int:
+    """整段回测 + 折间一致性 + 收益集中度，三件事一起给结论。
+
+    这三个问题单看一个都会被骗：
+    - 整段期望为正，可能只来自某一段行情（所以要看折间一致性）
+    - 每折都还行，可能只是靠一两个币（所以要看集中度）
+    - 点估计为正，可能分不清 edge 和噪声（所以要看置信区间）
+    """
+    from .validation import validate
+    cfg = load_config()
+    adv = Advisor(cfg)
+    syms = [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
+    if not syms:
+        syms = list(VALIDATE_SYMBOLS)
+    snaps = {}
+    for s in syms:
+        sym = to_contract(s)
+        try:
+            snaps[sym] = adv.client.snapshot(sym, with_depth=False)
+        except Exception as exc:
+            print(f"  跳过 {sym}: {type(exc).__name__}", file=sys.stderr)
+    if not snaps:
+        print("没有拿到任何行情", file=sys.stderr)
+        return 2
+    out = validate(snaps, cfg, mode=args.mode, folds=args.folds, step=args.step,
+                   warmup=args.warmup)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    full = out["full"]
+    p = full["pooled"]
+    wf = out["walkforward"]
+    print("=" * 74)
+    print(f"  组合验证 | {args.mode} | {full['usable_symbols']}/{full['symbols']} 个标的"
+          f" | {args.folds} 折")
+    print(f"  {'标的':<12}{'单数':>6}{'期望R':>10}{'胜率':>8}{'总R':>10}")
+    for r in sorted(full["rows"], key=lambda x: -x["total_r"]):
+        if r["insufficient_data"]:
+            print(f"  {r['symbol']:<12}{'数据不足':>6}  {r['missing_periods']}")
+            continue
+        print(f"  {r['symbol']:<12}{r['trades']:>6}{r['expectancy_r']:>+10.3f}"
+              f"{r['win_rate']*100:>7.1f}%{r['total_r']:>+10.2f}")
+    ci = p["expectancy_ci"]
+    print(f"  合并        : {p['trades']} 笔  胜率 {p['win_rate']*100:.1f}%"
+          f"  期望 {p['expectancy_r']:+.4f}R"
+          + (f"  95%区间 [{ci[0]:+.3f},{ci[1]:+.3f}]" if ci else "  （样本不足）"))
+    print(f"  折间一致性  : 正收益折 {wf['folds_positive']}/{wf['folds_total']}"
+          f"（{wf['folds_positive_frac']*100:.0f}%）"
+          f"  合并 {wf['expectancy_r']:+.4f}R")
+    conc = out["concentration"]
+    if conc["positive_symbols"]:
+        print(f"  收益集中度  : {conc['positive_symbols']} 个赚钱标的，"
+              f"前 {len(conc['top_symbols'])} 个占正 R 的 {conc['top_share']*100:.0f}%"
+              f"（{'、'.join(conc['top_symbols'])}）")
+    for n in out["notes"]:
+        print(f"  ! {n}")
+    print(f"  结论        : {out['verdict']}")
+    print("=" * 74)
+    return 0
+
+
 def cmd_watch(args) -> int:
     """终端监控模式：循环扫描关注列表，信号变化时提示，并刷新模拟仓浮盈。
 
@@ -792,7 +861,7 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
-            "backup", "watch", "notify-test")
+            "backup", "watch", "notify-test", "validate")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -871,6 +940,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_bk.add_argument("--save", action="store_true",
                       help="把本次回测的参数与结果写入实验记录（可事后复现/对比）")
 
+    p_vd = sub.add_parser(
+        "validate",
+        help="组合验证：整段期望 + 折间一致性 + 收益集中度，三件事一起看")
+    p_vd.add_argument("--mode", choices=list(MODES), default=DEFAULT_MODE)
+    p_vd.add_argument("--folds", type=int, default=5, help="走动检验切几折（默认 5）")
+    p_vd.add_argument("--step", type=int, default=10, help="建仓点间隔（默认 10）")
+    p_vd.add_argument("--warmup", type=int, default=60, help="指标预热根数（默认 60）")
+    p_vd.add_argument("--symbols", help="逗号分隔的标的列表（默认内置 20 个主流币）")
+    p_vd.add_argument("--json", action="store_true", help="输出原始 JSON")
+
     p_bl = sub.add_parser("backtests", help="列出历史回测记录")
     p_bl.add_argument("--symbol", help="按合约过滤，如 BTC-USDT")
     p_bl.add_argument("--mode", choices=list(MODES), help="按模式过滤")
@@ -917,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(args)
     if args.cmd == "backtest":
         return cmd_backtest(args)
+    if args.cmd == "validate":
+        return cmd_validate(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "backtests":
