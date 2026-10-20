@@ -15,7 +15,85 @@
 
 from __future__ import annotations
 
+import math
+
 from .backtest import _bootstrap_mean_ci
+from .market import Snapshot
+
+
+def _daily_returns(snap: Snapshot, window: int) -> dict[float, float]:
+    """日线对数收益，按 ts 索引。取最近 window 根日线。"""
+    rows = snap.klines.get("1day") or []
+    if len(rows) < 3:
+        return {}
+    out: dict[float, float] = {}
+    for i in range(1, len(rows)):
+        prev, cur = rows[i - 1].close, rows[i].close
+        if prev <= 0 or cur <= 0:
+            continue
+        out[float(rows[i].ts)] = math.log(cur / prev)
+    if len(out) > window:
+        keys = sorted(out)[-window:]
+        out = {k: out[k] for k in keys}
+    return out
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    n = len(xs)
+    if n < 3:
+        return 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0 or syy <= 0:
+        return 0.0
+    return sxy / math.sqrt(sxx * syy)
+
+
+def cluster_symbols(snapshots: dict[str, Snapshot], *, threshold: float = 0.7,
+                    window: int = 90) -> dict[str, int]:
+    """按日线收益相关性把标的聚成簇。
+
+    用并查集：相关性 >= threshold 的两个标的合并，最后连通分量就是簇。
+    阈值 0.7 大致对应"大部分时间同涨同跌"——山寨币之间普遍 0.8~0.95，
+    BTC 与主流币之间 0.6~0.85，BTC 与某些山寨 0.4~0.6。
+    """
+    rets = {sym: _daily_returns(snap, window) for sym, snap in snapshots.items()}
+    syms = sorted(rets)
+    parent = {s: s for s in syms}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i, a in enumerate(syms):
+        for b in syms[i + 1:]:
+            ra, rb = rets[a], rets[b]
+            common = sorted(set(ra) & set(rb))
+            if len(common) < 20:
+                continue
+            xs = [ra[t] for t in common]
+            ys = [rb[t] for t in common]
+            if _pearson(xs, ys) >= threshold:
+                union(a, b)
+
+    groups: dict[str, int] = {}
+    out: dict[str, int] = {}
+    for s in syms:
+        root = find(s)
+        if root not in groups:
+            groups[root] = len(groups)
+        out[s] = groups[root]
+    return out
 
 
 def _max_drawdown(curve: list[float]) -> tuple[float, float]:
@@ -36,7 +114,9 @@ def _max_drawdown(curve: list[float]) -> tuple[float, float]:
 
 def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
                        risk_pct: float = 2.0, max_concurrent: int = 5,
-                       compound: bool = True) -> dict:
+                       compound: bool = True, max_heat_pct: float | None = None,
+                       clusters: dict[str, int] | None = None,
+                       max_per_cluster: int | None = None) -> dict:
     """按时间顺序模拟一个账户做这批交易。
 
     trade_logs: 各标的 backtest().trade_log 合并后的列表。每笔需要
@@ -44,8 +124,12 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
     max_concurrent: 同时最多持有几个仓位（<=0 表示不限制）。
     compound: True = 每笔风险按当前权益的 risk_pct 计算（复利）；False = 固定
               用初始权益算（与单币回测的口径一致，便于对照）。
+    max_heat_pct: 组合热度上限（所有未平仓仓位的风险金额之和占权益的 %）。
+                 比"最多几个仓"更准：不同币的止损宽度不同，风险金额并不相等。
+    clusters / max_per_cluster: 相关性簇限制。同一个簇（如"山寨币"）里最多
+                 同时持有几个仓位——它们一起涨跌，五个仓约等于一个 5 倍仓位。
 
-    并发已满时**跳过**该入场（保守：不缩小仓位，直接不做）。
+    触发任一上限时**跳过**该入场（保守：不缩小仓位，直接不做）。
     """
     logs = [t for t in trade_logs if t.get("entry_ts") is not None]
     logs.sort(key=lambda t: (t["entry_ts"], t.get("symbol") or ""))
@@ -55,6 +139,8 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
     curve: list[float] = [cash]
     taken_rs: list[float] = []
     skipped_capacity = 0
+    skipped_heat = 0
+    skipped_cluster = 0
     skipped_no_exit = 0
 
     def settle(until_ts: float) -> None:
@@ -77,12 +163,29 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
             skipped_capacity += 1
             continue
         base_equity = cash if compound else float(equity)
+        risk_amount = base_equity * risk_pct / 100.0
+        # 热度：所有未平仓仓位的风险金额之和不能超过权益的这个比例
+        if max_heat_pct:
+            heat = sum(p["risk_amount"] for p in open_positions)
+            if (heat + risk_amount) > base_equity * max_heat_pct / 100.0:
+                skipped_heat += 1
+                continue
+        # 相关性簇：同一簇里最多持有几个
+        if clusters and max_per_cluster:
+            sym = t.get("symbol") or ""
+            cid = clusters.get(sym)
+            if cid is not None:
+                same = sum(1 for p in open_positions
+                           if clusters.get(p["symbol"]) == cid)
+                if same >= max_per_cluster:
+                    skipped_cluster += 1
+                    continue
         r = float(t.get("r") or 0.0)
         open_positions.append({
             "exit_ts": t["exit_ts"],
             "r": r,
             "symbol": t.get("symbol") or "",
-            "risk_amount": base_equity * risk_pct / 100.0,
+            "risk_amount": risk_amount,
         })
         taken_rs.append(r)
 
@@ -96,8 +199,12 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
         "signals": len(logs),
         "taken": len(taken_rs),
         "skipped_capacity": skipped_capacity,
+        "skipped_heat": skipped_heat,
+        "skipped_cluster": skipped_cluster,
         "skipped_no_exit": skipped_no_exit,
         "max_concurrent": max_concurrent,
+        "max_heat_pct": max_heat_pct,
+        "max_per_cluster": max_per_cluster,
         "equity_start": round(equity, 2),
         "equity_end": round(cash, 2),
         "total_return_pct": round(total_return * 100, 2),

@@ -571,7 +571,9 @@ def cmd_validate(args) -> int:
         print("没有拿到任何行情", file=sys.stderr)
         return 2
     out = validate(snaps, cfg, mode=args.mode, folds=args.folds, step=args.step,
-                   warmup=args.warmup, max_concurrent=args.max_concurrent)
+                   warmup=args.warmup, max_concurrent=args.max_concurrent,
+                   max_heat_pct=args.max_heat_pct,
+                   max_per_cluster=args.max_per_cluster)
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
@@ -952,8 +954,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_vd.add_argument("--folds", type=int, default=5, help="走动检验切几折（默认 5）")
     p_vd.add_argument("--step", type=int, default=10, help="建仓点间隔（默认 10）")
     p_vd.add_argument("--warmup", type=int, default=60, help="指标预热根数（默认 60）")
-    p_vd.add_argument("--max-concurrent", type=int, default=5, dest="max_concurrent",
-                      help="组合模拟里同时最多持有几个仓位（默认 5，<=0 不限制）")
+    p_vd.add_argument("--max-concurrent", type=int, default=8, dest="max_concurrent",
+                      help="组合模拟里同时最多持有几个仓位（默认 8，<=0 不限制）。"
+                           "实测单纯限仓位数（如 5）会让回撤高达 49%，"
+                           "限总热度 + 限同簇才是对的")
+    p_vd.add_argument("--max-heat", type=float, dest="max_heat_pct", default=12.0,
+                      help="组合热度上限：未平仓风险之和占权益 %（默认 12）")
+    p_vd.add_argument("--max-per-cluster", type=int, dest="max_per_cluster",
+                      default=3, help="同一相关性簇里最多同时持有几个仓（默认 3）")
     p_vd.add_argument("--symbols", help="逗号分隔的标的列表（默认内置 20 个主流币）")
     p_vd.add_argument("--json", action="store_true", help="输出原始 JSON")
 

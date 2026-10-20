@@ -597,6 +597,103 @@ class TestPortfolioBacktest(unittest.TestCase):
         self.assertIn("r", t0)
         self.assertGreaterEqual(t0["exit_ts"], t0["entry_ts"])
 
+    # ---- 热度上限 ----
+    def test_heat_cap_blocks_over_hot_entry(self):
+        from iabot.portfolio import portfolio_backtest
+        # 上限 4%：前两笔 2%+2% 已经打满，第三笔被挡
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B"),
+                self._log(0, 100, 1.0, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=10, max_heat_pct=4.0)
+        self.assertEqual(out["taken"], 2)
+        self.assertEqual(out["skipped_heat"], 1)
+
+    def test_heat_cap_releases_after_exit(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 10, 1.0, "A"), self._log(0, 10, 1.0, "B"),
+                self._log(20, 30, 1.0, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=10, max_heat_pct=4.0)
+        self.assertEqual(out["taken"], 3)
+        self.assertEqual(out["skipped_heat"], 0)
+
+    # ---- 相关性簇上限 ----
+    def test_cluster_cap_blocks_same_cluster(self):
+        from iabot.portfolio import portfolio_backtest
+        # 同簇 3 个笔只许 2 个同时在
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B"),
+                self._log(0, 100, 1.0, "C")]
+        clusters = {"A": 0, "B": 0, "C": 0}
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=10, max_per_cluster=2,
+                                 clusters=clusters)
+        self.assertEqual(out["taken"], 2)
+        self.assertEqual(out["skipped_cluster"], 1)
+
+    def test_cluster_cap_allows_other_cluster(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B")]
+        clusters = {"A": 0, "B": 1}
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=10, max_per_cluster=1,
+                                 clusters=clusters)
+        self.assertEqual(out["taken"], 2)
+        self.assertEqual(out["skipped_cluster"], 0)
+
+    def test_unclustered_symbols_not_capped(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "Z")]
+        clusters = {"A": 0}                      # Z 无簇：不应被挡
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=10, max_per_cluster=1,
+                                 clusters=clusters)
+        self.assertEqual(out["taken"], 2)
+
+
+class TestClustering(unittest.TestCase):
+    """相关性聚类：同涨同跌的币应该被分到同一个簇。"""
+
+    def test_identical_series_cluster_together(self):
+        from iabot.portfolio import cluster_symbols
+        base = _trading_snapshot()
+        snaps = {}
+        for name in ("A-USDT", "B-USDT"):
+            s = copy.deepcopy(base)
+            s.symbol = name
+            snaps[name] = s                      # 完全相同的走势
+        out = cluster_symbols(snaps, threshold=0.7, window=90)
+        self.assertEqual(out["A-USDT"], out["B-USDT"])
+
+    def test_uncorrelated_series_separate(self):
+        from iabot.portfolio import cluster_symbols
+        from iabot.market import Candle, Snapshot
+        import random
+
+        def mk(sym, seed):
+            rnd = random.Random(seed)
+            closes = [100.0]
+            for _ in range(200):
+                closes.append(closes[-1] * (1 + rnd.uniform(-0.03, 0.03)))
+            k = [Candle(ts=1700000000 + i * 86400, open=c, high=c, low=c,
+                        close=c, volume=1.0) for i, c in enumerate(closes)]
+            return Snapshot(symbol=sym, price=closes[-1], klines={"1day": k})
+
+        out = cluster_symbols({"A-USDT": mk("A-USDT", 1),
+                              "B-USDT": mk("B-USDT", 2)},
+                             threshold=0.7, window=90)
+        self.assertNotEqual(out["A-USDT"], out["B-USDT"])
+
+    def test_short_history_is_left_unclustered(self):
+        from iabot.portfolio import cluster_symbols
+        from iabot.market import Candle, Snapshot
+        k = [Candle(ts=1700000000 + i * 86400, open=100, high=100, low=100,
+                    close=100, volume=1.0) for i in range(5)]
+        snaps = {"A-USDT": Snapshot(symbol="A-USDT", price=100,
+                                    klines={"1day": k})}
+        out = cluster_symbols(snaps)
+        # 数据太短仍然会给出簇号（单元素连通分量），关键是不报错
+        self.assertIn("A-USDT", out)
+
 
 if __name__ == "__main__":
     unittest.main()

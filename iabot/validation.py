@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from .backtest import _bootstrap_mean_ci, backtest
 from .market import Snapshot
-from .portfolio import portfolio_backtest
+from .portfolio import cluster_symbols, portfolio_backtest
 from .walkforward import aggregate, walk_forward
 
 # 集中度警戒线：正 R 的贡献里，前 N 个币占比超过这个比例就报"收益集中"
@@ -120,7 +120,10 @@ def multi_backtest(snapshots: dict[str, Snapshot], cfg: dict, *,
 
 def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              mode: str = "swing", folds: int = 5, step: int = 10,
-             warmup: int = 60, max_concurrent: int = 5) -> dict:
+             warmup: int = 60, max_concurrent: int = 5,
+             max_heat_pct: float | None = None,
+             max_per_cluster: int | None = None,
+             corr_threshold: float = 0.7) -> dict:
     """完整验证：整段回测 + 折间一致性 + 集中度 + 组合模拟，一起给结论。
 
     整段正期望只说明"历史上总体是赚的"；折间一致性说明"不是靠某一段行情"；
@@ -138,11 +141,15 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         for r in wf_rows if r.get("ok")
     ])
     acc = cfg.get("account") or {}
+    clusters = cluster_symbols(snapshots, threshold=corr_threshold)
     port = portfolio_backtest(
         full.get("trade_logs") or [],
         equity=float(acc.get("equity_usdt") or 450.0),
         risk_pct=float(acc.get("risk_pct_per_trade") or 2.0),
-        max_concurrent=max_concurrent)
+        max_concurrent=max_concurrent,
+        max_heat_pct=max_heat_pct,
+        clusters=clusters,
+        max_per_cluster=max_per_cluster)
     conc = full["concentration"]
     p = full["pooled"]
     notes: list[str] = []
@@ -164,6 +171,12 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         pct = port["skipped_capacity"] / max(1, port["signals"]) * 100
         notes.append(f"并发上限 {max_concurrent} 挡掉了 {port['skipped_capacity']} "
                      f"笔（{pct:.0f}%）：单笔期望不等于组合能拿到的收益")
+    if port.get("skipped_heat"):
+        notes.append(f"组合热度上限挡掉 {port['skipped_heat']} 笔："
+                     f"未平仓仓位的风险总额超出上限")
+    if port.get("skipped_cluster"):
+        notes.append(f"相关性簇限制挡掉 {port['skipped_cluster']} 笔："
+                     f"同一簇里最多同时持有 {max_per_cluster} 个仓")
     if port["max_drawdown_pct"] >= 30:
         notes.append(f"组合最大回撤 {port['max_drawdown_pct']:.0f}%："
                      f"单笔风险 {port['expectancy_r']:+.3f}R 掩盖了这个尾部")
@@ -173,6 +186,7 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         "walkforward": wf,
         "concentration": conc,
         "walkforward_concentration": wf_conc,
+        "clusters": clusters,
         "portfolio": {k: v for k, v in port.items() if k != "equity_curve"},
         "notes": notes,
         "verdict": "通过" if not notes else "有保留",
