@@ -97,6 +97,10 @@ DEFAULTS: dict[str, Any] = {
             "max_spread_bps": 20.0,
             "enforce": False,
         },
+        # 多空不对称风险：空单在历史上两个方向都赚钱，多单只在上涨市赚钱。
+        # 1.0 = 不调整（默认）；调大 = 该方向单笔风险按倍数放大。
+        "risk_mult_long": 1.0,
+        "risk_mult_short": 1.0,
         # 第二道闸门：目标位盈亏比。默认 tp1 = 只看第一目标（实际最先命中的那档）。
         # 回测过 weighted(0.5/0.3/0.2) 与 max，与 tp1 差异在噪声内，故保持 tp1。
         # 目标位筛选门槛：低于此盈亏比的目标位不作为 TP 候选。
@@ -326,6 +330,11 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
             lc.get("max_spread_bps"), "analysis.liquidity.max_spread_bps",
             0.0, 10000.0, DEFAULT_MAX_SPREAD_BPS)
         lc["enforce"] = bool(lc.get("enforce", False))
+
+    an["risk_mult_long"] = _coerce_num(
+        an.get("risk_mult_long"), "analysis.risk_mult_long", 0.1, 3.0, 1.0)
+    an["risk_mult_short"] = _coerce_num(
+        an.get("risk_mult_short"), "analysis.risk_mult_short", 0.1, 3.0, 1.0)
 
     gc = an.get("gate")
     if not isinstance(gc, dict):

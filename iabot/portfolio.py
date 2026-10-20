@@ -116,7 +116,8 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
                        risk_pct: float = 2.0, max_concurrent: int = 5,
                        compound: bool = True, max_heat_pct: float | None = None,
                        clusters: dict[str, int] | None = None,
-                       max_per_cluster: int | None = None) -> dict:
+                       max_per_cluster: int | None = None,
+                       direction_mults: dict[str, float] | None = None) -> dict:
     """按时间顺序模拟一个账户做这批交易。
 
     trade_logs: 各标的 backtest().trade_log 合并后的列表。每笔需要
@@ -163,7 +164,11 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
             skipped_capacity += 1
             continue
         base_equity = cash if compound else float(equity)
-        risk_amount = base_equity * risk_pct / 100.0
+        # 多空不对称：按方向给不同的单笔风险（R 保持不变，改的是下注金额）。
+        mult = 1.0
+        if direction_mults:
+            mult = float(direction_mults.get(t.get("direction") or "", 1.0) or 1.0)
+        risk_amount = base_equity * risk_pct / 100.0 * mult
         # 热度：所有未平仓仓位的风险金额之和不能超过权益的这个比例
         if max_heat_pct:
             heat = sum(p["risk_amount"] for p in open_positions)
@@ -205,6 +210,7 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
         "max_concurrent": max_concurrent,
         "max_heat_pct": max_heat_pct,
         "max_per_cluster": max_per_cluster,
+        "direction_mults": dict(direction_mults or {}),
         "equity_start": round(equity, 2),
         "equity_end": round(cash, 2),
         "total_return_pct": round(total_return * 100, 2),

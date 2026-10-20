@@ -167,6 +167,10 @@ class Plan:
     price: float | None = None
     generated_at: float = 0.0
     profile: str = ""
+    # 多空不对称风险倍数：完整历史上空单在两个方向都赚钱、多单只在上涨市
+    # 赚钱，所以允许给空单更大的单笔风险（默认 1.0 = 不调整，安全起见）。
+    risk_mult_long: float = 1.0
+    risk_mult_short: float = 1.0
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "factors"}
@@ -1041,6 +1045,9 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     plan = Plan(symbol=snap.symbol, mode=mode, price=snap.price, generated_at=_time.time())
     # 记录当前生效的参数方案（若有），胜率统计按方案分组时用
     plan.profile = cfg.get("active_profile") or ""
+    _an = cfg.get("analysis") or {}
+    plan.risk_mult_long = float(_an.get("risk_mult_long") or 1.0)
+    plan.risk_mult_short = float(_an.get("risk_mult_short") or 1.0)
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
@@ -1376,7 +1383,15 @@ def _attach_sizing(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
         return
 
     cs = snap.contract_size or 0.001
-    risk_amount = equity * risk_pct / 100.0
+    # 多空不对称：空单在历史上两个方向都赚钱，多单只在上涨市赚钱，
+    # 所以允许按方向给不同的单笔风险。默认两边都是 1.0（不改变原行为）。
+    if plan.direction == "long":
+        mult = float(getattr(plan, "risk_mult_long", 1.0) or 1.0)
+    elif plan.direction == "short":
+        mult = float(getattr(plan, "risk_mult_short", 1.0) or 1.0)
+    else:
+        mult = 1.0
+    risk_amount = equity * risk_pct / 100.0 * mult
     contracts = max(1.0, math.floor(risk_amount / (stop_dist * cs)))
     notional = contracts * cs * mid
     margin = notional / leverage
@@ -1418,6 +1433,8 @@ def _attach_sizing(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
         "applicable": True,
         "equity_usdt": equity,
         "risk_pct": risk_pct,
+        "risk_mult": round(mult, 3),
+        "risk_pct_effective": round(risk_pct * mult, 3),
         "risk_amount_usdt": round(risk_amount, 2),
         "contracts": int(contracts),
         "contract_size": cs,

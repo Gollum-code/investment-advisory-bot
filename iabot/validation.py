@@ -123,7 +123,9 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              warmup: int = 60, max_concurrent: int = 5,
              max_heat_pct: float | None = None,
              max_per_cluster: int | None = None,
-             corr_threshold: float = 0.7) -> dict:
+             corr_threshold: float = 0.7,
+             risk_mult_long: float | None = None,
+             risk_mult_short: float | None = None) -> dict:
     """完整验证：整段回测 + 折间一致性 + 集中度 + 组合模拟，一起给结论。
 
     整段正期望只说明"历史上总体是赚的"；折间一致性说明"不是靠某一段行情"；
@@ -142,6 +144,11 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
     ])
     acc = cfg.get("account") or {}
     clusters = cluster_symbols(snapshots, threshold=corr_threshold)
+    an = cfg.get("analysis") or {}
+    ml = float(risk_mult_long if risk_mult_long is not None
+               else (an.get("risk_mult_long") or 1.0))
+    ms = float(risk_mult_short if risk_mult_short is not None
+               else (an.get("risk_mult_short") or 1.0))
     port = portfolio_backtest(
         full.get("trade_logs") or [],
         equity=float(acc.get("equity_usdt") or 450.0),
@@ -149,7 +156,8 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         max_concurrent=max_concurrent,
         max_heat_pct=max_heat_pct,
         clusters=clusters,
-        max_per_cluster=max_per_cluster)
+        max_per_cluster=max_per_cluster,
+        direction_mults={"long": ml, "short": ms})
     conc = full["concentration"]
     p = full["pooled"]
     notes: list[str] = []

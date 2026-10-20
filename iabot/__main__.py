@@ -573,7 +573,9 @@ def cmd_validate(args) -> int:
     out = validate(snaps, cfg, mode=args.mode, folds=args.folds, step=args.step,
                    warmup=args.warmup, max_concurrent=args.max_concurrent,
                    max_heat_pct=args.max_heat_pct,
-                   max_per_cluster=args.max_per_cluster)
+                   max_per_cluster=args.max_per_cluster,
+                   risk_mult_long=args.risk_mult_long,
+                   risk_mult_short=args.risk_mult_short)
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
@@ -962,6 +964,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="组合热度上限：未平仓风险之和占权益 %（默认 12）")
     p_vd.add_argument("--max-per-cluster", type=int, dest="max_per_cluster",
                       default=3, help="同一相关性簇里最多同时持有几个仓（默认 3）")
+    p_vd.add_argument("--risk-mult-long", type=float, dest="risk_mult_long",
+                      default=None, help="多单风险倍数（默认取配置）")
+    p_vd.add_argument("--risk-mult-short", type=float, dest="risk_mult_short",
+                      default=None, help="空单风险倍数（默认取配置）")
     p_vd.add_argument("--symbols", help="逗号分隔的标的列表（默认内置 20 个主流币）")
     p_vd.add_argument("--json", action="store_true", help="输出原始 JSON")
 
