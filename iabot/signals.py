@@ -21,6 +21,7 @@ from .config import DEFAULT_MODE
 from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
                      orderbook_walls, price_ladder, round_number_levels,
                      swing_points, top_volume_nodes)
+from .liquidity import assess as assess_liquidity
 from .market import Snapshot, bars_per_year
 from .risk import liquidation_price, safe_max_leverage, stop_is_effective
 
@@ -1091,6 +1092,26 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
         "change_24h_pct": round(snap.change_24h_pct, 2) if snap.change_24h_pct is not None else None,
         "basis_pct": round(snap.basis_pct, 4) if snap.basis_pct is not None else None,
     }
+
+    # 流动性体检：成交额 / 买卖价差。滑点模型假设的 2bps 在薄合约上根本不
+    # 成立，所以先把"这个合约能不能做得进"单独说清楚；enforce 开启时直接拦。
+    liq = assess_liquidity(snap, cfg)
+    plan.market["liquidity"] = liq
+    if liq["reasons"]:
+        plan.warnings.append("；".join(liq["reasons"]))
+        if liq["enforce"]:
+            _attach_sizing(plan, snap, equity, risk_pct, leverage,
+                           max_margin_pct, atr_v)
+            plan.direction = "wait"
+            plan.confidence = "低"
+            plan.confidence_score = 0.0
+            plan.entry_note = "流动性不足，本单不做（analysis.liquidity.enforce 已开启）。"
+            plan.state_gate = {
+                "liquidity": True,
+                "reasons": list(liq["reasons"]),
+                "reason": "成交额或买卖价差不达标，实盘进出都会滑。",
+            }
+            return plan
 
     if not atr_v:
         plan.direction = "wait"

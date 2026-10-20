@@ -26,6 +26,9 @@ REST_BASES = [
 # 的入口（定时任务、CLI、网页 API、参数方案）都回落到这里，避免再把用户
 # 默认带进一个亏钱的模式。
 DEFAULT_MODE = "swing"
+# 流动性体检的默认阈值（唯一出处，liquidity.py 从这里读）
+DEFAULT_MIN_TURNOVER = 5_000_000.0   # 24h 成交额下限（U）
+DEFAULT_MAX_SPREAD_BPS = 20.0       # 买卖价差上限（0.2%）
 
 # 能被定时任务/参数方案带进实盘扫描的模式白名单。
 # 与 config.validate_config 里对 schedule.mode 的钳制必须是同一个集合——
@@ -87,6 +90,13 @@ DEFAULTS: dict[str, Any] = {
         "factor_weights": {},
         # 多周期共振因子（可选第 11 因子，默认关闭）：日线偏置 × 1h 偏置，
         "resonance": {"enabled": False, "weight": 0.06},
+        # 流动性体检：24h 成交额下限 + 买卖价差上限。
+        # enforce=true 时不达标的合约直接降级为观望（默认只警告不拦）。
+        "liquidity": {
+            "min_turnover_24h": 5_000_000.0,
+            "max_spread_bps": 20.0,
+            "enforce": False,
+        },
         # 第二道闸门：目标位盈亏比。默认 tp1 = 只看第一目标（实际最先命中的那档）。
         # 回测过 weighted(0.5/0.3/0.2) 与 max，与 tp1 差异在噪声内，故保持 tp1。
         # 目标位筛选门槛：低于此盈亏比的目标位不作为 TP 候选。
@@ -300,12 +310,22 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         print("[config] analysis.factor_weights 不是字典，已重置为空")
         an["factor_weights"] = {}
     rc = an.get("resonance")
-    if not isinstance(rc, dict):
-        an["resonance"] = {"enabled": False, "weight": 0.06}
+    if not isinstance(rc, dict):        an["resonance"] = {"enabled": False, "weight": 0.06}
     else:
         rc["enabled"] = bool(rc.get("enabled", False))
         rc["weight"] = _coerce_num(rc.get("weight"), "analysis.resonance.weight",
                                    0.0, 1.0, 0.06)
+    lc = an.get("liquidity")
+    if not isinstance(lc, dict):
+        an["liquidity"] = copy.deepcopy(DEFAULTS["analysis"]["liquidity"])
+    else:
+        lc["min_turnover_24h"] = _coerce_num(
+            lc.get("min_turnover_24h"), "analysis.liquidity.min_turnover_24h",
+            0.0, 1e12, DEFAULT_MIN_TURNOVER)
+        lc["max_spread_bps"] = _coerce_num(
+            lc.get("max_spread_bps"), "analysis.liquidity.max_spread_bps",
+            0.0, 10000.0, DEFAULT_MAX_SPREAD_BPS)
+        lc["enforce"] = bool(lc.get("enforce", False))
 
     gc = an.get("gate")
     if not isinstance(gc, dict):
