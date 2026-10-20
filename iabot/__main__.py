@@ -17,6 +17,7 @@ import time
 import webbrowser
 
 from . import __version__, netutil
+from . import snapcache
 from .advisor import Advisor
 from .config import DEFAULT_MODE, ensure_example, load_config
 from .server import build_server, make_app
@@ -562,10 +563,21 @@ def cmd_validate(args) -> int:
     if not syms:
         syms = list(VALIDATE_SYMBOLS)
     snaps = {}
+    hits = 0
     for s in syms:
         sym = to_contract(s)
         try:
-            snaps[sym] = adv.client.snapshot(sym, with_depth=False)
+            if args.refresh:
+                snaps[sym] = adv.client.snapshot(sym, with_depth=False)
+            else:
+                got = snapcache.get_or_fetch(
+                    lambda sym=sym: adv.client.snapshot(sym, with_depth=False),
+                    sym, cache_dir=args.cache_dir, ttl_sec=args.cache_ttl)
+                if got is None:
+                    print(f"  跳过 {sym}: 缓存未命中且抓取失败", file=sys.stderr)
+                    continue
+                hits += 1
+                snaps[sym] = got
         except Exception as exc:
             print(f"  跳过 {sym}: {type(exc).__name__}", file=sys.stderr)
     if not snaps:
@@ -1021,7 +1033,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help="取多少根主周期 K 线做历史（日内 15min / 波段 1day）。"
                            "接口上限 2000；低于 500 的样本不足以判断策略好坏")
     p_bk.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置，用于金额换算）")
-    p_bk.add_argument("--risk", type=float, help="单笔风险 %（默认取配置，用于金额换算）")
+    p_bk.add_argument("--risk", type=float, help="单笔风险 %%（默认取配置，用于金额换算）")
     p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")
     p_bk.add_argument("--wf", type=int, metavar="FOLDS", default=0,
                       help="改为走动样本外检验：把历史切 FOLDS 段逐段回测"
@@ -1039,16 +1051,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_vd.add_argument("--warmup", type=int, default=60, help="指标预热根数（默认 60）")
     p_vd.add_argument("--max-concurrent", type=int, default=8, dest="max_concurrent",
                       help="组合模拟里同时最多持有几个仓位（默认 8，<=0 不限制）。"
-                           "实测单纯限仓位数（如 5）会让回撤高达 49%，"
+                           "实测单纯限仓位数（如 5）会让回撤高达 49%%，"
                            "限总热度 + 限同簇才是对的")
     p_vd.add_argument("--max-heat", type=float, dest="max_heat_pct", default=12.0,
-                      help="组合热度上限：未平仓风险之和占权益 %（默认 12）")
+                      help="组合热度上限：未平仓风险之和占权益 %%（默认 12）")
     p_vd.add_argument("--max-per-cluster", type=int, dest="max_per_cluster",
                       default=3, help="同一相关性簇里最多同时持有几个仓（默认 3）")
     p_vd.add_argument("--risk-mult-long", type=float, dest="risk_mult_long",
                       default=None, help="多单风险倍数（默认取配置）")
     p_vd.add_argument("--risk-mult-short", type=float, dest="risk_mult_short",
                       default=None, help="空单风险倍数（默认取配置）")
+    p_vd.add_argument("--refresh", action="store_true",
+                      help="忽略本地快照缓存，强制重新抓取")
+    p_vd.add_argument("--cache-ttl", type=float, dest="cache_ttl", default=1800.0,
+                      help="本地快照缓存有效期秒数（默认 1800；<=0 表示永不过期）")
+    p_vd.add_argument("--cache-dir", dest="cache_dir", default=None,
+                      help="快照缓存目录（默认 data/snapcache）")
 
     p_sh = sub.add_parser(
         "shadow",
