@@ -709,23 +709,55 @@ busy: false,
   }
 
   // ---------------------------------------------------------------- 因子
+  // 因子瀑布：把"评分 = 各项贡献之和"这件事直接画出来。
+  // 之前只列了每项的得分/权重/贡献，用户还得自己累加猜总分；
+  // 现在瀑布图按贡献从大到小堆叠，一眼看出是谁把分数推到阈值那边去的。
   function renderFactors(plan) {
     const el = $('factors');
     const fs = (plan && plan.factors) || [];
     if (!fs.length) { el.innerHTML = '<div class="empty">暂无因子数据。</div>'; return; }
     $('factor-hint').textContent = '加权 ' + fs.length + ' 项，贡献 = 得分 × 权重';
-    el.innerHTML = fs.map((f) => {
+    const sorted = fs.slice().sort((a, b) =>
+      Math.abs(b.contribution || 0) - Math.abs(a.contribution || 0));
+    const total = sorted.reduce((s, f) => s + (f.contribution || 0), 0);
+    const score = (plan && plan.score) || 0;
+    const thr = plan && plan.market && plan.market.threshold;
+    const peak = Math.max(...sorted.map((f) => Math.abs(f.contribution || 0)), 0.0001);
+    // 0 线在瀑布中间：正向贡献往右、负向往左，同一根柱子上并排
+    const bar = (f) => {
+      const c = f.contribution || 0;
+      const w = Math.max(1.5, (Math.abs(c) / peak) * 50);
+      const left = c >= 0 ? 50 : 50 - w;
+      return '<div class="f-bar"><i class="' + (c >= 0 ? 'up' : 'dn') +
+        '" style="left:' + left.toFixed(1) + '%;width:' + w.toFixed(1) + '%"></i></div>';
+    };
+    let html = '<div class="f-waterfall">';
+    html += '<div class="fw-row fw-head"><span class="fw-k">因子</span>' +
+      '<span class="fw-v">贡献</span></div>';
+    for (const f of sorted) {
       const c = cls(f.score);
-      const w = Math.abs(f.score) * 50;
-      return '<div class="factor"><div class="f-top">' +
-        '<span class="f-label">' + esc(f.label) + '</span>' +
-        '<span class="hint">权重 ' + fmtNum(f.weight, 2) + '</span>' +
-        '<span class="f-val ' + c + '">' + signed(f.score, 2) + '</span></div>' +
-        '<div class="f-detail">' + esc(f.detail || '') + '（贡献 ' + signed(f.contribution, 3) + '）</div>' +
-        '<div class="f-bar"><i class="' + (f.score >= 0 ? 'up' : 'dn') + '" style="' +
-        (f.score >= 0 ? 'left:50%' : 'left:' + (50 - w) + '%') + ';width:' + w + '%"></i></div>' +
-        '</div>';
-    }).join('');
+      html += '<div class="fw-row"><span class="fw-k" title="' + esc(f.detail || '') +
+        '">' + esc(f.label) + '</span>' +
+        '<span class="fw-bar">' + bar(f) + '</span>' +
+        '<span class="fw-v ' + c + '">' + signed(f.contribution, 3) + '</span></div>';
+    }
+    html += '<div class="fw-row fw-total"><span class="fw-k">合计</span>' +
+      '<span class="fw-bar"></span><span class="fw-v ' + cls(total) + '">' +
+      signed(total, 3) + '</span></div>';
+    if (thr != null) {
+      html += '<div class="fw-row fw-gate"><span class="fw-k">开仓阈值 ±' +
+        fmtNum(thr, 0) + '</span><span class="fw-bar"></span>' +
+        '<span class="fw-v ' + cls(score) + '">当前 ' + signed(score, 2) + '</span></div>';
+    }
+    html += '</div>';
+    // 明细仍然保留：瀑布给"谁在推"，明细给"每项到底说了什么"
+    html += '<div class="f-detail-list">' + sorted.map((f) =>
+      '<div class="factor"><div class="f-top">' +
+      '<span class="f-label">' + esc(f.label) + '</span>' +
+      '<span class="hint">权重 ' + fmtNum(f.weight, 2) + '</span>' +
+      '<span class="f-val ' + cls(f.score) + '">' + signed(f.score, 2) + '</span></div>' +
+      '<div class="f-detail">' + esc(f.detail || '') + '</div></div>').join('') + '</div>';
+    el.innerHTML = html;
   }
 
   // ---------------------------------------------------------------- 价位阶梯
@@ -1558,8 +1590,44 @@ busy: false,
       const wr = (r.win_rate * 100).toFixed(1);
       toast('回测 ' + name, '胜率 ' + wr + '% · 期望 ' + (r.expectancy_r >= 0 ? '+' : '') +
         r.expectancy_r + ' R/笔', r.expectancy_r >= 0 ? 'ok' : 'warn', 6000);
+      showEquityCurve(r, name, $('symbol').value);
       if ($('prof-archive').checked) loadBacktests();
     } catch (err) { toast('回测失败', err.message, 'err'); }
+  }
+
+  // 权益曲线：回测结果里的 equity_curve 是"每笔之后累计的 1R 风险累计值"，
+  // 按 risk_amount_usdt 折算成金额，就能看出这条策略的资金曲线长什么样。
+  // 之前只给一个期望值，回撤多大、最长连亏多长都看不见。
+  function showEquityCurve(res, label, symbol) {
+    const el = $('bt-curve');
+    if (!el) return;
+    const curve = (res && res.equity_curve) || [];
+    const perR = (res && res.risk_amount_usdt) || 0;
+    if (curve.length < 2 || perR <= 0) {
+      el.innerHTML = '<div class="empty">交易笔数太少，画不出资金曲线。</div>';
+      return;
+    }
+    const money = curve.map((v) => v * perR);
+    const W = 900, H = 120;
+    const mn = Math.min(0, ...money), mx = Math.max(...money);
+    const rng = (mx - mn) || 1;
+    const pts = money.map((c, i) =>
+      ((i / (money.length - 1)) * W).toFixed(1) + ',' +
+      (H - ((c - mn) / rng) * (H - 8) - 4).toFixed(1)).join(' ');
+    const last = money[money.length - 1];
+    let peak = -Infinity, dd = 0;
+    money.forEach((c) => { peak = Math.max(peak, c); dd = Math.max(dd, peak - c); });
+    const zeroY = (H - ((0 - mn) / rng) * (H - 8) - 4).toFixed(1);
+    el.innerHTML = '<div class="sub-title">资金曲线 · ' + esc(label || '') + ' · ' +
+      esc(symbol || '') + '（' + money.length + ' 笔，按 1R = ' +
+      fmtNum(perR, 1) + ' U 折算）</div>' +
+      '<svg viewBox="0 0 900 ' + H + '" class="pnl-curve" xmlns="http://www.w3.org/2000/svg">' +
+      '<line x1="0" y1="' + zeroY + '" x2="900" y2="' + zeroY +
+      '" stroke="#243055" stroke-dasharray="4 4"/>' +
+      '<polyline points="' + pts + '" fill="none" stroke="' +
+      (last >= 0 ? '#22c55e' : '#ef4444') + '" stroke-width="2"/>' +
+      '<text x="4" y="14" fill="#8f9cbb" font-size="11">累计 ' +
+      fmtNum(last, 0) + ' U · 最大回撤 ' + fmtNum(dd, 0) + ' U</text></svg>';
   }
 
   async function compareProfiles() {

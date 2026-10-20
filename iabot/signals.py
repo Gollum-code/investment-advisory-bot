@@ -1093,6 +1093,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     rv = ind.realized_vol_pct(snap.closes("1day"), 30, 365) if len(snap.closes("1day")) > 31 else None
     plan.market = {
         "mode": mode, "mode_label": m["label"],
+        "threshold": threshold,
         "atr_period": m["atr_period"],
         "atr": round(atr_v, 8) if atr_v else None,
         "atr_pct": round(atr_v / price * 100, 3) if atr_v else None,

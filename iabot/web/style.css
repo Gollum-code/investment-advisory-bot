@@ -160,6 +160,23 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .f-bar i{position:absolute;top:0;bottom:0;left:50%;border-radius:3px}
 .f-bar i.up{background:var(--up)} .f-bar i.dn{background:var(--dn)}
 
+/* 因子瀑布：把"评分 = 各项贡献之和"直接画出来 */
+.fw{display:flex;flex-direction:column;gap:4px;background:#0f1830;border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+.fw-row{display:flex;align-items:center;gap:8px;font-size:12px;font-variant-numeric:tabular-nums}
+.fw-k{width:104px;flex:none;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fw-v{width:64px;flex:none;text-align:right;font-weight:700}
+.fw-v.up{color:var(--up)} .fw-v.dn{color:var(--dn)} .fw-v.flat{color:var(--dim)}
+.fw-bar{flex:1;position:relative;height:7px;background:#1c2545;border-radius:3px;overflow:hidden}
+.fw-bar i{position:absolute;top:0;bottom:0;border-radius:3px}
+.fw-bar i.up{background:var(--up)} .fw-bar i.dn{background:var(--dn)}
+.fw-head{color:var(--dim);font-size:11px;margin-bottom:2px}
+.fw-head .fw-bar{height:1px;background:transparent}
+.fw-total{border-top:1px dashed var(--line);margin-top:2px;padding-top:4px;font-weight:700}
+.fw-gate{color:var(--dim);border-top:1px dashed var(--line);margin-top:2px;padding-top:4px}
+.fw-gate .fw-k{color:var(--dim)}
+.f-detail-list{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.f-detail-list .factor{padding:6px 9px}
+
 /* 建议卡左侧色条：一眼看出方向 */
 #card-advice.dir-long{box-shadow:inset 4px 0 0 var(--up), 0 6px 20px rgba(0,0,0,.25)}
 #card-advice.dir-short{box-shadow:inset 4px 0 0 var(--dn), 0 6px 20px rgba(0,0,0,.25)}
@@ -300,6 +317,7 @@ button.tiny{padding:3px 9px;font-size:11.5px}
 .line{display:flex;align-items:center;gap:6px;margin:10px 0}
 .line .hint{margin-left:4px}
 .prof-cmp{margin-top:14px}
+.bt-curve{margin-top:14px}
 .chk{margin:0;display:inline-flex;align-items:center;gap:5px}
 .bt-list{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto}
 .bt-row{display:flex;justify-content:space-between;align-items:center;gap:12px;
