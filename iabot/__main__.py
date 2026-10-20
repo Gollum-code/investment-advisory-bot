@@ -617,6 +617,83 @@ def cmd_validate(args) -> int:
     return 0
 
 
+def cmd_shadow(args) -> int:
+    """影子账户：把当前信号按多个方案各记一份，只记录不下单。"""
+    from .shadow import record
+    cfg = load_config()
+    adv = Advisor(cfg)
+    syms = [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
+    if not syms:
+        syms = list(VALIDATE_SYMBOLS)
+    names = [s.strip() for s in (args.variants or "").split(",") if s.strip()]
+    try:
+        snap_shots = {to_contract(s): adv.client.snapshot(to_contract(s),
+                                                          with_depth=False)
+                      for s in syms}
+    except Exception as exc:
+        print(f"[shadow] 取快照失败：{exc}")
+        return 1
+    snap_shots = {k: v for k, v in snap_shots.items() if v and v.price}
+    if not snap_shots:
+        print("[shadow] 没有可用快照。")
+        return 1
+    mode = args.mode or ((cfg.get("schedule") or {}).get("mode")) or DEFAULT_MODE
+    out = record(snap_shots, cfg, variants=names or None, mode=mode)
+    print(f"影子账户已记录 {out['written']} 条 -> {out['path']}")
+    for name, cnt in out["by_variant"].items():
+        print(f"  {name:<14s} {cnt} 条")
+    if out["skipped_wait"]:
+        print(f"  （观望的方案/标的 {out['skipped_wait']} 个，没有可验证的结局，跳过）")
+    return 0
+
+
+def cmd_shadow_report(args) -> int:
+    """影子账户报告：用真实 K 线判定已记录的结局，按方案对比。"""
+    from .shadow import VARIANTS, load, report
+    entries = load()
+    if not entries:
+        print("还没有影子记录。先跑：python -m iabot shadow")
+        return 0
+    cfg = load_config()
+    adv = Advisor(cfg)
+    # 按标的取"最后一条记录之后"的 K 线，保证判定只用信号之后的行情
+    last_ts: dict[str, float] = {}
+    for e in entries:
+        last_ts[e["symbol"]] = max(last_ts.get(e["symbol"], 0.0),
+                                   float(e.get("ts") or 0))
+    candles = {}
+    for sym, ts in last_ts.items():
+        try:
+            snap = adv.client.snapshot(sym, with_depth=False)
+        except Exception:
+            continue
+        rows = snap.klines.get("1day") or []
+        if not rows:
+            continue
+        period = ("15min" if (entries[0].get("mode") == "intraday") else "1day")
+        rows = snap.klines.get(period) or rows
+        # 判定只用"信号之后"的 K 线：过滤掉更早的，避免结果回灌
+        candles[sym] = [c for c in rows if c.ts > ts]
+    exits = {k: v.get("analysis", {}) for k, v in VARIANTS.items()
+             if "analysis" in v}
+    out = report(entries, candles, exit_by_variant=exits)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
+    print("=" * 74)
+    print(" 影子账户报告（只记录不下单，用真实 K 线判定结局）")
+    print("-" * 74)
+    print(" 方案          信号   已定   待定   胜率    期望R     95%区间")
+    for name, v in out["variants"].items():
+        ci = v["expectancy_ci"]
+        ci_s = (f"[{ci[0]:+.3f},{ci[1]:+.3f}]" if ci else "样本不足")
+        print(f"  {name:<13s} {v['signals']:>4d}  {v['decided']:>5d}  "
+              f"{v['pending']:>4d}  {v['win_rate']*100:>5.1f}%  "
+              f"{v['expectancy_r']:+.4f}  {ci_s}")
+    print("=" * 74)
+    return 0
+
+
 def cmd_watch(args) -> int:
     """终端监控模式：循环扫描关注列表，信号变化时提示，并刷新模拟仓浮盈。
 
@@ -871,7 +948,10 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
-            "backup", "watch", "notify-test", "validate")
+            "backup", "watch", "notify-test", "validate",
+            "shadow", "shadow-report")
+# 子命令 help 里要列出可选方案名；延迟 import 避免顶层依赖顺序问题
+VARIANTS_NAMES = ("base", "trend_veto", "trail_1atr", "be_1r", "short_heavy")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -969,6 +1049,17 @@ def build_parser() -> argparse.ArgumentParser:
                       default=None, help="多单风险倍数（默认取配置）")
     p_vd.add_argument("--risk-mult-short", type=float, dest="risk_mult_short",
                       default=None, help="空单风险倍数（默认取配置）")
+
+    p_sh = sub.add_parser(
+        "shadow",
+        help="影子账户：把当前信号按多个参数方案各记一份，只记录不下单")
+    p_sh.add_argument("--symbols", help="逗号分隔的标的列表（默认同 validate）")
+    p_sh.add_argument("--variants", help="逗号分隔的方案名，"
+                                         f"可选：{','.join(VARIANTS_NAMES)}")
+    p_sh.add_argument("--mode", choices=list(MODES), help="模式（默认取配置）")
+
+    p_sr = sub.add_parser("shadow-report", help="影子账户报告：按方案对比真实结局")
+    p_sr.add_argument("--json", action="store_true", help="输出原始 JSON")
     p_vd.add_argument("--symbols", help="逗号分隔的标的列表（默认内置 20 个主流币）")
     p_vd.add_argument("--json", action="store_true", help="输出原始 JSON")
 
@@ -1020,6 +1111,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_backtest(args)
     if args.cmd == "validate":
         return cmd_validate(args)
+    if args.cmd == "shadow":
+        return cmd_shadow(args)
+    if args.cmd == "shadow-report":
+        return cmd_shadow_report(args)
     if args.cmd == "notify-test":
         return cmd_notify_test(args)
     if args.cmd == "backtests":
