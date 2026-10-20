@@ -119,6 +119,10 @@ DEFAULTS: dict[str, Any] = {
             "enabled": True,
             "taker_fee_bps": 5.0,      # 单边手续费 0.05%（开平各一次）
             "slippage_bps": 2.0,       # 单侧滑点 0.02%
+            "maker_fee_bps": 2.0,      # 挂单手续费 0.02%
+            # 平方根冲击系数：下单金额 == 当日成交额时约这么多 bps。
+            # 设成 0 就退回"固定滑点"的老口径（不再按订单规模放大）。
+            "impact_coeff_bps": 30.0,
             "funding": True,           # 按持仓时长累计资金费
             "funding_period_sec": 28800,  # 8 小时一次结算
         },

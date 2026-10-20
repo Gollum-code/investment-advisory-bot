@@ -171,6 +171,8 @@ class Plan:
     # 赚钱，所以允许给空单更大的单笔风险（默认 1.0 = 不调整，安全起见）。
     risk_mult_long: float = 1.0
     risk_mult_short: float = 1.0
+    # 生效中的回测成本参数（taker/maker/滑点/冲击系数），供 sizing 摊开成本
+    costs_cfg: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "factors"}
@@ -1048,6 +1050,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     _an = cfg.get("analysis") or {}
     plan.risk_mult_long = float(_an.get("risk_mult_long") or 1.0)
     plan.risk_mult_short = float(_an.get("risk_mult_short") or 1.0)
+    plan.costs_cfg = dict(_an.get("backtest") or {})
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
@@ -1404,6 +1407,20 @@ def _attach_sizing(plan: Plan, snap: Snapshot, equity: float, risk_pct: float,
         reduced = True
 
     loss = contracts * cs * stop_dist
+    # 成本预估：把"这笔单子真的会花多少"直接摊开，而不是藏在回测里。
+    # 反推用的是本单的实际名义价值与 24h 成交额（没有成交额就不给冲击估计）。
+    bc = getattr(plan, "costs_cfg", {}) or {}
+    try:
+        from .costs import trade_cost_bps as _tcb
+        plan.sizing["costs"] = _tcb(
+            notional, float(snap.turnover_24h or 0.0),
+            taker_fee_bps=float(bc.get("taker_fee_bps", 5.0)),
+            maker_fee_bps=float(bc.get("maker_fee_bps", 2.0)),
+            slippage_bps=float(bc.get("slippage_bps", 2.0)),
+            impact_coeff_bps=float(bc.get("impact_coeff_bps", 30.0)),
+            maker=bool(bc.get("maker", False)))
+    except Exception:      # 成本预估失败不该拦住下单计划
+        pass
     tps = []
     for t in plan.targets:
         gain = contracts * cs * abs(t["price"] - mid)

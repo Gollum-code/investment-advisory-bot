@@ -516,6 +516,7 @@ def cmd_backtest(args) -> int:
         print("  95% 区间     : 样本不足，无法估计")
     print(f"  平均盈亏 R   : 胜 {res.avg_win_r:.2f} / 负 {res.avg_loss_r:.2f}")
     print(f"  成本明细     : 手续费 {res.avg_fee_r:.3f} + 滑点 {res.avg_slippage_r:.3f}"
+          f"（其中价格冲击 {res.avg_impact_r:.3f}）"
           f" + 资金费 {res.avg_funding_r:.3f} = {res.avg_cost_r:.3f} R/笔")
     print(f"  平均持仓     : {res.avg_holding_h:.1f} 小时")
     print(f"  最大浮盈/浮亏: {res.max_mfe:+.2f}% / {res.max_mae:+.2f}%")

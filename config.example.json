@@ -80,6 +80,8 @@
       "enabled": true,
       "taker_fee_bps": 5.0,
       "slippage_bps": 2.0,
+      "maker_fee_bps": 2.0,
+      "impact_coeff_bps": 30.0,
       "funding": true,
       "funding_period_sec": 28800
     },

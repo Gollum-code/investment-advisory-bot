@@ -133,7 +133,8 @@ class TestBacktestResultShape(unittest.TestCase):
             symbol="X", mode="swing", bars=1, trades=0, wins=0, losses=0,
             timeouts=0, no_fills=0, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
             win_rate=0.0, expectancy_r=0.0, avg_cost_r=0.0, avg_fee_r=0.0,
-            avg_slippage_r=0.0, avg_funding_r=0.0, avg_holding_h=0.0,
+            avg_slippage_r=0.0, avg_impact_r=0.0, avg_funding_r=0.0,
+            avg_holding_h=0.0,
             max_mfe=0.0, max_mae=0.0, equity_curve=[], equity_usdt=100.0,
             risk_pct=2.0, risk_amount_usdt=2.0, equity_curve_usdt=[]).to_dict()
         self.assertIn("no_fills", d)

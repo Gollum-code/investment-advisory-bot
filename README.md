@@ -511,6 +511,25 @@ from iabot.portfolio import cluster_symbols, portfolio_backtest
 clusters = cluster_symbols(snapshots, threshold=0.7, window=90)
 ```
 
+### 滑点不是常数
+
+回测原来把滑点固定成 2bps。这在 BTC 上够用，在薄合约上不对——同样的下单
+金额，占当日成交额的比例越高，冲击越大。新增 `iabot/costs.py`，用平方根
+冲击模型按订单规模估算：
+
+```python
+impact_bps = coeff * sqrt(下单金额 / 当日成交额)   # coeff 默认 30
+```
+
+```
+450 U 账户 × BTC（5000 万 U 成交额）  ->  冲击 0.13bps，可忽略
+450 U 账户 × 小币（100 万 U 成交额）  ->  冲击 0.70bps，值得算
+```
+
+`analysis.backtest` 新增 `impact_coeff_bps`（默认 30）和 `maker_fee_bps`
+（默认 2）。`impact_coeff_bps = 0` 就退回"固定滑点"的老口径。单笔计划
+（`plan.sizing.costs`）现在也把手续费/滑点/冲击摊开显示，不用只在回测里看。
+
 #### 多空不对称：空单是更好的那一半
 
 完整历史上，**空单在上涨市和下跌市都赚钱，多单只在上涨市赚钱**。这是

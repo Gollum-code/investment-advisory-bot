@@ -15,12 +15,15 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from .costs import impact_bps
 from .market import Candle, period_seconds, Snapshot
 from .outcomes import evaluate_outcome
 from .signals import build_plan
 
 # 成本模型默认值（bps = 万分之一）。一次往返 = 开仓一次 + 平仓一次。
-DEFAULT_COSTS = {"taker_fee_bps": 5.0, "slippage_bps": 2.0, "funding_rate": 0.0}
+DEFAULT_COSTS = {"taker_fee_bps": 5.0, "slippage_bps": 2.0,
+                 "impact_coeff_bps": 30.0, "maker_fee_bps": 2.0,
+                 "funding_rate": 0.0}
 
 # 自助法重采样次数。固定种子，保证同一份数据每次跑出同一个区间
 # （回测结论要可复现，否则"上次 CI 是正的"这种话没有意义）。
@@ -68,6 +71,7 @@ class BacktestResult:
     avg_cost_r: float           # 每笔平均成本（手续费+滑点+资金费，折算成 R）
     avg_fee_r: float
     avg_slippage_r: float
+    avg_impact_r: float         # 其中"按订单规模估算的价格冲击"那一部分
     avg_funding_r: float
     avg_holding_h: float        # 平均持仓时长（小时）
     max_mfe: float
@@ -124,6 +128,7 @@ class BacktestResult:
             "avg_cost_r": round(self.avg_cost_r, 3),
             "avg_fee_r": round(self.avg_fee_r, 4),
             "avg_slippage_r": round(self.avg_slippage_r, 4),
+        "avg_impact_r": round(self.avg_impact_r, 4),
             "avg_funding_r": round(self.avg_funding_r, 4),
             "avg_holding_h": round(self.avg_holding_h, 2),
             "total_r": round(self.total_r, 2),
@@ -240,7 +245,9 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     if apply_costs is None:
         apply_costs = bool(bc.get("enabled", True))
     if not costs:
-        costs = {k: bc[k] for k in ("taker_fee_bps", "slippage_bps") if k in bc}
+        costs = {k: bc[k] for k in
+                 ("taker_fee_bps", "slippage_bps", "impact_coeff_bps",
+                  "maker_fee_bps") if k in bc}
     funding_on = bool(bc.get("funding", True))
     try:
         funding_period_h = float(bc.get("funding_period_sec") or 28800) / 3600.0
@@ -293,7 +300,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         return BacktestResult(
             symbol=base.symbol, mode=mode, bars=n, trades=0, wins=0, losses=0,
             timeouts=0, no_fills=0, total_r=0.0, avg_win_r=0.0, avg_loss_r=0.0,
-            avg_cost_r=0.0, avg_fee_r=0.0, avg_slippage_r=0.0, avg_funding_r=0.0,
+            avg_cost_r=0.0, avg_fee_r=0.0, avg_slippage_r=0.0, avg_impact_r=0.0,
+        avg_funding_r=0.0,
             avg_holding_h=0.0, win_rate=0.0, expectancy_r=0.0,
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
@@ -334,6 +342,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     cost_rs: list[float] = []
     fee_rs: list[float] = []
     slip_rs: list[float] = []
+    impact_rs: list[float] = []
     fund_rs: list[float] = []
     holding_hs: list[float] = []
 
@@ -381,7 +390,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         # ---- 真实成本（折算成 R：成本占单笔风险的比例）----
         # 成本 = 手续费 + 滑点（都与名义价值成正比，再按 名义/风险 转 R）
         #      + 资金费（与名义×持仓时长成正比；多头付、空头收，随费率正负）
-        cost_r = fee_r = slip_r = fund_r = 0.0
+        cost_r = fee_r = slip_r = impact_r = fund_r = 0.0
         if apply_costs:
             sz = plan.sizing or {}
             risk_usd = sz.get("risk_amount_usdt") or 0
@@ -389,7 +398,14 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             if risk_usd > 0 and notional > 0:
                 nr = notional / risk_usd  # 名义 / 风险
                 fee_r = (C["taker_fee_bps"] / 10000.0) * 2 * nr   # 开平各一次
-                slip_r = (C["slippage_bps"] / 10000.0) * 2 * nr   # 开平各一次
+                # 滑点拆成两块：固定 2bps + 按订单规模估算的价格冲击。
+                # 平方根冲击模型：impact = coeff * sqrt(下单金额 / 当日成交额)，
+                # 小资金在主流币上几乎可以忽略，在薄合约上会明显变大。
+                adv = base.turnover_24h or 0.0
+                imp_bps = impact_bps(notional, adv,
+                                     C.get("impact_coeff_bps", 30.0))
+                slip_r = ((C["slippage_bps"] + imp_bps) / 10000.0) * 2 * nr
+                impact_r = (imp_bps / 10000.0) * 2 * nr
                 # 资金费率取该建仓点历史时刻生效的那一期，而不是用"当前费率"
                 # 套全部历史（那会让回测在费率剧烈波动的行情里严重失真）。
                 fr = (fixed_funding if fixed_funding
@@ -403,6 +419,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             cost_r = fee_r + slip_r + fund_r
             fee_rs.append(fee_r)
             slip_rs.append(slip_r)
+            impact_rs.append(impact_r)
             fund_rs.append(fund_r)
             cost_rs.append(cost_r)
 
@@ -456,6 +473,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         avg_cost_r=mean(cost_rs),
         avg_fee_r=mean(fee_rs),
         avg_slippage_r=mean(slip_rs),
+        avg_impact_r=mean(impact_rs),
         avg_funding_r=mean(fund_rs),
         avg_holding_h=mean(holding_hs),
         win_rate=win_rate, expectancy_r=expectancy,
