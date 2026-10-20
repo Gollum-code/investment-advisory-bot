@@ -210,7 +210,8 @@ def _funding_rate_at(funding_hist: list[dict], ts: float) -> float:
 def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
              apply_costs: bool | None = None, costs: dict | None = None,
-             equity_usdt: float | None = None, risk_pct: float | None = None) -> BacktestResult:
+             equity_usdt: float | None = None, risk_pct: float | None = None,
+             start_index: int | None = None, end_index: int | None = None) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
     base: 已经 fetch 好的完整快照（含各周期 K 线），由调用方从接口拿。
@@ -220,6 +221,10 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
                  None=读 config 的 analysis.backtest（默认开启）。
     costs:  覆盖默认成本参数；资金费率从 base.funding_rate 取（作为近似）。
     equity_usdt / risk_pct: 用于把 R 折算成金额（默认取 cfg.account）。
+    start_index / end_index: 只在主周期序列的这段区间里取建仓点（走样本外
+                 折间检验用）。注意**不裁剪历史**：因子在每个建仓点看到的
+                 仍然是该点之前的全部 K 线，否则日线类因子（波动率分位、
+                 SMA200）会因为历史被切掉而全部退化成 0 分。
     """
     acc = cfg.get("account") or {}
     eq = float(equity_usdt if equity_usdt is not None else (acc.get("equity_usdt") or 450))
@@ -328,9 +333,9 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     fund_rs: list[float] = []
     holding_hs: list[float] = []
 
-    start = warmup
-    end = n - 5  # 留出后续判定空间
-    points = list(range(start, end, max(1, step)))[:max_points]
+    start = warmup if start_index is None else max(warmup, int(start_index))
+    end = (n - 5) if end_index is None else min(n - 5, int(end_index))
+    points = list(range(start, end, max(1, step)))[:max_points] if end > start else []
 
     for i in points:
         ts = main[i].ts

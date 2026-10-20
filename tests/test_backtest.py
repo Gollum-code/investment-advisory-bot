@@ -381,5 +381,74 @@ class TestBootstrapCI(unittest.TestCase):
         self.assertEqual(len(d["expectancy_ci"]), 2)
 
 
+class TestWalkForward(unittest.TestCase):
+    """折间一致性：edge 不能只来自某一两段行情。"""
+
+    def test_splits_into_usable_folds(self):
+        from iabot.walkforward import walk_forward
+        out = walk_forward(_trading_snapshot(), _cfg(),
+                           mode="intraday", folds=4, step=10, warmup=30)
+        self.assertTrue(out["ok"])
+        # 反空转：至少要有 2 折真的产生了交易，否则下面的结论没意义
+        self.assertGreaterEqual(out["usable_folds"], 2)
+        self.assertGreater(out["pooled"]["trades"], 0)
+        self.assertLessEqual(len(out["folds"]), 4)
+        for f in out["folds"]:
+            self.assertIn("expectancy_r", f)
+            self.assertIn("usable", f)
+
+    def test_pooled_is_union_of_fold_trades(self):
+        from iabot.walkforward import walk_forward
+        out = walk_forward(_trading_snapshot(), _cfg(),
+                           mode="intraday", folds=4, step=10, warmup=30)
+        fold_trades = sum(f["trades"] for f in out["folds"] if f["usable"])
+        # 每折的 trade_rs 长度 == 该折 trades（超时按 0 计入）
+        self.assertEqual(out["pooled"]["trades"], fold_trades)
+
+    def test_deterministic(self):
+        from iabot.walkforward import walk_forward
+        a = walk_forward(_trading_snapshot(), _cfg(),
+                         mode="intraday", folds=3, step=20, warmup=30)
+        b = walk_forward(_trading_snapshot(), _cfg(),
+                         mode="intraday", folds=3, step=20, warmup=30)
+        self.assertEqual(a, b)
+
+    def test_every_fold_keeps_prior_history(self):
+        # 回归：第一版按时间窗口把快照切小，后面每折开头的日线历史只剩十几根，
+        # 波动率分位/SMA200 全部退化成 0 分，四折全是 0 笔交易——那不是策略
+        # 不行，是数据被切坏了。现在折只切建仓点区间、保留全部历史。
+        # 夹具总日线只有 63 根（<250），所以最早那折缺日线历史、0 笔是正常的；
+        # 要守的是"靠后的折别因为被切掉历史而死掉"。
+        from iabot.walkforward import walk_forward
+        out = walk_forward(_trading_snapshot(), _cfg(),
+                           mode="intraday", folds=4, step=10, warmup=30)
+        self.assertTrue(out["ok"])
+        self.assertGreaterEqual(out["usable_folds"], 2)
+        # 折 0 之外的折也有能出交易的 -> 历史没有被切断
+        self.assertTrue(any(f["usable"] and f["index"] > 0
+                            for f in out["folds"]),
+                        f"靠后的折全部 0 笔: {out['folds']}")
+
+    def test_start_index_restricts_entries_not_history(self):
+        # 索引区间只限制建仓点，因子仍能看到全程历史
+        snap = _trading_snapshot()
+        full = _bt(snap)
+        late = _bt(snap, start_index=3000, end_index=5995)
+        self.assertGreater(full.trades, 0)
+        self.assertGreater(late.trades, 0)
+        # 区间生效：late 的建仓点最多是后 3000 根
+        self.assertLessEqual(late.trades * 10, 3000)
+
+    def test_verdict_labels(self):
+        from iabot.walkforward import _verdict
+        usable = [{"expectancy_r": 0.1}, {"expectancy_r": 0.2},
+                  {"expectancy_r": 0.1}, {"expectancy_r": 0.2},
+                  {"expectancy_r": 0.1}]
+        self.assertIn("稳定", _verdict(0.15, (0.05, 0.25), 1.0, usable))
+        self.assertIn("脆弱", _verdict(0.15, (-0.05, 0.35), 0.2, usable))
+        self.assertIn("不要用", _verdict(-0.1, (-0.2, -0.01), 0.0, usable))
+        self.assertIn("无法判断", _verdict(0.1, None, 0.0, usable[:1]))
+
+
 if __name__ == "__main__":
     unittest.main()

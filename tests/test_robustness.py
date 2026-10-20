@@ -387,5 +387,36 @@ class TestEmptyKlineIsNotSilent(unittest.TestCase):
         self.assertEqual(r.trades, 0)
 
 
+class TestKlineSizeClamp(unittest.TestCase):
+    """接口对 >2000 的 size 返回空数组（不是报错），必须钳住。"""
+
+    def test_oversize_request_is_clamped(self):
+        from iabot.market import MarketClient
+        c = MarketClient(["https://api.hbdm.com"])
+        seen = {}
+
+        def fake_get(path):
+            seen["path"] = path
+            return {"data": []}
+
+        c._get = fake_get
+        c.kline("BTC-USDT", "1min", 4000)
+        self.assertIn("size=2000", seen["path"])
+        self.assertNotIn("size=4000", seen["path"])
+
+    def test_normal_size_untouched(self):
+        from iabot.market import MarketClient
+        c = MarketClient(["https://api.hbdm.com"])
+        seen = {}
+
+        def fake_get(path):
+            seen["path"] = path
+            return {"data": []}
+
+        c._get = fake_get
+        c.kline("BTC-USDT", "1day", 500)
+        self.assertIn("size=500", seen["path"])
+
+
 if __name__ == "__main__":
     unittest.main()

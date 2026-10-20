@@ -175,6 +175,11 @@ class MarketClient:
             f"/linear-swap-ex/market/detail/merged?contract_code={symbol}"))
 
     def kline(self, symbol: str, period: str, size: int = 300) -> list[Candle]:
+        # 接口对 >2000 的 size 不报错、直接返回空数组。之前调用方（CLI 回测
+        # 按周期换算根数时会算出 4000）把这些空数组当成"这个周期没数据"
+        # 覆盖掉本来正常的 2000 根，导致整段回测静默失败。这里统一钳到上限。
+        size = max(1, min(int(size), 2000))
+
         def fetch():
             d = self._get(
                 f"/linear-swap-ex/market/history/kline?contract_code={symbol}"

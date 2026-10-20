@@ -415,7 +415,10 @@ def cmd_backtest(args) -> int:
             need = _bars(p)
             if len(snap.klines.get(p) or []) < need:
                 try:
-                    snap.klines[p] = adv.client.kline(sym, p, need)
+                    rows = adv.client.kline(sym, p, need)
+                    # 只补不删：抓回空数组时保留原有的数据，别把好数据覆盖成空
+                    if rows:
+                        snap.klines[p] = rows
                 except Exception:
                     pass
         # 回测要用"每个建仓点当时"的资金费率，这里补一段足够长的历史费率序列
@@ -430,6 +433,45 @@ def cmd_backtest(args) -> int:
         return 2
     t0 = time.time()
     bt_acc = _account_from(args)
+
+    # ---- 走动样本外检验模式 ----
+    if getattr(args, "wf", 0):
+        from .walkforward import walk_forward
+        out = walk_forward(snap, cfg, mode=args.mode, folds=args.wf,
+                           step=args.step, warmup=args.warmup)
+        ms = (time.time() - t0) * 1000
+        if args.json:
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0 if out.get("ok") else 1
+        if not out.get("ok"):
+            print(f"  数据不足：{out.get('reason', '未知')}"
+                  f"（{out.get('bars', 0)} 根）")
+            return 1
+        print("=" * 66)
+        print(f"  走动样本外 | {sym} | {MODES.get(args.mode, {}).get('label', args.mode)}"
+              f" | {out['bars']} 根 | {args.wf} 折 | {ms:.0f}ms")
+        print(f"  {'折':<3}{'起点':<12}{'单数':>6}{'期望R':>10}{'胜率':>8}  区间")
+        import time as _t
+        for f in out["folds"]:
+            d = _t.strftime("%Y-%m-%d", _t.gmtime(f["start_ts"]))
+            ci = f["expectancy_ci"]
+            cis = f"[{ci[0]:+.2f},{ci[1]:+.2f}]" if ci else "--"
+            print(f"  {f['index']:<3}{d:<12}{f['trades']:>6}{f['expectancy_r']:>+10.3f}"
+                  f"{f['win_rate']*100:>7.1f}%  {cis}")
+        p = out["pooled"]
+        pci = p["expectancy_ci"]
+        print(f"  正收益折    : {out['positive_folds']}/{out['usable_folds']}"
+              f"（{out['positive_fold_frac']*100:.0f}%）")
+        if pci:
+            print(f"  合并期望    : {p['expectancy_r']:+.3f} R/笔（{p['trades']} 笔，"
+                  f"95% 区间 [{pci[0]:+.3f},{pci[1]:+.3f}]）")
+        else:
+            print(f"  合并期望    : {p['expectancy_r']:+.3f} R/笔（{p['trades']} 笔，"
+                  f"样本不足以给区间）")
+        print(f"  结论        : {out['verdict']}")
+        print("=" * 66)
+        return 0
+
     res = backtest(snap, cfg, mode=args.mode, step=args.step,
                    warmup=args.warmup, max_points=2000,
                    equity_usdt=bt_acc.get("equity_usdt"),
@@ -822,6 +864,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_bk.add_argument("--equity", type=float, help="账户权益 USDT（默认取配置，用于金额换算）")
     p_bk.add_argument("--risk", type=float, help="单笔风险 %（默认取配置，用于金额换算）")
     p_bk.add_argument("--json", action="store_true", help="输出原始 JSON")
+    p_bk.add_argument("--wf", type=int, metavar="FOLDS", default=0,
+                      help="改为走动样本外检验：把历史切 FOLDS 段逐段回测"
+                           "（推荐 5）。回答的是\"这个 edge 是各段时间都成立，"
+                           "还是只来自某一两段行情\"")
     p_bk.add_argument("--save", action="store_true",
                       help="把本次回测的参数与结果写入实验记录（可事后复现/对比）")
 
