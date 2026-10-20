@@ -85,6 +85,9 @@ class BacktestResult:
     expectancy_ci: tuple[float, float] | None = None   # 自助法 95% 区间
     std_err: float = 0.0
     t_stat: float = 0.0
+    # 每笔交易的明细（entry_ts/exit_ts/r/direction/outcome/holding_h）。
+    # 组合级回测要靠它判断"同一时刻开了几个仓、资金够不够"。
+    trade_log: list[dict] | None = None
 
     @property
     def significant(self) -> bool:
@@ -295,7 +298,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
             equity_curve_usdt=[], insufficient_data=True,
-            missing_periods=tuple(missing), trade_rs=[])
+            missing_periods=tuple(missing), trade_rs=[], trade_log=[])
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -321,6 +324,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     win_rs: list[float] = []
     loss_rs: list[float] = []
     trade_rs: list[float] = []
+    trade_log: list[dict] = []
     mfes: list[float] = []
     maes: list[float] = []
     curve: list[float] = []
@@ -402,25 +406,33 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             fund_rs.append(fund_r)
             cost_rs.append(cost_r)
 
+        r = 0.0
         if outcome.startswith("tp"):
             r = (res["rr"] if res["rr"] is not None else 1.0) - cost_r
             wins += 1
             total_r += r
             cum_r += r
             win_rs.append(r)
-            trade_rs.append(r)
         elif outcome == "stopped":
             r = -1.0 - cost_r
             losses += 1
             total_r += r
             cum_r += r
             loss_rs.append(r)
-            trade_rs.append(r)
         else:  # timeout
             timeouts += 1
-            # 超时在 expectancy 里按 0 R 计入（total_r/trades），自助法也要
-            # 用同一个口径，否则区间会比点估计"好看"。
-            trade_rs.append(0.0)
+        # 超时按 0 R 计入 trade_rs（与 expectancy 的分母口径一致），
+        # 也记进 trade_log，组合级回测才知道那段时间仓位被占着。
+        trade_rs.append(r)
+        trade_log.append({
+            "symbol": base.symbol,
+            "entry_ts": float(ts),
+            "exit_ts": (float(res["ts"]) if res.get("ts") else None),
+            "r": round(r, 4),
+            "direction": plan.direction,
+            "outcome": outcome,
+            "holding_h": round(holding_h, 2),
+        })
         curve.append(cum_r)
         curve_usdt.append(cum_r * risk_amount)
 
@@ -453,4 +465,5 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
         equity_curve_usdt=curve_usdt,
         trade_rs=trade_rs, expectancy_ci=ci, std_err=std_err, t_stat=t_stat,
+        trade_log=trade_log,
     )

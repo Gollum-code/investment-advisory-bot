@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from .backtest import _bootstrap_mean_ci, backtest
 from .market import Snapshot
+from .portfolio import portfolio_backtest
 from .walkforward import aggregate, walk_forward
 
 # 集中度警戒线：正 R 的贡献里，前 N 个币占比超过这个比例就报"收益集中"
@@ -41,6 +42,7 @@ def _symbol_rows(snapshots: dict[str, Snapshot], cfg: dict, *,
             "insufficient_data": res.insufficient_data,
             "missing_periods": list(res.missing_periods),
             "_rs": list(res.trade_rs or []),
+            "_log": list(res.trade_log or []),
         })
     return rows
 
@@ -84,9 +86,11 @@ def multi_backtest(snapshots: dict[str, Snapshot], cfg: dict, *,
     rows = _symbol_rows(snapshots, cfg, mode=mode, step=step, warmup=warmup,
                         max_points=max_points)
     rs: list[float] = []
+    logs: list[dict] = []
     for r in rows:
         if not r["insufficient_data"]:
             rs.extend(r["_rs"])
+            logs.extend(r["_log"])
     exp = (sum(rs) / len(rs)) if rs else 0.0
     ci = _bootstrap_mean_ci(rs)
     wins = sum(r["wins"] for r in rows)
@@ -109,16 +113,19 @@ def multi_backtest(snapshots: dict[str, Snapshot], cfg: dict, *,
             "total_r": round(sum(rs), 2),
         },
         "concentration": _concentration(usable),
+        # 合并后的交易明细：给组合级模拟用（并发上限、资金约束）
+        "trade_logs": logs,
     }
 
 
 def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              mode: str = "swing", folds: int = 5, step: int = 10,
-             warmup: int = 60) -> dict:
-    """完整验证：整段回测 + 折间一致性 + 集中度，三件事一起给结论。
+             warmup: int = 60, max_concurrent: int = 5) -> dict:
+    """完整验证：整段回测 + 折间一致性 + 集中度 + 组合模拟，一起给结论。
 
     整段正期望只说明"历史上总体是赚的"；折间一致性说明"不是靠某一段行情"；
-    集中度说明"不是靠某几个币"。三样都过才算真的能用。
+    集中度说明"不是靠某几个币"；组合模拟说明"资金和并发够不够"。
+    四样都过才算真的能用。
     """
     full = multi_backtest(snapshots, cfg, mode=mode, step=step, warmup=warmup)
     wf_rows = []
@@ -130,6 +137,12 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         (r.get("symbol") or "?", (r.get("pooled") or {}).get("total_r") or 0.0)
         for r in wf_rows if r.get("ok")
     ])
+    acc = cfg.get("account") or {}
+    port = portfolio_backtest(
+        full.get("trade_logs") or [],
+        equity=float(acc.get("equity_usdt") or 450.0),
+        risk_pct=float(acc.get("risk_pct_per_trade") or 2.0),
+        max_concurrent=max_concurrent)
     conc = full["concentration"]
     p = full["pooled"]
     notes: list[str] = []
@@ -147,12 +160,20 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         notes.append(conc["warning"])
     if wf_conc.get("warning"):
         notes.append("折间口径下" + wf_conc["warning"])
+    if port["skipped_capacity"]:
+        pct = port["skipped_capacity"] / max(1, port["signals"]) * 100
+        notes.append(f"并发上限 {max_concurrent} 挡掉了 {port['skipped_capacity']} "
+                     f"笔（{pct:.0f}%）：单笔期望不等于组合能拿到的收益")
+    if port["max_drawdown_pct"] >= 30:
+        notes.append(f"组合最大回撤 {port['max_drawdown_pct']:.0f}%："
+                     f"单笔风险 {port['expectancy_r']:+.3f}R 掩盖了这个尾部")
     return {
         "mode": mode,
         "full": full,
         "walkforward": wf,
         "concentration": conc,
         "walkforward_concentration": wf_conc,
+        "portfolio": {k: v for k, v in port.items() if k != "equity_curve"},
         "notes": notes,
         "verdict": "通过" if not notes else "有保留",
     }

@@ -571,7 +571,7 @@ def cmd_validate(args) -> int:
         print("没有拿到任何行情", file=sys.stderr)
         return 2
     out = validate(snaps, cfg, mode=args.mode, folds=args.folds, step=args.step,
-                   warmup=args.warmup)
+                   warmup=args.warmup, max_concurrent=args.max_concurrent)
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
@@ -600,6 +600,11 @@ def cmd_validate(args) -> int:
         print(f"  收益集中度  : {conc['positive_symbols']} 个赚钱标的，"
               f"前 {len(conc['top_symbols'])} 个占正 R 的 {conc['top_share']*100:.0f}%"
               f"（{'、'.join(conc['top_symbols'])}）")
+    port = out["portfolio"]
+    print(f"  组合模拟    : {port['taken']}/{port['signals']} 笔入场"
+          f"（并发上限 {port['max_concurrent']} 挡掉 {port['skipped_capacity']} 笔）"
+          f"  收益 {port['total_return_pct']:+.1f}%"
+          f"  最大回撤 {port['max_drawdown_pct']:.1f}%")
     for n in out["notes"]:
         print(f"  ! {n}")
     print(f"  结论        : {out['verdict']}")
@@ -947,6 +952,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_vd.add_argument("--folds", type=int, default=5, help="走动检验切几折（默认 5）")
     p_vd.add_argument("--step", type=int, default=10, help="建仓点间隔（默认 10）")
     p_vd.add_argument("--warmup", type=int, default=60, help="指标预热根数（默认 60）")
+    p_vd.add_argument("--max-concurrent", type=int, default=5, dest="max_concurrent",
+                      help="组合模拟里同时最多持有几个仓位（默认 5，<=0 不限制）")
     p_vd.add_argument("--symbols", help="逗号分隔的标的列表（默认内置 20 个主流币）")
     p_vd.add_argument("--json", action="store_true", help="输出原始 JSON")
 

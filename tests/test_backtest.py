@@ -514,5 +514,89 @@ class TestValidation(unittest.TestCase):
         self.assertGreater(out["walkforward"]["folds_total"], 0)
 
 
+class TestPortfolioBacktest(unittest.TestCase):
+    """组合级：并发上限、资金约束、复利下的回撤。"""
+
+    def _log(self, entry, exit_, r, sym="A-USDT"):
+        return {"symbol": sym, "entry_ts": float(entry),
+                "exit_ts": float(exit_), "r": float(r),
+                "direction": "long", "outcome": "tp1", "holding_h": 24.0}
+
+    def test_single_win_compounds(self):
+        from iabot.portfolio import portfolio_backtest
+        out = portfolio_backtest([self._log(0, 10, 1.0)], equity=450.0,
+                                 risk_pct=2.0, max_concurrent=5)
+        # 450 × 2% = 9 U 风险，赢 1R -> +9 U
+        self.assertAlmostEqual(out["equity_end"], 459.0, places=2)
+        self.assertEqual(out["taken"], 1)
+        self.assertAlmostEqual(out["total_return_pct"], 2.0, places=2)
+
+    def test_loss_costs_risk_amount(self):
+        from iabot.portfolio import portfolio_backtest
+        out = portfolio_backtest([self._log(0, 10, -1.0)], equity=450.0,
+                                 risk_pct=2.0, max_concurrent=5)
+        self.assertAlmostEqual(out["equity_end"], 441.0, places=2)
+        self.assertAlmostEqual(out["total_return_pct"], -2.0, places=2)
+
+    def test_concurrency_cap_blocks_extra_entries(self):
+        from iabot.portfolio import portfolio_backtest
+        # 三笔同时在场（entry 都是 0），并发上限 2 -> 第三笔被跳过
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B"),
+                self._log(0, 100, 1.0, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=2)
+        self.assertEqual(out["taken"], 2)
+        self.assertEqual(out["skipped_capacity"], 1)
+
+    def test_no_cap_takes_everything(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B"),
+                self._log(0, 100, 1.0, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=0)
+        self.assertEqual(out["taken"], 3)
+        self.assertEqual(out["skipped_capacity"], 0)
+
+    def test_sequential_trades_are_not_blocked(self):
+        from iabot.portfolio import portfolio_backtest
+        # 前一笔平了才有仓位空出来 -> 并发上限 1 也不该跳过
+        logs = [self._log(0, 10, 1.0, "A"), self._log(20, 30, 1.0, "B")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=1)
+        self.assertEqual(out["taken"], 2)
+        self.assertEqual(out["skipped_capacity"], 0)
+
+    def test_compound_changes_second_trade_size(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 10, 1.0, "A"), self._log(20, 30, 1.0, "B")]
+        comp = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                  max_concurrent=1, compound=True)
+        flat = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                  max_concurrent=1, compound=False)
+        # 复利：第一笔赢完权益变大，第二笔风险更大 -> 期末更高
+        self.assertGreater(comp["equity_end"], flat["equity_end"])
+        self.assertAlmostEqual(flat["equity_end"], 468.0, places=2)
+
+    def test_max_drawdown_computed(self):
+        from iabot.portfolio import portfolio_backtest
+        logs = [self._log(0, 10, 1.0, "A"), self._log(20, 30, -1.0, "B"),
+                self._log(40, 50, 1.0, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=1, compound=False)
+        # 450 -> 459 -> 450 -> 459：最大回撤 9 U = 450 的 2%
+        self.assertAlmostEqual(out["max_drawdown_usdt"], 9.0, places=2)
+        self.assertAlmostEqual(out["max_drawdown_pct"], 2.0, places=1)
+
+    def test_trade_log_is_produced_by_backtest(self):
+        # 反空转：backtest 必须真的产出带 entry/exit 的明细
+        r = _bt(_trading_snapshot())
+        self.assertGreater(len(r.trade_log or []), 0)
+        t0 = r.trade_log[0]
+        self.assertIn("entry_ts", t0)
+        self.assertIn("exit_ts", t0)
+        self.assertIn("r", t0)
+        self.assertGreaterEqual(t0["exit_ts"], t0["entry_ts"])
+
+
 if __name__ == "__main__":
     unittest.main()
