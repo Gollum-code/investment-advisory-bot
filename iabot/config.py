@@ -126,6 +126,13 @@ DEFAULTS: dict[str, Any] = {
             "funding": True,           # 按持仓时长累计资金费
             "funding_period_sec": 28800,  # 8 小时一次结算
         },
+        # 出场管理：保本 / 移动止损。默认都关（null），开了才生效。
+        #   breakeven_at_r: 浮盈到 X R 时把止损移到入场价
+        #   trail_atr_mult: 止损跟随最优价，距离 = X × ATR
+        "exit": {
+            "breakeven_at_r": None,
+            "trail_atr_mult": None,
+        },
         # 趋势否决闸门：方向定了之后，若日线趋势明确反对就降级观望。
         # 默认关——完整历史（20 币 × 2000 根日线）显示它把 swing 期望从
         # +0.183R 提到 +0.199R、long 从 +0.119R 提到 +0.165R，但同时砍掉
@@ -339,6 +346,22 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         an.get("risk_mult_long"), "analysis.risk_mult_long", 0.1, 3.0, 1.0)
     an["risk_mult_short"] = _coerce_num(
         an.get("risk_mult_short"), "analysis.risk_mult_short", 0.1, 3.0, 1.0)
+
+    ec = an.get("exit")
+    if not isinstance(ec, dict):
+        an["exit"] = {"breakeven_at_r": None, "trail_atr_mult": None}
+    else:
+        # None 表示关闭；给了数字就夹到合理区间
+        an["exit"] = {
+            "breakeven_at_r": (None if ec.get("breakeven_at_r") in (None, "")
+                               else _coerce_num(ec.get("breakeven_at_r"),
+                                                "analysis.exit.breakeven_at_r",
+                                                0.1, 10.0, 1.0)),
+            "trail_atr_mult": (None if ec.get("trail_atr_mult") in (None, "")
+                               else _coerce_num(ec.get("trail_atr_mult"),
+                                                "analysis.exit.trail_atr_mult",
+                                                0.1, 10.0, 1.0)),
+        }
 
     gc = an.get("gate")
     if not isinstance(gc, dict):

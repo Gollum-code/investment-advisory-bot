@@ -85,6 +85,10 @@
       "funding": true,
       "funding_period_sec": 28800
     },
+    "exit": {
+      "breakeven_at_r": null,
+      "trail_atr_mult": null
+    },
     "trend_veto": false
   },
   "schedule": {

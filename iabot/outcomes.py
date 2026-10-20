@@ -28,11 +28,22 @@ OUTCOMES_OK = ("tp1", "tp2", "tp3", "stopped", "timeout", "no_fill")
 
 def evaluate_outcome(plan: dict, candles: list[Candle],
                      *, max_hours: float | None = None,
-                     require_fill: bool = True) -> dict | None:
+                     require_fill: bool = True,
+                     breakeven_at_r: float | None = None,
+                     trail_atr_mult: float | None = None,
+                     atr: float | None = None) -> dict | None:
     """返回 {outcome, ts, price, rr, mfe_pct, mae_pct, bars}，无法判定时返回 None。
 
     require_fill=True 时，价格必须先进入 [entry_low, entry_high] 才算成交，
     未成交返回 outcome="no_fill"（调用方应把它排除在胜率/期望之外）。
+
+    breakeven_at_r: 浮盈到这么多 R 时把止损移到入场价（保本）。之后的回撤
+                    按 0R 出场，而不是 -1R。
+    trail_atr_mult: 移动止损，止损跟着最优价走，距离 = 倍数 × ATR。
+                    需要同时传 atr，否则忽略。
+
+    两者都只影响**后续** K 线：同一根 K 线里不会"看到高点再把止损追上去"，
+    避免用未来信息抬高胜率。
     """
     direction = plan.get("direction")
     if direction not in ("long", "short"):
@@ -46,6 +57,11 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
     mid = (entry_low + entry_high) / 2.0
     if mid <= 0 or stop <= 0:
         return None
+    # 每单位风险（价格单位）。rr 一律用"相对原始 1R"表示。
+    risk_unit = abs(mid - stop)
+    if risk_unit <= 0:
+        return None
+    trail_on = bool(trail_atr_mult and atr and atr > 0)
 
     start = float(plan.get("generated_at") or 0)
     hours = max_hours if max_hours is not None else DEFAULT_WINDOW_HOURS.get(
@@ -55,10 +71,16 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
     ordered = (sorted(targets, key=lambda t: t["price"]) if direction == "long"
                else sorted(targets, key=lambda t: -t["price"]))
 
+    def rr_at(px: float) -> float:
+        return ((px - mid) / risk_unit if direction == "long"
+                else (mid - px) / risk_unit)
+
     best_mfe = 0.0
     best_mae = 0.0
     bars = 0
     filled = not require_fill
+    stop_dyn = float(stop)
+    best_price = mid          # 入场后的最优价（多头最高价 / 空头最低价）
     for c in candles:
         if c.ts <= start + EXTRA_BUFFER_SEC:
             continue
@@ -74,16 +96,20 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
         if direction == "long":
             mfe = (c.high - mid) / mid * 100.0
             mae = (c.low - mid) / mid * 100.0
+            best_price = max(best_price, c.high)
         else:
             mfe = (mid - c.low) / mid * 100.0
             mae = (mid - c.high) / mid * 100.0
+            best_price = min(best_price, c.low)
         best_mfe = max(best_mfe, mfe)
         best_mae = min(best_mae, mae)
 
-        stop_hit = (c.low <= stop) if direction == "long" else (c.high >= stop)
+        stop_hit = (c.low <= stop_dyn) if direction == "long" else (c.high >= stop_dyn)
         if stop_hit:
-            return {"outcome": "stopped", "ts": c.ts, "price": stop,
-                    "rr": -1.0, "mfe_pct": round(best_mfe, 3),
+            # 用动态止损价算实际 R：保本出场约 0R，移动止损可能锁住部分盈利。
+            return {"outcome": "stopped", "ts": c.ts, "price": stop_dyn,
+                    "rr": round(rr_at(stop_dyn), 4),
+                    "mfe_pct": round(best_mfe, 3),
                     "mae_pct": round(best_mae, 3), "bars": bars}
         for i, t in enumerate(ordered, 1):
             hit = (c.high >= t["price"]) if direction == "long" else (c.low <= t["price"])
@@ -91,6 +117,19 @@ def evaluate_outcome(plan: dict, candles: list[Candle],
                 return {"outcome": f"tp{i}", "ts": c.ts, "price": t["price"],
                         "rr": t.get("rr"), "mfe_pct": round(best_mfe, 3),
                         "mae_pct": round(best_mae, 3), "bars": bars}
+
+        # ---- 收盘后更新动态止损（只作用于下一根 K 线）----
+        if breakeven_at_r and rr_at(best_price) >= breakeven_at_r:
+            if direction == "long":
+                stop_dyn = max(stop_dyn, mid)
+            else:
+                stop_dyn = min(stop_dyn, mid)
+        if trail_on:
+            dist = float(trail_atr_mult) * float(atr)
+            if direction == "long":
+                stop_dyn = max(stop_dyn, best_price - dist)
+            else:
+                stop_dyn = min(stop_dyn, best_price + dist)
 
     if bars == 0:
         return None  # 还没有任何后续 K 线，等下一轮再说

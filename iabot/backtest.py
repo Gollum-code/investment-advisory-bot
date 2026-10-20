@@ -259,6 +259,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     C = dict(DEFAULT_COSTS)
     if costs:
         C.update({k: float(v) for k, v in costs.items() if k in C})
+    # 出场管理（保本 / 移动止损）：默认都关，开了才改变判定口径。
+    exit_cfg = (cfg.get("analysis") or {}).get("exit") or {}
     m_period = "15min" if mode == "intraday" else "1day"
     m_period_sec = period_seconds(m_period)
     # 资金费率：优先用显式传入；否则优先用历史资金费率序列（按各建仓点时刻取），
@@ -371,7 +373,11 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         # 会把所有历史 K 线当成"信号之前"而跳过，永远判不出结果
         plan.generated_at = float(ts)
 
-        res = evaluate_outcome(plan.to_dict(), future)
+        res = evaluate_outcome(
+            plan.to_dict(), future,
+            breakeven_at_r=exit_cfg.get("breakeven_at_r"),
+            trail_atr_mult=exit_cfg.get("trail_atr_mult"),
+            atr=plan.market.get("atr"))
         if not res:
             continue  # 后续 K 线不足以判定窗口，跳过（不算交易）
         if res["outcome"] == "no_fill":
@@ -431,7 +437,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             cum_r += r
             win_rs.append(r)
         elif outcome == "stopped":
-            r = -1.0 - cost_r
+            # 用实际的出场 R：原始止损 = -1；保本 = 约 0；移动止损可能锁住盈利。
+            r = (res["rr"] if res.get("rr") is not None else -1.0) - cost_r
             losses += 1
             total_r += r
             cum_r += r
