@@ -456,6 +456,16 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             "direction": plan.direction,
             "outcome": outcome,
             "holding_h": round(holding_h, 2),
+            # 评分：用来回答"分数高的是不是真的更赚"（排序能力），
+            # 没有它就只能看整体期望，无法判断阈值是否合理。
+            "score": round(float(plan.score or 0.0), 2),
+            "rr": plan.rr,
+            # 这笔单是哪个因子主导的：用来解释"为什么高分档反而更差"。
+            # 只看贡献绝对值最大的那一项，够定位问题，不必存整张因子表。
+            "top_factor": (
+                max(plan.factors,
+                    key=lambda f: abs((f.score or 0.0) * (f.weight or 0.0))).label
+                if plan.factors else ""),
         })
         curve.append(cum_r)
         curve_usdt.append(cum_r * risk_amount)

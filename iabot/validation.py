@@ -21,6 +21,54 @@ from .walkforward import aggregate, walk_forward
 # 集中度警戒线：正 R 的贡献里，前 N 个币占比超过这个比例就报"收益集中"
 CONCENTRATION_TOP_N = 2
 CONCENTRATION_WARN = 0.5
+# 排序能力检验：按评分分几档，看分数高的那批是不是真的更赚。
+SCORE_BUCKETS = 3
+
+
+def score_ranking(trade_logs: list[dict], *,
+                  buckets: int = SCORE_BUCKETS) -> dict:
+    """按 |评分| 分档统计每档的期望 R。
+
+    回答一个更根本的问题：**评分到底有没有排序能力？**
+    如果高分档和低分档的期望差不多，那阈值 30 就是拍脑袋定的——
+    调整它不会有任何区别。反之如果单调，说明分数确实在挑单，阈值值得调。
+    """
+    rows = [t for t in trade_logs
+            if t.get("r") is not None and t.get("score") is not None
+            and t.get("outcome") != "no_fill"]
+    if len(rows) < buckets * 5:
+        return {"buckets": [], "usable": False,
+                "reason": f"样本 {len(rows)} 笔，少于 {buckets*5}，分档没意义"}
+    rows.sort(key=lambda t: abs(float(t["score"])))
+    n = len(rows)
+    size = n // buckets
+    out: list[dict] = []
+    for i in range(buckets):
+        chunk = rows[i * size:] if i == buckets - 1 else rows[i * size:(i + 1) * size]
+        rs = [float(t["r"]) for t in chunk]
+        lo = min(abs(float(t["score"])) for t in chunk)
+        hi = max(abs(float(t["score"])) for t in chunk)
+        out.append({
+            "label": f"低分{1 + i}" if i < buckets - 1 else "高分",
+            "score_abs_min": round(lo, 1),
+            "score_abs_max": round(hi, 1),
+            "trades": len(rs),
+            "expectancy_r": round(sum(rs) / len(rs), 4),
+        })
+    low = out[0]["expectancy_r"]
+    high = out[-1]["expectancy_r"]
+    gap = high - low
+    # 单调递增才算真的有排序能力；只有两头好、中间差，说明是噪声
+    monotone = all(out[i]["expectancy_r"] <= out[i + 1]["expectancy_r"]
+                   for i in range(len(out) - 1))
+    return {
+        "buckets": out,
+        "usable": True,
+        "gap_r": round(gap, 4),
+        "monotone": bool(monotone),
+        "verdict": ("分数有排序能力" if monotone and gap > 0.05 else
+                    "排序能力不明显，阈值调整大概无效"),
+    }
 
 
 def _symbol_rows(snapshots: dict[str, Snapshot], cfg: dict, *,
@@ -118,6 +166,44 @@ def multi_backtest(snapshots: dict[str, Snapshot], cfg: dict, *,
     }
 
 
+def factor_attribution(trade_logs: list[dict], *, top_n: int = 3) -> list[dict]:
+    """按"这笔单的主导因子"分组统计期望 R。
+
+    用来解释评分排序的结果：如果高分档集中在某个因子上，而那个因子单独看
+    期望是负的，说明这个因子在拉扯分数而不是在赚钱。
+    """
+    groups: dict[str, list[float]] = {}
+    for t in trade_logs:
+        name = t.get("top_factor")
+        if not name or t.get("r") is None:
+            continue
+        groups.setdefault(str(name), []).append(float(t["r"]))
+    rows = [
+        {"factor": name, "trades": len(rs),
+         "expectancy_r": round(sum(rs) / len(rs), 4)}
+        for name, rs in groups.items()
+    ]
+    rows.sort(key=lambda r: -r["trades"])
+    return rows[:top_n]
+
+
+def direction_stats(trade_logs: list[dict]) -> dict:
+    """多/空分开统计：完整历史上空单在多空两个方向都赚钱，多单只在上涨市赚。
+    这里把它落到"这次回测的样本上"，避免只靠历史结论拍板。
+    """
+    out: dict[str, dict] = {}
+    for side in ("long", "short"):
+        rs = [float(t["r"]) for t in trade_logs
+              if t.get("direction") == side and t.get("r") is not None]
+        if rs:
+            out[side] = {
+                "trades": len(rs),
+                "expectancy_r": round(sum(rs) / len(rs), 4),
+                "win_rate": round(sum(1 for x in rs if x > 0) / len(rs), 4),
+            }
+    return out
+
+
 def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              mode: str = "swing", folds: int = 5, step: int = 10,
              warmup: int = 60, max_concurrent: int = 5,
@@ -160,6 +246,9 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         direction_mults={"long": ml, "short": ms})
     conc = full["concentration"]
     p = full["pooled"]
+    ranking = score_ranking(full.get("trade_logs") or [])
+    dirs = direction_stats(full.get("trade_logs") or [])
+    attrib = factor_attribution(full.get("trade_logs") or [])
     notes: list[str] = []
     if not p["expectancy_ci"]:
         notes.append("样本不足，给不出区间")
@@ -175,6 +264,10 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         notes.append(conc["warning"])
     if wf_conc.get("warning"):
         notes.append("折间口径下" + wf_conc["warning"])
+    if ranking.get("usable") and ranking["verdict"] != "分数有排序能力":
+        notes.append(f"评分排序能力不明显（低分档 {ranking['buckets'][0]['expectancy_r']:+.3f}R"
+                     f" vs 高分档 {ranking['buckets'][-1]['expectancy_r']:+.3f}R）："
+                     f"调阈值大概不会有用，问题在因子本身")
     if port["skipped_capacity"]:
         pct = port["skipped_capacity"] / max(1, port["signals"]) * 100
         notes.append(f"并发上限 {max_concurrent} 挡掉了 {port['skipped_capacity']} "
@@ -206,6 +299,9 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         "concentration": conc,
         "walkforward_concentration": wf_conc,
         "clusters": clusters,
+        "score_ranking": ranking,
+        "directions": dirs,
+        "factor_attribution": attrib,
         "portfolio": {k: v for k, v in port.items() if k != "equity_curve"},
         "notes": notes,
         "verdict": "通过" if not notes else "有保留",

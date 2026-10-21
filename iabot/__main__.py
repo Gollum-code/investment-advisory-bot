@@ -632,6 +632,22 @@ def cmd_validate(args) -> int:
             verdict = "差距不大（上限主要在控风险，不是在挑单）"
         print(f"  挡单质量    : 做上的 {port['taken_expectancy_r']:+.3f}R"
               f" vs 挡掉的 {port['skipped_expectancy_r']:+.3f}R —— {verdict}")
+    rk = out.get("score_ranking") or {}
+    if rk.get("usable"):
+        cells = " ".join(
+            f"{b['label']} {b['expectancy_r']:+.3f}R"
+            for b in rk["buckets"])
+        print(f"  评分排序    : {cells}  -> {rk['verdict']}")
+    ds = out.get("directions") or {}
+    if ds:
+        parts = [f"{k} {v['trades']} 笔 {v['expectancy_r']:+.3f}R"
+                 for k, v in ds.items()]
+        print(f"  多空拆分    : {' | '.join(parts)}")
+    fa = out.get("factor_attribution") or []
+    if fa:
+        parts = [f"{r['factor']} {r['trades']} 笔 {r['expectancy_r']:+.3f}R"
+                 for r in fa]
+        print(f"  主导因子    : {' | '.join(parts)}")
     for n in out["notes"]:
         print(f"  ! {n}")
     print(f"  结论        : {out['verdict']}")

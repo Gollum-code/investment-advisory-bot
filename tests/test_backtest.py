@@ -715,5 +715,14 @@ class TestClustering(unittest.TestCase):
         self.assertIn("A-USDT", out)
 
 
+    def test_trade_log_carries_score_and_top_factor(self):
+        # 反空转：诊断评分排序能力需要每笔的分数与主导因子
+        r = _bt(_trading_snapshot())
+        row = r.trade_log[0]
+        self.assertIn("score", row)
+        self.assertIn("top_factor", row)
+        self.assertIsInstance(row["score"], float)
+
+
 if __name__ == "__main__":
     unittest.main()
