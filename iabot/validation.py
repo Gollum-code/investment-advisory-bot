@@ -188,6 +188,17 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
     if port["max_drawdown_pct"] >= 30:
         notes.append(f"组合最大回撤 {port['max_drawdown_pct']:.0f}%："
                      f"单笔风险 {port['expectancy_r']:+.3f}R 掩盖了这个尾部")
+    # 挡掉的单子如果明显更好，说明上限限太紧了（在拿收益换安全）
+    skipped_e = port.get("skipped_expectancy_r")
+    taken_e = port.get("taken_expectancy_r")
+    if skipped_e is not None and taken_e is not None:
+        gap = skipped_e - taken_e
+        if gap > 0.05:
+            notes.append(f"被挡掉的单子期望 {skipped_e:+.3f}R，明显高于做上的 "
+                         f"{taken_e:+.3f}R：上限限太紧了，正在拿收益换安全")
+        elif gap < -0.05:
+            notes.append(f"被挡掉的单子期望 {skipped_e:+.3f}R，低于做上的 "
+                         f"{taken_e:+.3f}R：上限筛掉了较差的一批，挡得有道理")
     return {
         "mode": mode,
         "full": full,

@@ -139,6 +139,9 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
     open_positions: list[dict] = []
     curve: list[float] = [cash]
     taken_rs: list[float] = []
+    skipped_rs: list[float] = []          # 被任何上限挡掉的单子，用来对比质量
+    skipped_by: dict[str, list[float]] = {"capacity": [], "heat": [],
+                                          "cluster": []}
     skipped_capacity = 0
     skipped_heat = 0
     skipped_cluster = 0
@@ -162,6 +165,7 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
             continue
         if max_concurrent and len(open_positions) >= max_concurrent:
             skipped_capacity += 1
+            skipped_by["capacity"].append(float(t.get("r") or 0.0))
             continue
         base_equity = cash if compound else float(equity)
         # 多空不对称：按方向给不同的单笔风险（R 保持不变，改的是下注金额）。
@@ -174,6 +178,7 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
             heat = sum(p["risk_amount"] for p in open_positions)
             if (heat + risk_amount) > base_equity * max_heat_pct / 100.0:
                 skipped_heat += 1
+                skipped_by["heat"].append(float(t.get("r") or 0.0))
                 continue
         # 相关性簇：同一簇里最多持有几个
         if clusters and max_per_cluster:
@@ -184,6 +189,7 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
                            if clusters.get(p["symbol"]) == cid)
                 if same >= max_per_cluster:
                     skipped_cluster += 1
+                    skipped_by["cluster"].append(float(t.get("r") or 0.0))
                     continue
         r = float(t.get("r") or 0.0)
         open_positions.append({
@@ -200,6 +206,12 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
     dd_abs, dd_pct = _max_drawdown(curve)
     ci = _bootstrap_mean_ci(taken_rs)
     total_return = (cash / equity - 1.0) if equity else 0.0
+    skipped_rs = (skipped_by["capacity"] + skipped_by["heat"]
+                  + skipped_by["cluster"])
+
+    def _mean(xs: list[float]) -> float | None:
+        return round(sum(xs) / len(xs), 4) if xs else None
+
     return {
         "signals": len(logs),
         "taken": len(taken_rs),
@@ -220,5 +232,13 @@ def portfolio_backtest(trade_logs: list[dict], *, equity: float = 450.0,
             (sum(taken_rs) / len(taken_rs)) if taken_rs else 0.0, 4),
         "expectancy_ci": ([round(x, 4) for x in ci] if ci else None),
         "per_trade_r_sum": round(sum(taken_rs), 3),
+        # 被挡掉的单子：如果它们的期望和做上的差不多，说明上限主要是"安全"
+        # 而不是"省钱"；如果明显更好，就说明限太紧了。
+        "skipped_expectancy_r": _mean(skipped_rs),
+        "taken_expectancy_r": _mean(taken_rs),
+        "skipped_breakdown": {
+            k: {"count": len(v), "expectancy_r": _mean(v)}
+            for k, v in skipped_by.items() if v
+        },
         "equity_curve": [round(x, 2) for x in curve],
     }

@@ -622,6 +622,16 @@ def cmd_validate(args) -> int:
           f"（并发上限 {port['max_concurrent']} 挡掉 {port['skipped_capacity']} 笔）"
           f"  收益 {port['total_return_pct']:+.1f}%"
           f"  最大回撤 {port['max_drawdown_pct']:.1f}%")
+    if port.get("skipped_expectancy_r") is not None:
+        gap = port["skipped_expectancy_r"] - port["taken_expectancy_r"]
+        if gap < -0.05:
+            verdict = "挡对了（挡掉的是较差的一批）"
+        elif gap > 0.05:
+            verdict = "挡亏了（挡掉的反而更好，上限太紧）"
+        else:
+            verdict = "差距不大（上限主要在控风险，不是在挑单）"
+        print(f"  挡单质量    : 做上的 {port['taken_expectancy_r']:+.3f}R"
+              f" vs 挡掉的 {port['skipped_expectancy_r']:+.3f}R —— {verdict}")
     for n in out["notes"]:
         print(f"  ! {n}")
     print(f"  结论        : {out['verdict']}")

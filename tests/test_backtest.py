@@ -649,6 +649,26 @@ class TestPortfolioBacktest(unittest.TestCase):
                                  clusters=clusters)
         self.assertEqual(out["taken"], 2)
 
+    def test_skipped_quality_tracked(self):
+        from iabot.portfolio import portfolio_backtest
+        # 做上 +1R、+1R；挡掉 +0.2R
+        logs = [self._log(0, 100, 1.0, "A"), self._log(0, 100, 1.0, "B"),
+                self._log(0, 100, 0.2, "C")]
+        out = portfolio_backtest(logs, equity=450.0, risk_pct=2.0,
+                                 max_concurrent=2)
+        self.assertEqual(out["taken"], 2)
+        self.assertAlmostEqual(out["skipped_expectancy_r"], 0.2, places=4)
+        self.assertAlmostEqual(out["taken_expectancy_r"], 1.0, places=4)
+        self.assertIn("capacity", out["skipped_breakdown"])
+        self.assertEqual(out["skipped_breakdown"]["capacity"]["count"], 1)
+
+    def test_skipped_breakdown_none_when_nothing_skipped(self):
+        from iabot.portfolio import portfolio_backtest
+        out = portfolio_backtest([self._log(0, 100, 1.0)], equity=450.0,
+                                 risk_pct=2.0, max_concurrent=5)
+        self.assertIsNone(out["skipped_expectancy_r"])
+        self.assertAlmostEqual(out["taken_expectancy_r"], 1.0, places=4)
+
 
 class TestClustering(unittest.TestCase):
     """相关性聚类：同涨同跌的币应该被分到同一个簇。"""
