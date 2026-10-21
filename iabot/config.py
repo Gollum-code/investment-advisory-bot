@@ -110,6 +110,17 @@ DEFAULTS: dict[str, Any] = {
             "dampen_at": 0.6,   # 超过这个绝对值才开始衰减
             "k": 1.0,          # 衰减速度：k 越大衰减越弱
         },
+        # 分数带闸门：只接受 |评分| 落在 [min, max] 的信号。
+        # 依据是实测的排序诊断——高分档（|score| 最大的那档）期望最低，
+        # 中分档最好，所以"分数越高越该做"这个前提不成立。与其调阈值
+        # （调高会选中最差那档），不如直接圈定甜点区间。
+        # 默认关：这是用同一批数据发现再检验的，有过拟合风险，
+        # 要靠影子账户在未来的行情里验证。
+        "score_band": {
+            "enabled": False,
+            "min": 40.0,
+            "max": 55.0,
+        },
         # 第二道闸门：目标位盈亏比。默认 tp1 = 只看第一目标（实际最先命中的那档）。
         # 回测过 weighted(0.5/0.3/0.2) 与 max，与 tp1 差异在噪声内，故保持 tp1。
         # 目标位筛选门槛：低于此盈亏比的目标位不作为 TP 候选。
@@ -176,7 +187,7 @@ DEFAULTS: dict[str, Any] = {
         # 成本很低（复用 20 秒快照缓存），样本会自己慢慢攒起来。
         "shadow": {
             "enabled": True,
-            "variants": ["base", "trail_1atr"],
+            "variants": ["base", "band_40_55", "trail_1atr"],
             "every_runs": 6,
             "path": "",              # 留空 = data/shadow.jsonl
         },
@@ -376,6 +387,19 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         td["k"] = _coerce_num(td.get("k"), "analysis.trend_dampen.k",
                               0.05, 20.0, 1.0)
         an["trend_dampen"] = td
+
+    sb = an.get("score_band")
+    if not isinstance(sb, dict):
+        an["score_band"] = {"enabled": False, "min": 40.0, "max": 55.0}
+    else:
+        sb["enabled"] = bool(sb.get("enabled", False))
+        sb["min"] = _coerce_num(sb.get("min"), "analysis.score_band.min",
+                                0.0, 100.0, 40.0)
+        sb["max"] = _coerce_num(sb.get("max"), "analysis.score_band.max",
+                                0.0, 100.0, 55.0)
+        if sb["min"] > sb["max"]:
+            sb["min"], sb["max"] = sb["max"], sb["min"]
+        an["score_band"] = sb
 
     ec = an.get("exit")
     if not isinstance(ec, dict):

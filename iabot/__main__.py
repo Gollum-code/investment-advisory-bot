@@ -997,7 +997,8 @@ COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
             "backup", "watch", "notify-test", "validate",
             "shadow", "shadow-report")
 # 子命令 help 里要列出可选方案名；延迟 import 避免顶层依赖顺序问题
-VARIANTS_NAMES = ("base", "trend_veto", "trail_1atr", "be_1r", "short_heavy")
+VARIANTS_NAMES = ("base", "trend_veto", "trail_1atr", "be_1r", "short_heavy",
+                  "band_40_55")
 
 
 def build_parser() -> argparse.ArgumentParser:

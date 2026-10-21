@@ -1238,6 +1238,35 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     else:
         plan.direction = "wait"
 
+    # ---- 分数带闸门：只接受 |评分| 落在甜点区间的信号 ----
+    # 由来是排序诊断：高分档期望反而最低（+0.111R），中分档最好（+0.288R）。
+    # 所以"分数越高越该做"不成立，与其调阈值（调高会选中最差那档），
+    # 不如直接圈定甜点区间。低于 min 说明信号本身不够强，高于 max
+    # 说明趋势已经走过头，两头都不做。
+    band = an.get("score_band") or {}
+    if (band.get("enabled") and plan.direction != "wait"
+            and abs(plan.score) > 0):
+        lo = float(band.get("min") or 0.0)
+        hi = float(band.get("max") or 0.0)
+        mag = abs(plan.score)
+        if mag < lo or mag > hi:
+            plan.direction = "wait"
+            plan.state_gate = {
+                "score_band": True,
+                "score": round(plan.score, 2),
+                "band": [lo, hi],
+                "reason": (f"评分 {mag:.1f} 落在甜点区间 {lo:.0f}–{hi:.0f} 之外"
+                           f"（{'分数偏高，趋势可能已走过头' if mag > hi else '分数偏低，信号不够强'}），"
+                           f"历史上这两头的期望都不如区间内。"),
+            }
+            plan.confidence = "低"
+            plan.confidence_score = 0.0
+            plan.entry_note = plan.state_gate["reason"]
+            plan.warnings.extend(snap.errors)
+            _attach_sizing(plan, snap, equity, risk_pct, leverage,
+                           max_margin_pct, atr_v)
+            return plan
+
     # 否决只落在"方向已定、且日线趋势明确反对"时（阈值 0.2 = 趋势因子轻微偏向不算）
     if trend_veto and plan.direction != "wait" and abs(trend_daily_v) > 0.2:
         opposed = ((plan.direction == "long" and trend_daily_v < 0)

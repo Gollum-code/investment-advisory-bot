@@ -29,6 +29,10 @@ VARIANTS: dict[str, dict] = {
     "be_1r": {"analysis": {"exit": {"breakeven_at_r": 1.0}}},
     "short_heavy": {"analysis": {"risk_mult_long": 0.5,
                                  "risk_mult_short": 1.5}},
+    # 分数带：前后半段分离检验里唯一在两段都稳定优于无闸门的规则。
+    # 放在影子账户里等未来的行情验证，不直接改默认值。
+    "band_40_55": {"analysis": {"score_band": {"enabled": True,
+                                               "min": 40.0, "max": 55.0}}},
 }
 
 DEFAULT_PATH = "data/shadow.jsonl"

@@ -71,6 +71,11 @@
       "dampen_at": 0.6,
       "k": 1.0
     },
+    "score_band": {
+      "enabled": false,
+      "min": 40.0,
+      "max": 55.0
+    },
     "gate": {
       "measure": "tp1",
       "min_rr": 0.8,
@@ -118,6 +123,7 @@
       "enabled": true,
       "variants": [
         "base",
+        "band_40_55",
         "trail_1atr"
       ],
       "every_runs": 6,
