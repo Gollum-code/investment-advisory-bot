@@ -35,6 +35,16 @@ class Scheduler:
         self.symbols: list[str] = list(sc.get("symbols") or ["BTC-USDT"])
         self.mode: str = sc.get("mode") if sc.get("mode") in SCHEDULABLE_MODES else DEFAULT_MODE
         self.only_on_signal: bool = bool(sc.get("only_on_signal", False))
+        # 影子账户：定时把信号按多套参数记录（复用快照缓存，成本很低），
+        # 攒够样本后再决定要不要改默认值。
+        sh = dict(sc.get("shadow") or {})
+        self.shadow_enabled: bool = bool(sh.get("enabled", True))
+        self.shadow_variants: list[str] = list(sh.get("variants") or ["base"])
+        self.shadow_every: int = max(1, int(sh.get("every_runs") or 1))
+        self.shadow_path: str = str(sh.get("path") or "")
+        self.shadow_last: float = 0.0
+        self.shadow_written: int = 0
+        self.shadow_error: str = ""
         # 全市场轮询：每次只深挖分批的一批，游标跨轮推进，全市场转完一圈再回头。
         # 若每轮都扫全量，几十上百个合约 × 每轮 300 秒根本跑不完，还必被限流。
         uni = dict(sc.get("universe") or {})
@@ -278,6 +288,42 @@ class Scheduler:
         self._universe_cursor = (start + size) % len(all_syms)
         return batch
 
+    def _record_shadow(self, symbols: list[str]) -> dict:
+        """定时记录影子信号。复用 Advisor 的快照缓存，几乎不增加请求量。
+
+        只读+写本地 JSONL，不下单、不改信号库，失败也不该影响主流程。
+        """
+        if not self.shadow_enabled:
+            return {"enabled": False}
+        if self.run_count % self.shadow_every != 0:
+            return {"enabled": True, "skipped": "未到记录轮次",
+                    "every_runs": self.shadow_every}
+        try:
+            from .shadow import record
+            snaps: dict[str, Any] = {}
+            for sym in symbols:
+                try:
+                    snaps[sym] = self.advisor.fetch(sym)   # 命中 20s 快照缓存
+                except Exception:
+                    continue
+            if not snaps:
+                return {"enabled": True, "skipped": "没有可用快照"}
+            out = record(snaps, self.advisor.cfg,
+                         variants=self.shadow_variants, mode=self.mode,
+                         path=(self.shadow_path or None))
+            self.shadow_last = time.time()
+            self.shadow_written += int(out.get("written") or 0)
+            self.shadow_error = ""
+            return {"enabled": True, "written": out.get("written"),
+                    "skipped_wait": out.get("skipped_wait"),
+                    "by_variant": out.get("by_variant")}
+        except Exception as exc:
+            # 影子记录失败不能拖垮定时任务：记下来，下一轮再试
+            self.shadow_error = f"{type(exc).__name__}: {exc}"
+            self._emit({"type": "error", "ts": time.time(),
+                        "symbol": "", "error": f"影子记录失败：{self.shadow_error}"})
+            return {"enabled": True, "error": self.shadow_error}
+
     def _run_once(self) -> list[dict]:
         if not self._run_lock.acquire(blocking=False):
             self._emit({"type": "skip", "ts": time.time(), "reason": "上一轮还没跑完"})
@@ -319,6 +365,7 @@ class Scheduler:
 
             self.run_count += 1
             self.last_run = time.time()
+            shadow_info = self._record_shadow(symbols)
             try:
                 # 按 keep_days 清理过期历史：降频到每小时一次，避免每轮都扫表
                 purged = 0
@@ -332,6 +379,7 @@ class Scheduler:
                         "verified": verified, "closed": closed, "purged": purged,
                         "universe_total": self._universe_total,
                         "universe_cursor": self._universe_cursor,
+                        "shadow": shadow_info,
                         "signals": [{"symbol": p["symbol"], "direction": p["direction"],
                                      "score": p["score"]} for p in plans]})
             return plans
@@ -348,8 +396,7 @@ class Scheduler:
         return {
             "enabled": self.enabled,
             "running": self.running,
-            "interval_sec": self.interval,
-            "mode": self.mode,
+            "interval_sec": self.interval,            "mode": self.mode,
             "symbols": list(self.symbols),
             "only_on_signal": self.only_on_signal,
             "universe": {
@@ -364,6 +411,14 @@ class Scheduler:
             "next_run": self.next_run,
             "run_count": self.run_count,
             "last_error": self.last_error,
+            "shadow": {
+                "enabled": self.shadow_enabled,
+                "variants": list(self.shadow_variants),
+                "every_runs": self.shadow_every,
+                "written": self.shadow_written,
+                "last_at": self.shadow_last,
+                "error": self.shadow_error,
+            },
             "notify": self.notifier.status(),
             "log": list(self.log)[-40:],
         }

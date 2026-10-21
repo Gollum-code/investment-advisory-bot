@@ -109,6 +109,15 @@
       "min_age_sec": 900,
       "max_per_run": 50
     },
+    "shadow": {
+      "enabled": true,
+      "variants": [
+        "base",
+        "trail_1atr"
+      ],
+      "every_runs": 6,
+      "path": ""
+    },
     "warn_near_stop": {
       "enabled": true,
       "pct": 1.5,

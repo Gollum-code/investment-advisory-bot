@@ -661,7 +661,7 @@ def cmd_shadow(args) -> int:
 
 def cmd_shadow_report(args) -> int:
     """影子账户报告：用真实 K 线判定已记录的结局，按方案对比。"""
-    from .shadow import VARIANTS, load, report
+    from .shadow import VARIANTS, load, readiness, report
     entries = load()
     if not entries:
         print("还没有影子记录。先跑：python -m iabot shadow")
@@ -689,7 +689,9 @@ def cmd_shadow_report(args) -> int:
     exits = {k: v.get("analysis", {}) for k, v in VARIANTS.items()
              if "analysis" in v}
     out = report(entries, candles, exit_by_variant=exits)
+    ready = readiness(out)
     if args.json:
+        out["readiness"] = ready
         print(json.dumps(out, ensure_ascii=False))
         return 0
     print("=" * 74)
@@ -702,6 +704,12 @@ def cmd_shadow_report(args) -> int:
         print(f"  {name:<13s} {v['signals']:>4d}  {v['decided']:>5d}  "
               f"{v['pending']:>4d}  {v['win_rate']*100:>5.1f}%  "
               f"{v['expectancy_r']:+.4f}  {ci_s}")
+    print("-" * 74)
+    for name, r in ready.items():
+        bar_n = int(r["progress"] * 20)
+        bar = "#" * bar_n + "." * (20 - bar_n)
+        print(f"  {name:<13s} [{bar}] {r['decided']}/{r['target']}  "
+              f"{r['status']} · {r['advice']}")
     print("=" * 74)
     return 0
 

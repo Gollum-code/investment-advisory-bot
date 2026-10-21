@@ -162,6 +162,15 @@ DEFAULTS: dict[str, Any] = {
             "min_age_sec": 900,      # 信号生成多久之后才开始回填
             "max_per_run": 50,       # 每轮最多回填多少条
         },
+        # 影子账户：定时把当前信号按多套参数各记一份（只记录不下单），
+        # 用未来的真实行情验证"要不要改默认值"。默认开、每 6 轮记一次，
+        # 成本很低（复用 20 秒快照缓存），样本会自己慢慢攒起来。
+        "shadow": {
+            "enabled": True,
+            "variants": ["base", "trail_1atr"],
+            "every_runs": 6,
+            "path": "",              # 留空 = data/shadow.jsonl
+        },
         # 持仓接近止损预警：现价进入止损附近 pct% 内时推通知（每仓有冷却）
         "warn_near_stop": {
             "enabled": True,
@@ -408,6 +417,14 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     ver = _section(sc, "verify", DEFAULTS["schedule"]["verify"])
     ver["max_per_run"] = _coerce_int(ver.get("max_per_run"),
                                      "schedule.verify.max_per_run", 1, 5000, 50)
+    sh = _section(sc, "shadow", DEFAULTS["schedule"]["shadow"])
+    sh["enabled"] = bool(sh.get("enabled", True))
+    sh["variants"] = _coerce_list(sh.get("variants"), "schedule.shadow.variants",
+                                  DEFAULTS["schedule"]["shadow"]["variants"])
+    sh["every_runs"] = _coerce_int(sh.get("every_runs"),
+                                   "schedule.shadow.every_runs", 1, 1000, 6)
+    if not isinstance(sh.get("path"), str):
+        sh["path"] = ""
     ded = _section(sc, "dedupe", DEFAULTS["schedule"]["dedupe"])
     ded["cooldown_sec"] = _coerce_num(ded.get("cooldown_sec"),
                                       "schedule.dedupe.cooldown_sec", 0, 86400, 3600.0)

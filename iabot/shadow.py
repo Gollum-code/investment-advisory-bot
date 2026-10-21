@@ -32,6 +32,11 @@ VARIANTS: dict[str, dict] = {
 }
 
 DEFAULT_PATH = "data/shadow.jsonl"
+# 一个方案至少要有这么多"已判定"样本，才值得据此改默认值。
+# 30 是统计显著性下限（与 backtest 的 MIN_TRADES_FOR_SIGNIFICANCE 一致），
+# 100 是"足够放心"的经验值。
+MIN_SAMPLES = 30
+READY_SAMPLES = 100
 
 
 def _merge_patch(cfg: dict, patch: dict) -> dict:
@@ -142,6 +147,36 @@ def report(entries: list[dict], candles_by_symbol: dict, *,
         rows.append({"variant": e.get("variant"), "symbol": sym,
                      "outcome": res["outcome"], "r": r})
     return summarize(rows)
+
+
+def readiness(summary: dict, *, target: int = READY_SAMPLES) -> dict:
+    """每个方案"样本够不够下结论"。
+
+    pending 很多而 decided 很少时，说明记录时间还不够长——这时候对比期望值
+    没有意义，先等。返回的 advice 直接给 CLI/网页用。
+    """
+    out: dict[str, dict] = {}
+    for name, v in (summary.get("variants") or {}).items():
+        decided = int(v.get("decided") or 0)
+        if decided >= target:
+            status = "ready"
+            advice = "样本够了，可以据此调整默认值"
+        elif decided >= MIN_SAMPLES:
+            status = "初步"
+            advice = f"达到显著性下限，建议再攒到 {target} 笔"
+        else:
+            status = "不足"
+            need = MIN_SAMPLES - decided
+            advice = f"还差 {max(0, need)} 笔到显著性下限（{MIN_SAMPLES}）"
+        out[name] = {
+            "decided": decided,
+            "pending": int(v.get("pending") or 0),
+            "target": target,
+            "progress": round(min(1.0, decided / target), 3),
+            "status": status,
+            "advice": advice,
+        }
+    return out
 
 
 def summarize(rows: list[dict]) -> dict:

@@ -182,5 +182,32 @@ class TestSummarize(unittest.TestCase):
         self.assertGreater(v["expectancy_ci"][1], v["expectancy_r"])
 
 
+class TestReadiness(unittest.TestCase):
+    def _v(self, decided, pending=0):
+        return {"decided": decided, "pending": pending}
+
+    def test_below_significance(self):
+        from iabot.shadow import MIN_SAMPLES, readiness
+        out = readiness({"variants": {"a": self._v(5, 20)}})["a"]
+        self.assertEqual(out["status"], "不足")
+        self.assertIn(str(MIN_SAMPLES - 5), out["advice"])
+        self.assertLess(out["progress"], 1.0)
+
+    def test_at_significance(self):
+        from iabot.shadow import MIN_SAMPLES, readiness
+        out = readiness({"variants": {"a": self._v(MIN_SAMPLES)}})["a"]
+        self.assertEqual(out["status"], "初步")
+
+    def test_ready(self):
+        from iabot.shadow import READY_SAMPLES, readiness
+        out = readiness({"variants": {"a": self._v(READY_SAMPLES)}})["a"]
+        self.assertEqual(out["status"], "ready")
+        self.assertAlmostEqual(out["progress"], 1.0)
+
+    def test_empty(self):
+        from iabot.shadow import readiness
+        self.assertEqual(readiness({"variants": {}}), {})
+
+
 if __name__ == "__main__":
     unittest.main()

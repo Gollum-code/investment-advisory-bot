@@ -226,5 +226,87 @@ class TestUniverseRoundRobin(SchedulerTestBase):
         self.assertEqual(st["universe"]["batch_size"], 1)
 
 
+class TestShadowSchedule(SchedulerTestBase):
+    """影子记录挂在定时任务里：复用快照缓存、限频、失败不拖垮主流程。"""
+
+    def _plan(self, direction="long"):
+        from iabot.signals import Plan
+        return Plan(symbol="BTC-USDT", mode="intraday", direction=direction,
+                    price=100.0, generated_at=0.0)
+
+    def test_disabled_writes_nothing(self):
+        from unittest import mock
+        sch = self._scheduler(shadow={"enabled": False})
+        p = str(Path(self.tmp.name) / "shadow.jsonl")
+        sch.shadow_path = p
+        with mock.patch("iabot.shadow.build_plan",
+                        side_effect=lambda s, c, mode: self._plan()):
+            info = sch._record_shadow(["BTC-USDT"])
+        self.assertFalse(info["enabled"])
+        self.assertFalse(Path(p).exists())
+
+    def test_enabled_writes_lines(self):
+        from unittest import mock
+        sch = self._scheduler(shadow={"enabled": True, "variants": ["base"],
+                                      "every_runs": 1})
+        p = str(Path(self.tmp.name) / "shadow.jsonl")
+        sch.shadow_path = p
+        sch.run_count = 1
+        with mock.patch("iabot.shadow.build_plan",
+                        side_effect=lambda s, c, mode: self._plan()):
+            info = sch._record_shadow(["BTC-USDT"])
+        self.assertEqual(info["written"], 1)
+        self.assertTrue(Path(p).exists())
+        self.assertGreater(sch.shadow_written, 0)
+        self.assertEqual(sch.shadow_error, "")
+
+    def test_every_runs_throttles(self):
+        from unittest import mock
+        sch = self._scheduler(shadow={"enabled": True, "variants": ["base"],
+                                      "every_runs": 3})
+        p = str(Path(self.tmp.name) / "shadow.jsonl")
+        sch.shadow_path = p
+        with mock.patch("iabot.shadow.build_plan",
+                        side_effect=lambda s, c, mode: self._plan()):
+            sch.run_count = 1
+            self.assertIn("skipped", sch._record_shadow(["BTC-USDT"]))
+            sch.run_count = 3
+            self.assertEqual(sch._record_shadow(["BTC-USDT"])["written"], 1)
+
+    def test_uses_advisor_snapshot_cache(self):
+        # 反空转：影子记录应复用 Advisor.fetch 的缓存，而不是重新抓
+        from unittest import mock
+        client = FakeClient()
+        sch = self._scheduler(client=client,
+                              shadow={"enabled": True, "variants": ["base"],
+                                      "every_runs": 1})
+        sch.shadow_path = str(Path(self.tmp.name) / "shadow.jsonl")
+        sch.run_count = 1
+        sch.advisor.fetch("BTC-USDT")          # 先填缓存
+        calls = client.calls
+        with mock.patch("iabot.shadow.build_plan",
+                        side_effect=lambda s, c, mode: self._plan()):
+            sch._record_shadow(["BTC-USDT"])
+        self.assertEqual(client.calls, calls)  # 没有再打接口
+
+    def test_failure_is_contained(self):
+        from unittest import mock
+        sch = self._scheduler(shadow={"enabled": True, "variants": ["base"],
+                                      "every_runs": 1})
+        sch.run_count = 1
+        with mock.patch("iabot.shadow.record", side_effect=OSError("disk full")):
+            info = sch._record_shadow(["BTC-USDT"])
+        self.assertIn("error", info)
+        self.assertIn("disk full", sch.shadow_error)
+
+    def test_status_exposes_shadow(self):
+        sch = self._scheduler(shadow={"enabled": True, "variants": ["base"],
+                                      "every_runs": 2})
+        st = sch.status()
+        self.assertTrue(st["shadow"]["enabled"])
+        self.assertEqual(st["shadow"]["variants"], ["base"])
+        self.assertEqual(st["shadow"]["every_runs"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
