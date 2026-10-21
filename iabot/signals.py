@@ -207,6 +207,31 @@ def _slope_pct(vals: list[float | None], n: int) -> float:
     return b / my if my else 0.0
 
 
+def _dampen_trend(score: float, cfg: dict | None) -> float:
+    """对极端的日线趋势读数做衰减（默认关）。
+
+    动机是实测：评分 79% 的单子由"日线趋势"主导，而趋势越极端越可能是行情
+    尾声——低分2 档期望 +0.288R，高分档只有 +0.111R。衰减只削超出
+    dampen_at 的那部分（保留方向），不动接近中性的那一段。
+
+    这是因子层改动，默认关；要先用影子账户验证，不能凭一次回测就打开。
+    """
+    td = ((cfg or {}).get("analysis") or {}).get("trend_dampen") or {}
+    if not td.get("enabled"):
+        return score
+    at = float(td.get("dampen_at") or 0.6)
+    k = float(td.get("k") or 1.0)
+    if k <= 0:
+        return score
+    sign = 1.0 if score >= 0 else -1.0
+    over = abs(score) - at
+    if over <= 0:
+        return score
+    # 超出部分按 1/(1+over/k) 衰减：k 越大衰减越弱
+    kept = at + over / (1.0 + over / k)
+    return sign * max(0.0, min(1.0, kept))
+
+
 def _f_trend(snap: Snapshot) -> Factor:
     """日线趋势。
 
@@ -735,7 +760,8 @@ def _gate_measure(targets: list[dict], measure: str,
 
 
 def compute_factors(snap: Snapshot, *, resonance: bool = False,
-                    resonance_weight: float = RESONANCE_DEFAULT_WEIGHT) -> list[Factor]:
+                    resonance_weight: float = RESONANCE_DEFAULT_WEIGHT,
+                    trend_dampen: dict | None = None) -> list[Factor]:
     out: list[Factor] = []
     for fn, needs_price in FACTOR_FNS:
         try:
@@ -749,6 +775,11 @@ def compute_factors(snap: Snapshot, *, resonance: bool = False,
     for f in out:
         if f.name in FACTOR_DEFAULTS:
             f.weight = float(FACTOR_DEFAULTS[f.name])
+    if trend_dampen and trend_dampen.get("enabled"):
+        for f in out:
+            if f.name == "trend_daily":
+                f.score = _dampen_trend(f.score, {"analysis": {
+                    "trend_dampen": trend_dampen}})
     if resonance:
         try:
             out.append(_f_resonance(snap, resonance_weight))
@@ -1072,7 +1103,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     factors = apply_factor_weights(
         compute_factors(snap,
                         resonance=bool(res_cfg.get("enabled")),
-                        resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT)),
+                        resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT),
+                        trend_dampen=an.get("trend_dampen")),
         an.get("factor_weights"))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)

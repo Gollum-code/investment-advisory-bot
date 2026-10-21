@@ -101,6 +101,15 @@ DEFAULTS: dict[str, Any] = {
         # 1.0 = 不调整（默认）；调大 = 该方向单笔风险按倍数放大。
         "risk_mult_long": 1.0,
         "risk_mult_short": 1.0,
+        # 趋势衰减实验：实测评分 79% 的单子由"日线趋势"主导，且趋势越极端
+        # 越可能是行情尾声（高分档期望 +0.111R，中分档 +0.288R）。
+        # 这里对 |日线趋势| 超过 dampen_at 的部分做衰减：k=1 时衰减到 1/2。
+        # 默认关；是因子层改动，要先用影子账户验证，不能凭一次回测就打开。
+        "trend_dampen": {
+            "enabled": False,
+            "dampen_at": 0.6,   # 超过这个绝对值才开始衰减
+            "k": 1.0,          # 衰减速度：k 越大衰减越弱
+        },
         # 第二道闸门：目标位盈亏比。默认 tp1 = 只看第一目标（实际最先命中的那档）。
         # 回测过 weighted(0.5/0.3/0.2) 与 max，与 tp1 差异在噪声内，故保持 tp1。
         # 目标位筛选门槛：低于此盈亏比的目标位不作为 TP 候选。
@@ -355,6 +364,18 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
         an.get("risk_mult_long"), "analysis.risk_mult_long", 0.1, 3.0, 1.0)
     an["risk_mult_short"] = _coerce_num(
         an.get("risk_mult_short"), "analysis.risk_mult_short", 0.1, 3.0, 1.0)
+
+    td = an.get("trend_dampen")
+    if not isinstance(td, dict):
+        an["trend_dampen"] = {"enabled": False, "dampen_at": 0.6, "k": 1.0}
+    else:
+        td["enabled"] = bool(td.get("enabled", False))
+        td["dampen_at"] = _coerce_num(td.get("dampen_at"),
+                                      "analysis.trend_dampen.dampen_at",
+                                      0.1, 1.0, 0.6)
+        td["k"] = _coerce_num(td.get("k"), "analysis.trend_dampen.k",
+                              0.05, 20.0, 1.0)
+        an["trend_dampen"] = td
 
     ec = an.get("exit")
     if not isinstance(ec, dict):

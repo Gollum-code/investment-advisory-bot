@@ -66,6 +66,11 @@
     },
     "risk_mult_long": 1.0,
     "risk_mult_short": 1.0,
+    "trend_dampen": {
+      "enabled": false,
+      "dampen_at": 0.6,
+      "k": 1.0
+    },
     "gate": {
       "measure": "tp1",
       "min_rr": 0.8,
