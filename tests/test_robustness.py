@@ -127,6 +127,7 @@ class TestSchedulerThreadLifecycle(unittest.TestCase):
         self.tmp.cleanup()
 
     def _make(self):
+        self.cfg["schedule"]["universe"]["enabled"] = False   # 用固定符号列表
         adv = Advisor(self.cfg)
         outer = self
 

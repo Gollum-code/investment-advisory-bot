@@ -134,10 +134,12 @@
       "cooldown_sec": 1800
     },
     "universe": {
-      "enabled": false,
+      "enabled": true,
       "batch_size": 20,
       "workers": 4,
-      "filters": {}
+      "filters": {
+        "max_symbols": 30
+      }
     }
   },
   "storage": {

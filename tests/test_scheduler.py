@@ -187,8 +187,15 @@ class TestUniverseRoundRobin(SchedulerTestBase):
             "filters": {"min_turnover_usdt": 1000}})
 
     def test_disabled_uses_explicit_symbols(self):
-        sch = self._scheduler()          # universe 默认关闭
+        # 显式关掉全市场时才回落到写死的列表（默认已改为开启）
+        sch = self._scheduler(universe={"enabled": False})
         self.assertEqual(sch._round_symbols(), ["BTC-USDT"])
+
+    def test_defaults_scan_universe(self):
+        # 默认就该扫全市场：只盯一个币等于自我减单，而这套策略靠手数。
+        sch = self._scheduler()
+        self.assertTrue(sch.universe_enabled)
+        self.assertLessEqual(sch.universe_cfg.get("max_symbols", 0), 30)
 
     def test_batches_advance_cursor(self):
         syms = ["A-USDT", "B-USDT", "C-USDT", "D-USDT", "E-USDT"]
