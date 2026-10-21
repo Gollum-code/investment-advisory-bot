@@ -123,7 +123,6 @@
       "enabled": true,
       "variants": [
         "base",
-        "band_40_55",
         "trail_1atr"
       ],
       "every_runs": 6,

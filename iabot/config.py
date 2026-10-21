@@ -187,7 +187,7 @@ DEFAULTS: dict[str, Any] = {
         # 成本很低（复用 20 秒快照缓存），样本会自己慢慢攒起来。
         "shadow": {
             "enabled": True,
-            "variants": ["base", "band_40_55", "trail_1atr"],
+            "variants": ["base", "trail_1atr"],
             "every_runs": 6,
             "path": "",              # 留空 = data/shadow.jsonl
         },
