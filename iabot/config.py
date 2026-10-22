@@ -133,6 +133,31 @@ DEFAULTS: dict[str, Any] = {
             "weights": [0.5, 0.3, 0.2],   # measure=weighted 时各档权重
             # 必须 <= min_rr，否则闸门形同虚设（候选门槛自己就把低 RR 目标滤掉了）
             "min_target_rr": 0.5,     # 目标位候选门槛
+            # 目标位上限：最近的合格结构位超过这个 RR 就不做。
+            #
+            # 为什么不是"质量闸门"（那是三次都被否掉的思路）：TP1 取的是
+            # **最近的**合格结构位，它超过 2.5R 意味着前方根本没有近距离的
+            # 阻力/支撑可依托，这单必须走出很远才回本。不是我们挑了远目标，
+            # 是只有远目标可选。所以这条规则改变不了目标距离，只能不做。
+            #
+            # 实测（24 币 × 2000 根日线，逐笔真实规则，cap 开/关配对比较）：
+            #   Δ胜率  : 22 个币里 21 个为正，中位数 +2.7pp
+            #   Δ期望  : 只有 10/22 为正，中位数 -0.003R、均值 +0.001R
+            # 也就是：**胜率稳定提高约 3 个百分点，期望值不变（差异在噪声内）**。
+            #
+            # 为什么不算"质量闸门"（那是三次都被否掉的思路）：被砍掉的
+            # 分数档期望是明确为正的（+0.169/+0.087），砍掉就是净损失；
+            # 而这里被砍掉的远目标档期望在配对检验里正负各半、集中在中位数
+            # -0.003R，等于**没有可证明的 edge**。去掉没有 edge 的单子不亏，
+            # 换来的是胜率和略低的回撤（24.4%→23.3%），代价是少约 11% 的单量。
+            #
+            # 机制也不是挑目标：TP1 取的是"最近的"合格结构位，它超过 2.5R
+            # 说明前方没有近距离的阻力/支撑可依托，这单必须走出很远才回本。
+            # 所以这条规则改变不了目标距离，只能选择不做。
+            #
+            # 注意：单次汇总会骗人——某次跑出来"收益 +48%"，换个币池又变成
+            # "-22%"，那都是噪声。只有逐币配对的方向才可信。
+            "max_target_rr": 2.5,     # 目标位盈亏比上限（None = 不限制）
         },
         # 回测成本模型（更贴近真实：手续费 + 滑点 + 按持仓时长的资金费）
         "backtest": {
@@ -438,6 +463,18 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                    0.0, 20.0, 1.0)
         gc["min_target_rr"] = _coerce_num(gc.get("min_target_rr"),
                                           "analysis.gate.min_target_rr", 0.0, 20.0, 0.8)
+        # 上限允许 None（= 不限制）；给数字就夹到 min_target_rr 之上，
+        # 否则上下限打架会把所有候选都滤掉。
+        mx = gc.get("max_target_rr")
+        if mx is None:
+            gc["max_target_rr"] = None
+        else:
+            gc["max_target_rr"] = _coerce_num(mx, "analysis.gate.max_target_rr",
+                                              1.0, 20.0, 2.5)
+            if gc["max_target_rr"] < gc["min_target_rr"]:
+                print(f"[config] analysis.gate.max_target_rr={gc['max_target_rr']} "
+                      f"小于 min_target_rr={gc['min_target_rr']}，改用 min_target_rr")
+                gc["max_target_rr"] = gc["min_target_rr"]
         gw = gc.get("weights")
         if not isinstance(gw, list) or not any(
                 isinstance(x, (int, float)) for x in gw):

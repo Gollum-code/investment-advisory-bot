@@ -84,7 +84,8 @@
         0.3,
         0.2
       ],
-      "min_target_rr": 0.5
+      "min_target_rr": 0.5,
+      "max_target_rr": 2.5
     },
     "backtest": {
       "enabled": true,

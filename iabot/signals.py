@@ -710,6 +710,18 @@ GATE_DEFAULT_WEIGHTS = (0.5, 0.3, 0.2)
 _GATE_CN = {"tp1": "第一目标", "weighted": "加权目标", "max": "最好目标"}
 
 
+def _max_target_rr(gate_cfg: dict) -> float | None:
+    """目标位盈亏比上限；None / 非法值 = 不限制。"""
+    raw = (gate_cfg or {}).get("max_target_rr")
+    if raw is None:
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
+
+
 def _gate_settings(gate_cfg: dict) -> tuple[str, float, tuple[float, ...]]:
     """从 config 的 analysis.gate 解出 (判据, 最低盈亏比, 权重)。"""
     name = str((gate_cfg or {}).get("measure") or GATE_DEFAULT_MEASURE).lower()
@@ -1376,6 +1388,24 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
             cands.append((rr, t))
     # 按"先到的先算"排序：RR 越小离得越近
     cands.sort(key=lambda x: x[0])
+
+    # ---- 目标位上限：最近的合格结构位都超过上限就不做 ----
+    # TP1 取的是"最近的"合格位，所以超上限说明前方没有近距离结构可依托，
+    # 不是我们挑远了，是只有远的可选。截断只能靠不做，挪近目标是自欺欺人。
+    # 详见 config.py 里 analysis.gate.max_target_rr 的实测表。
+    cap_rr = _max_target_rr(gate_cfg)
+    if cap_rr is not None and cands and cands[0][0] > cap_rr:
+        near = cands[0][0]
+        plan.warnings.append(
+            f"最近的目标位也在 {near:.2f}R 之外（上限 {cap_rr:.2f}R），"
+            f"前方没有近距离结构可依托，这单要走出很远才回本。")
+        plan.gate = {"blocked": True, "reason": "target_too_far",
+                     "score": plan.score, "would_be": plan.direction,
+                     "rr": round(near, 2), "need": cap_rr}
+        return _downgrade(plan, snap, equity, risk_pct, leverage, max_margin_pct, atr_v,
+                          f"最近目标 {near:.2f}R 超过上限 {cap_rr:.2f}R"
+                          f"（无近距离结构），不出手。")
+
     for i, (rr, t) in enumerate(cands[:3], 1):
         plan.targets.append({"price": t["price"], "label": f"TP{i}",
                              "rr": round(rr, 2), "source": t.get("source", "")})
