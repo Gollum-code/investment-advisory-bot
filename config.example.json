@@ -100,7 +100,10 @@
       "breakeven_at_r": null,
       "trail_atr_mult": null
     },
-    "trend_veto": false
+    "trend_veto": false,
+    "factor_normalize": {
+      "enabled": false
+    }
   },
   "schedule": {
     "enabled": false,

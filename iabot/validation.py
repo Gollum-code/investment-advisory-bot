@@ -92,6 +92,7 @@ def _symbol_rows(snapshots: dict[str, Snapshot], cfg: dict, *,
             "_rs": list(res.trade_rs or []),
             "_log": list(res.trade_log or []),
             "gate_counts": dict(res.gate_counts or {}),
+            "factor_coverage": round(float(res.factor_coverage or 0.0), 3),
         })
     return rows
 
@@ -306,6 +307,16 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
     # 闸门漏斗：新加一道闸门后最需要的诊断。没有它，"我加了上限"和
     # "我没信号了"分不清——只看到交易数掉了，不知道掉在哪一步。
     funnel = gate_funnel(full.get("rows") or [])
+    cov = [r.get("factor_coverage") for r in full.get("rows") or []
+           if r.get("factor_coverage") is not None]
+    if cov:
+        avg_cov = sum(cov) / len(cov)
+        if avg_cov < 0.99:
+            notes.append(
+                f"回测因子覆盖率 {avg_cov:.0%}：历史 K 线只给最近 2000 根，"
+                f"盘中周期（60min 覆盖 83 天）够不到 5.5 年的日线跨度，"
+                f"早段检查点缺盘类因子。这些数字验的是一个更窄的模型，"
+                f"不代表实盘（实盘因子齐全）。详见 README「因子覆盖率」")
     for name, cnt in funnel.items():
         label = GATE_CN.get(name, name)
         notes.append(f"闸门[{label}] 挡掉 {cnt} 个检查点")
@@ -340,6 +351,7 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         "directions": dirs,
         "factor_attribution": attrib,
         "gates": funnel,
+        "factor_coverage": (round(sum(cov) / len(cov), 3) if cov else None),
         "portfolio": {k: v for k, v in port.items() if k != "equity_curve"},
         "notes": notes,
         "verdict": "通过" if not notes else "有保留",

@@ -96,6 +96,10 @@ class BacktestResult:
     # 没有它就只能看到"信号少"，不知道少在哪一步——新加一道闸门后尤其
     # 需要这个，否则"我加了上限"和"我没信号了"分不清。
     gate_counts: dict[str, int] | None = None
+    # 评分权重里"真有数据"的平均占比。历史回测里盘中周期只有最近 2000 根，
+    # 所以这个值通常远低于 1（实盘是 1.0）。低于 1 就说明回测验的是一个
+    # 更窄的因子集合，不能把这些数字当成"完整策略"的表现。
+    factor_coverage: float = 1.0
 
     @property
     def significant(self) -> bool:
@@ -146,6 +150,7 @@ class BacktestResult:
             "equity_curve": [round(x, 3) for x in self.equity_curve],
             "equity_curve_usdt": [round(x, 2) for x in self.equity_curve_usdt],
             "gate_counts": dict(self.gate_counts or {}),
+            "factor_coverage": round(self.factor_coverage, 3),
         }
 
 
@@ -386,6 +391,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     holding_hs: list[float] = []
     # 闸门漏斗：key = gate_reason(plan) 或 "no_fill"
     gate_counts: dict[str, int] = {}
+    # 每个检查点的因子覆盖率（用来算均值，并在结果里报出来）
+    coverages: list[float] = []
 
     start = warmup if start_index is None else max(warmup, int(start_index))
     end = (n - 5) if end_index is None else min(n - 5, int(end_index))
@@ -406,6 +413,10 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         future = main[i + 1:]
 
         plan = build_plan(snap, cfg, mode=mode)
+        try:
+            coverages.append(float(getattr(plan, "factor_coverage", 1.0) or 1.0))
+        except (TypeError, ValueError):
+            coverages.append(1.0)
         if plan.direction not in ("long", "short"):
             why = gate_reason(plan)
             if why:
@@ -544,4 +555,5 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         equity_curve_usdt=curve_usdt,
         trade_rs=trade_rs, expectancy_ci=ci, std_err=std_err, t_stat=t_stat,
         trade_log=trade_log, gate_counts=gate_counts,
+        factor_coverage=(mean(coverages) if coverages else 1.0),
     )

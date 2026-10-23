@@ -652,7 +652,11 @@ def cmd_validate(args) -> int:
     if gf:
         # 漏斗按顺序说：从"连方向都没评出来"到"挂了单没成交"
         total_checks = sum(gf.values()) + p["trades"]
-        print(f"  闸门漏斗    : 共 {total_checks} 个检查点")
+        cov = out.get("factor_coverage")
+        head = f"  闸门漏斗    : 共 {total_checks} 个检查点"
+        if cov is not None and cov < 0.99:
+            head += f"（因子覆盖率 {cov:.0%}）"
+        print(head)
         for k, v in gf.items():
             label = GATE_CN.get(k, k)
             share = v / max(1, total_checks) * 100

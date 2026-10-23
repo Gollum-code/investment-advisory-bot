@@ -36,6 +36,25 @@ TREND_CONFIRM_SCALE = 0.5
 # 状态闸门：状态因子（波动率/成交量/资金费）加权均值低于此值就不开仓。
 STATE_GATE_MIN = 0.10
 
+# 因子"没数据"的详情里必然出现的词。用它判断这个因子是否真的算过，
+# 而不是靠"分数是 0"——分数 0 也可能是"算出来正好中性"（例如 RSI=50），
+# 那种参与合成是对的，不能剔除。
+_DEAD_MARKS = ("数据不足", "无法计算", "接口失败", "无盘口", "无成交",
+               "无资金费", "空数据", "数据为空")
+
+
+def _dead_factor_names(factors: dict) -> set:
+    """哪些因子是"没数据"而不是"算出来是中性"。
+
+    注意：只按详情判定，不看分数。分数为 0 且详情正常 => 中性，参与合成。
+    """
+    dead = set()
+    for name, f in factors.items():
+        detail = str(getattr(f, "detail", "") or "")
+        if any(m in detail for m in _DEAD_MARKS):
+            dead.add(name)
+    return dead
+
 # ---- 模式定位：谁是主策略、谁是实验品 ----
 # 用历史数据定的。关键教训：**样本窗口决定结论**。
 #
@@ -167,6 +186,11 @@ class Plan:
     price: float | None = None
     generated_at: float = 0.0
     profile: str = ""
+    # 本次评分有多少权重是真有数据的。1.0 = 全部因子都在；
+    # 历史回测里可能只有 0.5 左右（盘中周期只有最近 2000 根），
+    # 这时候"评分"只代表少数因子的意见，不该被当成全体一致。
+    factor_coverage: float = 1.0
+    dead_factors: list[str] = field(default_factory=list)
     # 多空不对称风险倍数：完整历史上空单在两个方向都赚钱、多单只在上涨市
     # 赚钱，所以允许给空单更大的单笔风险（默认 1.0 = 不调整，安全起见）。
     risk_mult_long: float = 1.0
@@ -1206,16 +1230,50 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     state_names = ("volatility", "volume", "funding")
     trend_names = ("trend_daily", "trend_intraday", "momentum", "structure")
     sf = {f.name: f for f in factors}
-    state_raw = sum(sf[n].score * sf[n].weight for n in state_names if n in sf)
-    state_w = sum(sf[n].weight for n in state_names if n in sf) or 1.0
+    # 缺数据的因子必须**不参与**合成，不能按 0 分算进去。
+    #
+    # 根因：交易所的 history/kline 只给最近 2000 根，5min 只覆盖 6.9 天、
+    # 60min 只覆盖 83 天，而日线覆盖 5.5 年。于是历史回测里 96.9% 的
+    # 检查点只有 5 个因子有真实数据，其余 6 个（0.42 权重）全是 0 分。
+    # 按 0 分参与加权平均，等于把"没意见"当成"中性偏空"——方向被稀释，
+    # |评分| 掉到阈值以下的检查点从 27.8% 涨到 38.5%。实盘不这样（数据全在），
+    # 所以回测分数比实盘低、比实盘保守，是个静默失真。
+    # 用"该因子的分数恰好为 0 且详情标注了缺失"来识别，不用字符串猜。
+    dead_all = _dead_factor_names(sf)
+    dead = set(dead_all)
+    # 是否剔除缺数据的因子由配置决定。默认不剔：实测剔除会放大 |评分|，
+    # 让阈值 30 变相放松、放出边际更差的单子（期望 +0.209R -> +0.167R）。
+    # 保留开关是为了能复现这个对比，不是为了默认开启。
+    if not bool((an.get("factor_normalize") or {}).get("enabled")):
+        dead = set()
+    state_raw = sum(sf[n].score * sf[n].weight for n in state_names
+                    if n in sf and n not in dead)
+    state_w = sum(sf[n].weight for n in state_names if n in sf and n not in dead) or 1.0
     state_score = state_raw / state_w
-    trend_raw = sum(sf[n].score * sf[n].weight for n in trend_names if n in sf)
-    trend_w = sum(sf[n].weight for n in trend_names if n in sf) or 1.0
+    trend_raw = sum(sf[n].score * sf[n].weight for n in trend_names
+                    if n in sf and n not in dead)
+    trend_w = sum(sf[n].weight for n in trend_names if n in sf and n not in dead) or 1.0
 
     dir_raw = state_raw + TREND_CONFIRM_SCALE * trend_raw
     dir_total = state_w + TREND_CONFIRM_SCALE * trend_w
     dir_mean = dir_raw / dir_total
     dir_score = round(100.0 * math.tanh(dir_mean / SCORE_SCALE), 1)
+
+    # 覆盖率始终按"真实有数据"算，与是否归一化无关——它描述的是事实，
+    # 不是策略选择。只有 state_names + trend_names 这 7 个真正进入
+    # dir_score（vwap/oi/elite/orderbook 不参与方向），所以分母取这 7 个
+    # 的最大加权和，否则覆盖率永远到不了 1。
+    live_state = sum(sf[n].weight for n in state_names
+                     if n in sf and n not in dead_all)
+    live_trend = sum(sf[n].weight for n in trend_names
+                     if n in sf and n not in dead_all)
+    max_state = sum(sf[n].weight for n in state_names if n in sf)
+    max_trend = sum(sf[n].weight for n in trend_names if n in sf)
+    max_total = max_state + TREND_CONFIRM_SCALE * max_trend
+    live_total = live_state + TREND_CONFIRM_SCALE * live_trend
+    plan.factor_coverage = (round(min(1.0, live_total / max_total), 3)
+                            if max_total > 0 else 0.0)
+    plan.dead_factors = sorted(dead_all)
 
     # ---- 趋势对齐闸门：只做与日线趋势同向的单 ----
     # 由来：之前一直想修"跌段做多亏"，五种候选闸门（price vs SMA 锚、状态与趋势
