@@ -1097,6 +1097,10 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
+        # 显式标注原因：否则闸门漏斗会把"没数据"算成"评分不够"，
+        # 让人误以为是因子问题。
+        plan.gate = {"blocked": True, "reason": "no_price",
+                     "score": 0.0, "would_be": "wait"}
         return plan
 
     # 超卖反弹通道走独立判据，不进多因子打分/闸门那条路
@@ -1172,6 +1176,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
         plan.direction = "wait"
         plan.notes.append(f"缺少 {m['atr_period']} 数据，无法计算止损距离。")
         plan.warnings.extend(snap.errors)
+        plan.gate = {"blocked": True, "reason": "no_atr",
+                     "score": 0.0, "would_be": "wait"}
         return plan
 
     # ---- 价位阶梯 ----

@@ -92,6 +92,10 @@ class BacktestResult:
     # 每笔交易的明细（entry_ts/exit_ts/r/direction/outcome/holding_h）。
     # 组合级回测要靠它判断"同一时刻开了几个仓、资金够不够"。
     trade_log: list[dict] | None = None
+    # 闸门漏斗：每个检查点上"被哪道闸门挡掉"的计数。
+    # 没有它就只能看到"信号少"，不知道少在哪一步——新加一道闸门后尤其
+    # 需要这个，否则"我加了上限"和"我没信号了"分不清。
+    gate_counts: dict[str, int] | None = None
 
     @property
     def significant(self) -> bool:
@@ -141,7 +145,39 @@ class BacktestResult:
             "max_mae": round(self.max_mae, 3),
             "equity_curve": [round(x, 3) for x in self.equity_curve],
             "equity_curve_usdt": [round(x, 2) for x in self.equity_curve_usdt],
+            "gate_counts": dict(self.gate_counts or {}),
         }
+
+
+def gate_reason(plan) -> str:
+    """这个 plan 是被哪道闸门拦下的（未拦下返回 ""）。
+
+    按"离成交最近的一道"排优先级：no_fill 之后只剩成本，而 target_too_far
+    之类的位置类闸门发生在入场之前，所以先说位置。
+    """
+    gate = getattr(plan, "gate", None) or {}
+    sg = getattr(plan, "state_gate", None) or {}
+    if gate.get("reason") == "no_target":
+        return "no_target"
+    if gate.get("reason") == "target_too_far":
+        return "target_too_far"
+    if gate.get("reason") == "no_price":
+        return "no_price"
+    if gate.get("reason") == "no_atr":
+        return "no_atr"
+    if gate.get("reason"):
+        return "low_rr"
+    if sg.get("trend_veto"):
+        return "trend_veto"
+    if sg.get("score_band"):
+        return "score_band"
+    if sg.get("liquidity"):
+        return "liquidity"
+    if sg.get("subordinate_blocked"):
+        return "subordinate"
+    if (plan.direction or "") == "wait":
+        return "score_below_threshold"
+    return ""
 
 
 def _upto(rows: list[dict], ts_field: str, ts: float,
@@ -308,7 +344,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
             max_mfe=0.0, max_mae=0.0, equity_curve=[],
             equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
             equity_curve_usdt=[], insufficient_data=True,
-            missing_periods=tuple(missing), trade_rs=[], trade_log=[])
+            missing_periods=tuple(missing), trade_rs=[], trade_log=[],
+            gate_counts={})
 
     # 各周期与主周期对齐：找每个主周期 ts 之前、<=它 的最后一根
     idx_maps: dict[str, list[int]] = {}
@@ -347,6 +384,8 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
     impact_rs: list[float] = []
     fund_rs: list[float] = []
     holding_hs: list[float] = []
+    # 闸门漏斗：key = gate_reason(plan) 或 "no_fill"
+    gate_counts: dict[str, int] = {}
 
     start = warmup if start_index is None else max(warmup, int(start_index))
     end = (n - 5) if end_index is None else min(n - 5, int(end_index))
@@ -368,6 +407,9 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
 
         plan = build_plan(snap, cfg, mode=mode)
         if plan.direction not in ("long", "short"):
+            why = gate_reason(plan)
+            if why:
+                gate_counts[why] = gate_counts.get(why, 0) + 1
             continue  # 观望或被闸门拦下 -> 不算一笔交易
         # 关键：把"信号时间"改成该建仓点的历史时间 ts，否则 evaluate_outcome
         # 会把所有历史 K 线当成"信号之前"而跳过，永远判不出结果
@@ -381,8 +423,9 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         if not res:
             continue  # 后续 K 线不足以判定窗口，跳过（不算交易）
         if res["outcome"] == "no_fill":
-            # 价格从没进过挂单区 -> 这笔单根本没做上，既不记胜负也不算成本
+            # 价格从未进入入场区 -> 实际上并没有成交，既不计胜也不计负
             no_fills += 1
+            gate_counts["no_fill"] = gate_counts.get("no_fill", 0) + 1
             continue
         trades += 1
         outcome = res["outcome"]
@@ -500,5 +543,5 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         equity_usdt=eq, risk_pct=rp, risk_amount_usdt=risk_amount,
         equity_curve_usdt=curve_usdt,
         trade_rs=trade_rs, expectancy_ci=ci, std_err=std_err, t_stat=t_stat,
-        trade_log=trade_log,
+        trade_log=trade_log, gate_counts=gate_counts,
     )

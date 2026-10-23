@@ -91,6 +91,7 @@ def _symbol_rows(snapshots: dict[str, Snapshot], cfg: dict, *,
             "missing_periods": list(res.missing_periods),
             "_rs": list(res.trade_rs or []),
             "_log": list(res.trade_log or []),
+            "gate_counts": dict(res.gate_counts or {}),
         })
     return rows
 
@@ -204,6 +205,30 @@ def direction_stats(trade_logs: list[dict]) -> dict:
     return out
 
 
+GATE_CN = {
+    "score_below_threshold": "评分低于阈值",
+    "no_target": "无可用目标位",
+    "target_too_far": "目标位太远",
+    "low_rr": "盈亏比不足",
+    "trend_veto": "逆日线趋势",
+    "score_band": "评分带",
+    "liquidity": "流动性",
+    "subordinate": "从属模式",
+    "no_fill": "挂单未成交",
+    "no_price": "拿不到价格",
+    "no_atr": "缺少 ATR",
+}
+
+
+def gate_funnel(rows: list[dict]) -> dict[str, int]:
+    """汇总各标的的闸门漏斗计数（按数量降序）。"""
+    tot: dict[str, int] = {}
+    for r in rows:
+        for k, v in (r.get("gate_counts") or {}).items():
+            tot[k] = tot.get(k, 0) + int(v)
+    return dict(sorted(tot.items(), key=lambda kv: -kv[1]))
+
+
 def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              mode: str = "swing", folds: int = 5, step: int = 10,
              warmup: int = 60, max_concurrent: int = 5,
@@ -278,6 +303,18 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
     if port.get("skipped_cluster"):
         notes.append(f"相关性簇限制挡掉 {port['skipped_cluster']} 笔："
                      f"同一簇里最多同时持有 {max_per_cluster} 个仓")
+    # 闸门漏斗：新加一道闸门后最需要的诊断。没有它，"我加了上限"和
+    # "我没信号了"分不清——只看到交易数掉了，不知道掉在哪一步。
+    funnel = gate_funnel(full.get("rows") or [])
+    for name, cnt in funnel.items():
+        label = GATE_CN.get(name, name)
+        notes.append(f"闸门[{label}] 挡掉 {cnt} 个检查点")
+    if funnel.get("score_below_threshold", 0) > funnel.get("no_target", 0):
+        notes.append("大部分检查点连方向都没评出来（评分低于阈值）："
+                     "瓶颈在因子，不在目标位")
+    if funnel.get("no_fill", 0) > max(1, p["trades"]):
+        notes.append(f"挂单未成交 {funnel['no_fill']} 次，多于成交笔数："
+                     f"入场区间定得太远，价格根本没回去过")
     if port["max_drawdown_pct"] >= 30:
         notes.append(f"组合最大回撤 {port['max_drawdown_pct']:.0f}%："
                      f"单笔风险 {port['expectancy_r']:+.3f}R 掩盖了这个尾部")
@@ -302,6 +339,7 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
         "score_ranking": ranking,
         "directions": dirs,
         "factor_attribution": attrib,
+        "gates": funnel,
         "portfolio": {k: v for k, v in port.items() if k != "equity_curve"},
         "notes": notes,
         "verdict": "通过" if not notes else "有保留",

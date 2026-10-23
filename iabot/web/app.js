@@ -580,6 +580,10 @@ busy: false,
       h += '<div class="gate"><b>评分 ' + signed(gate.score) + " 其实指向" + cn +
         "</b>，但" + esc(why) + "，所以按规则转为观望。" +
         "评分只决定方向多强，盈亏比决定这个位置值不值得进。</div>";
+    } else if (dir === "wait" && (plan.state_gate || {}).reason) {
+      // 方向闸门（流动性/趋势否决/评分带/从属模式）：以前这些原因写在
+      // plan 里却没人读，界面只显示“观望”，等于没解释。
+      h += '<div class="gate">' + esc(plan.state_gate.reason) + '</div>';
     }
 
     const w = Math.abs(Math.max(-100, Math.min(100, plan.score))) / 100 * 50;

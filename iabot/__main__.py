@@ -556,7 +556,7 @@ def cmd_validate(args) -> int:
     - 每折都还行，可能只是靠一两个币（所以要看集中度）
     - 点估计为正，可能分不清 edge 和噪声（所以要看置信区间）
     """
-    from .validation import validate
+    from .validation import GATE_CN, validate
     cfg = load_config()
     adv = Advisor(cfg)
     syms = [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
@@ -648,6 +648,15 @@ def cmd_validate(args) -> int:
         parts = [f"{r['factor']} {r['trades']} 笔 {r['expectancy_r']:+.3f}R"
                  for r in fa]
         print(f"  主导因子    : {' | '.join(parts)}")
+    gf = out.get("gates") or {}
+    if gf:
+        # 漏斗按顺序说：从"连方向都没评出来"到"挂了单没成交"
+        total_checks = sum(gf.values()) + p["trades"]
+        print(f"  闸门漏斗    : 共 {total_checks} 个检查点")
+        for k, v in gf.items():
+            label = GATE_CN.get(k, k)
+            share = v / max(1, total_checks) * 100
+            print(f"    {label:<12s} {v:6d}  ({share:5.1f}%)")
     for n in out["notes"]:
         print(f"  ! {n}")
     print(f"  结论        : {out['verdict']}")
