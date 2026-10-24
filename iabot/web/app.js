@@ -584,6 +584,20 @@ busy: false,
       // 方向闸门（流动性/趋势否决/评分带/从属模式）：以前这些原因写在
       // plan 里却没人读，界面只显示“观望”，等于没解释。
       h += '<div class="gate">' + esc(plan.state_gate.reason) + '</div>';
+    } else if (dir === "wait" && Math.abs(plan.score) >= 30) {
+      // 分数够但没给方向 = 被位置/盈亏比/状态闸门拦下。以前这里只显示
+      // “观望”，用户看到“评分 -84 却观望”以为程序坏了。现在说清楚：
+      // 分数够只代表方向强，不代表这个位置值得进。
+      const g = plan.gate || {};
+      const why = g.reason === "rr"
+        ? "第一目标盈亏比只有 " + fmtNum(g.rr, 2) + "，低于 " + fmtNum(g.need, 1) + "，不值得进"
+        : (g.reason === "no_target"
+            ? "前方没有像样的空间（价格卡在关键位中间）"
+            : (g.reason === "target_too_far"
+                ? "最近目标在 " + fmtNum(g.rr, 2) + "R 之外（上限 " + fmtNum(g.need, 2) + "R），没有近距离结构可依托"
+                : "状态因子未确认方向（波动/成交/资金费口径），趋势因子只能确认、不能发起"));
+      h += '<div class="gate"><b>评分 ' + signed(plan.score) + " 够强</b>，但" + esc(why) +
+        "，所以按规则转为观望。分数只决定方向多强，位置和状态决定值不值得进。</div>";
     }
 
     const w = Math.abs(Math.max(-100, Math.min(100, plan.score))) / 100 * 50;

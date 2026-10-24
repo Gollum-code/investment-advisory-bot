@@ -191,6 +191,10 @@ class Plan:
     # 这时候"评分"只代表少数因子的意见，不该被当成全体一致。
     factor_coverage: float = 1.0
     dead_factors: list[str] = field(default_factory=list)
+    # 11 个因子的加权平均分（仅供参考）。它**不是**决定方向的那个分数：
+    # 方向用 state/trend 拆分后的 plan.score。两者可以差很多，
+    # 混用会造成"显示 -84 却观望"。
+    score_all_factors: float = 0.0
     # 多空不对称风险倍数：完整历史上空单在两个方向都赚钱、多单只在上涨市
     # 赚钱，所以允许给空单更大的单笔风险（默认 1.0 = 不调整，安全起见）。
     risk_mult_long: float = 1.0
@@ -1151,7 +1155,14 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0
     # 加权平均天然向 0 收缩（因子之间经常互相抵消），线性映射会让评分永远落在
     # ±30 内、阈值形同虚设。tanh 压缩后中间区域被放大，极端区域饱和。
-    plan.score = round(100.0 * math.tanh((raw / total_w) / SCORE_SCALE), 1)
+    #
+    # 注意：这只是"11 个因子的加权平均"，**不是**决定方向的分数。
+    # 方向用的是后面的 dir_score（状态因子定观点 + 趋势因子只做确认）。
+    # 以前一直把这两个数混用：对外显示/排序用这个平均值，阈值却判 dir_score，
+    # 结果出现过"评分 -84 却观望"（24 个币里 9 个）。现在平均值单独保存，
+    # plan.score 只放真正决定方向的 dir_score。
+    score_all = round(100.0 * math.tanh((raw / total_w) / SCORE_SCALE), 1)
+    plan.score_all_factors = score_all
 
     # ---- 波动率与市场状态 ----
     atr_k = snap.klines.get(m["atr_period"]) or []
@@ -1258,6 +1269,11 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     dir_total = state_w + TREND_CONFIRM_SCALE * trend_w
     dir_mean = dir_raw / dir_total
     dir_score = round(100.0 * math.tanh(dir_mean / SCORE_SCALE), 1)
+
+    # plan.score 必须就是决定方向的这个数。对外显示、评分排序诊断、
+    # 分数带闸门都应该跟阈值看同一个尺度，否则会出现"评分 -84 却观望"
+    # 这种自相矛盾的输出（实测 24 个币里 9 个）。
+    plan.score = dir_score
 
     # 覆盖率始终按"真实有数据"算，与是否归一化无关——它描述的是事实，
     # 不是策略选择。只有 state_names + trend_names 这 7 个真正进入

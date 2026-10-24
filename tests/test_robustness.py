@@ -284,7 +284,7 @@ class TestApiHardening(unittest.TestCase):
                              json.dumps({"analysis": {"score_threshold": "abc"}}
                                         ).encode())
         self.assertEqual(code, 200)
-        self.assertEqual(self.app.cfg["analysis"]["score_threshold"], 30.0)
+        self.assertEqual(self.app.cfg["analysis"]["score_threshold"], 40.0)
         self.assertNotIn("sentinel", adv._plan_cache, "缓存没被失效")
 
     def test_config_post_rejects_non_dict_account(self):

@@ -21,7 +21,7 @@ class TestBuildParams(unittest.TestCase):
         self.assertEqual(p["mode"], "swing")
         self.assertEqual(p["bars"], 300)
         self.assertEqual(p["step"], 3)
-        self.assertEqual(p["score_threshold"], 30.0)
+        self.assertEqual(p["score_threshold"], 40.0)
         self.assertIn("momentum", p["factor_weights"])
         self.assertIn("trend_daily", p["factor_weights"])  # 未覆盖的也要补默认
         self.assertEqual(p["factor_weights"]["trend_daily"],

@@ -104,7 +104,7 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(out["analysis"]["score_threshold"], 50.0)
         self.assertEqual(out["analysis"]["factor_weights"]["trend_daily"], 0.5)
         # 原 cfg 不变
-        self.assertEqual(cfg["analysis"]["score_threshold"], 30)
+        self.assertEqual(cfg["analysis"]["score_threshold"], 40)
 
     def test_backtest_all_compares_sorted(self):
         from iabot.backtest import backtest

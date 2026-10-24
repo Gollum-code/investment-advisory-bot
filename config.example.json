@@ -51,7 +51,7 @@
     ],
     "kline_size": 2000,
     "plan_cache_max": 128,
-    "score_threshold": 30,
+    "score_threshold": 40,
     "cache_ttl_sec": 20,
     "snapshot_ttl_sec": 20,
     "factor_weights": {},

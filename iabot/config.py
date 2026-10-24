@@ -82,7 +82,10 @@ DEFAULTS: dict[str, Any] = {
         "tf_periods": ["1min", "5min", "15min", "60min", "1day"],
         "kline_size": 2000,
         "plan_cache_max": 128,       # 计划缓存条数上限（长跑服务防止无限膨胀）
-        "score_threshold": 30,       # |score| 达到该值才给方向（tanh 归一化后）
+        # |score| 达到该值才给方向。30 -> 40 的依据见 README「评分终于有了排序能力」：
+        # 修掉 funding lookahead 之后评分分档变单调，提高阈值可同时
+        # 提高胜率/单笔期望，并显著降低回撤（见实测表）。
+        "score_threshold": 40,       # |score| 达到该值才给方向（tanh 归一化后）
         "cache_ttl_sec": 20,          # 同一合约多久内重复查询直接复用结果
         "snapshot_ttl_sec": 20,       # 行情快照保鲜期（定时任务靠它拿到新数据）
         # 因子权重覆盖（可选）：{"trend_daily": 0.2, "momentum": 0.1, ...}
@@ -385,7 +388,7 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     an = _section(out, "analysis", DEFAULTS["analysis"])
     an["trend_veto"] = bool(an.get("trend_veto", False))
     an["score_threshold"] = _coerce_num(an.get("score_threshold"),
-                                        "analysis.score_threshold", 0, 100, 30.0)
+                                        "analysis.score_threshold", 0, 100, 40.0)
     an["cache_ttl_sec"] = _coerce_num(an.get("cache_ttl_sec"),
                                       "analysis.cache_ttl_sec", 1, 3600, 20.0)
     an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),

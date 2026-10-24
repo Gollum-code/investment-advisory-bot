@@ -234,6 +234,17 @@ def _slice_snapshot(base: Snapshot, klines: dict[str, list[Candle]],
                     snap.oi_history[-1].get("volume") or 0) or base.open_interest
             except (TypeError, ValueError):
                 pass
+        # funding_rate 必须是"当时生效"的那条，不能用当前的。
+        # 成本侧早就按历史取了（_funding_rate_at），但因子侧一直留着
+        # base.funding_rate = 实时值，等于让历史检查点看到未来资金费率
+        # ——这是 lookahead，会把回测的评分和胜率一起抬上去。
+        # 没有历史数据时保留 None，让 funding 因子按"接口失败"处理
+        # （计 0 分），而不是拿一个未来值充数。
+        if snap.funding_history:
+            snap.funding_rate = float(
+                snap.funding_history[-1].get("funding_rate") or 0.0)
+        else:
+            snap.funding_rate = None
     return snap
 
 
