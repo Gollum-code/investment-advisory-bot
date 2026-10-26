@@ -212,7 +212,6 @@ GATE_CN = {
     "target_too_far": "目标位太远",
     "low_rr": "盈亏比不足",
     "trend_veto": "逆日线趋势",
-    "score_band": "评分带",
     "liquidity": "流动性",
     "subordinate": "从属模式",
     "no_fill": "挂单未成交",

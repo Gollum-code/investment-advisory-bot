@@ -174,8 +174,6 @@ def gate_reason(plan) -> str:
         return "low_rr"
     if sg.get("trend_veto"):
         return "trend_veto"
-    if sg.get("score_band"):
-        return "score_band"
     if sg.get("liquidity"):
         return "liquidity"
     if sg.get("subordinate_blocked"):

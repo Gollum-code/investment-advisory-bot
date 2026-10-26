@@ -29,11 +29,6 @@ VARIANTS: dict[str, dict] = {
     "be_1r": {"analysis": {"exit": {"breakeven_at_r": 1.0}}},
     "short_heavy": {"analysis": {"risk_mult_long": 0.5,
                                  "risk_mult_short": 1.5}},
-    # 分数带：前后半段分离检验里单笔期望稳定更好，但组合层面收益差 5-14 倍，
-    # 所以不放进默认影子列表（每轮都要多算一遍，收益不配）。
-    # 保留方案本身，需要时可手动跑 `shadow --variant band_40_55`。
-    "band_40_55": {"analysis": {"score_band": {"enabled": True,
-                                               "min": 40.0, "max": 55.0}}},
 }
 
 DEFAULT_PATH = "data/shadow.jsonl"

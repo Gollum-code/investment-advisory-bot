@@ -34,7 +34,7 @@ class TestGateReason(unittest.TestCase):
             "blocked": True, "reason": "no_atr"})), "no_atr")
 
     def test_state_gates(self):
-        for key in ("trend_veto", "score_band", "liquidity",
+        for key in ("trend_veto", "liquidity",
                     "subordinate_blocked"):
             expected = "subordinate" if key == "subordinate_blocked" else key
             self.assertEqual(
@@ -65,7 +65,7 @@ class TestGateFunnel(unittest.TestCase):
         rows = [{"gate_counts": {k: 1 for k in
                                  ("score_below_threshold", "no_target",
                                   "target_too_far", "low_rr", "trend_veto",
-                                  "score_band", "liquidity", "subordinate",
+                                  "liquidity", "subordinate",
                                   "no_fill", "no_price", "no_atr")}}]
         for k in gate_funnel(rows):
             self.assertIn(k, GATE_CN, f"{k} 没有中文标签")
