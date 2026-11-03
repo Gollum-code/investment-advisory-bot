@@ -8,13 +8,15 @@ import queue
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__, netutil, symbols as sym_mod
 from .advisor import Advisor
-from .config import DEFAULT_MODE, load_config, save_config, validate_config
+from .config import (DEFAULT_MODE, SCORE_THRESHOLD_DEFAULT, load_config,
+                     save_config, validate_config)
 from .scheduler import Scheduler
 from .signals import FACTOR_DEFAULTS, MODES
 from .profiles import ProfileStore, cfg_with_profile
@@ -250,6 +252,12 @@ def make_handler(app: App):
                 n = 0
             if n <= 0:
                 return {}
+            # 恶意/损坏客户端可声明超大 Content-Length，把 HTTP 线程拖在 read 上。
+            # 所有合法请求体（配置/方案/持仓）都远小于 1MB，超了直接拒绝并关连接。
+            if n > 1_048_576:
+                self._body_error = "请求体超过 1MB 上限"
+                self.close_connection = True
+                return {}
             raw = self.rfile.read(n)
             try:
                 obj = json.loads(raw.decode("utf-8"))
@@ -268,7 +276,8 @@ def make_handler(app: App):
             u = urlparse(self.path)
             path, q = u.path, {k: v[0] for k, v in parse_qs(u.query).items()}
             if path.startswith("/api/"):
-                # SSE 只能通过 query 带 token（EventSource 发不了请求头）
+                # 前端 SSE 已改用 fetch + Authorization 头（令牌不再进 URL/日志）。
+                # query 里的 token 仅作为旧版 EventSource 的兼容保留。
                 hint = q.get("token") if path == "/api/stream" else None
                 if not app.authorized(self.headers, hint):
                     return self._err("需要访问令牌（Authorization: Bearer <token>）", 401)
@@ -291,21 +300,25 @@ def make_handler(app: App):
 
         def _api_get(self, path: str, q: dict):
             if path == "/api/meta":
-                return self._json({
-                    "ok": True, "version": __version__,
-                    "modes": [{"key": k, "label": v["label"]} for k, v in MODES.items()],
-                    "symbols": sym_mod.catalog_payload(),
-                    "watchlist": app.cfg.get("symbols") or [],
-                    "periods": ["1min", "5min", "15min", "30min", "60min", "4hour", "1day"],
-                    "auth_required": bool(app.auth_token),
-                    "defaults": {
-                        "account": app.cfg.get("account"),
-                        "analysis": app.cfg.get("analysis"),
-                        "schedule": app.cfg.get("schedule"),
-                    },
-                    "cert": netutil.cert_info(),
-                    "uptime_sec": round(time.time() - app.started_at, 1),
-                })
+                # cfg 是与多个线程共享的 dict（profiles 增删会改条目数），
+                # 读取也走 cfg_lock，避免和 _handle_profiles 并发迭代。
+                with app.cfg_lock:
+                    meta = {
+                        "ok": True, "version": __version__,
+                        "modes": [{"key": k, "label": v["label"]} for k, v in MODES.items()],
+                        "symbols": sym_mod.catalog_payload(),
+                        "watchlist": app.cfg.get("symbols") or [],
+                        "periods": ["1min", "5min", "15min", "30min", "60min", "4hour", "1day"],
+                        "auth_required": bool(app.auth_token),
+                        "defaults": {
+                            "account": app.cfg.get("account"),
+                            "analysis": app.cfg.get("analysis"),
+                            "schedule": app.cfg.get("schedule"),
+                        },
+                        "cert": netutil.cert_info(),
+                        "uptime_sec": round(time.time() - app.started_at, 1),
+                    }
+                return self._json(meta)
 
             if path == "/api/health":
                 return self._json({"ok": True, "bases": app.advisor.health()})
@@ -448,7 +461,7 @@ def make_handler(app: App):
                 merged = {name: float(cur.get(name, w)) for name, w in FACTOR_DEFAULTS.items()}
                 return self._json({"ok": True, "defaults": FACTOR_DEFAULTS,
                                    "weights": merged, "customized": bool(cur),
-                                   "score_threshold": float(an.get("score_threshold") or 30),
+                                   "score_threshold": float(an.get("score_threshold") or SCORE_THRESHOLD_DEFAULT),
                                    "resonance_enabled": bool((an.get("resonance") or {}).get("enabled"))})
 
             if path == "/api/profiles":
@@ -463,16 +476,25 @@ def make_handler(app: App):
                 sym = q.get("symbol")
                 want = q.get("status") or None
                 rows = app.store.positions(status=want, symbol=sym)
-                # 用当前价补浮动盈亏（现价拿不到就只返回原始记录）
-                marks = {}
+                # 用当前价补浮动盈亏（现价拿不到就只返回原始记录）。
+                # 并行抓取：不同 symbol 的商情请求互相独立，串行会把子币
+                # 的慢请求堆成好几秒，占住 HTTP 线程。
+                marks: dict[str, float | None] = {}
                 for r in rows:
                     marks.setdefault(r["symbol"], None)
-                for s in list(marks):
+
+                def _mark(s: str):
                     try:
                         snap = app.advisor.fetch(s, force=False)
-                        marks[s] = snap.price
+                        return s, snap.price
                     except Exception:
-                        marks[s] = None
+                        return s, None
+
+                syms = list(marks)
+                if syms:
+                    with ThreadPoolExecutor(max_workers=min(8, len(syms))) as pool:
+                        for s, price in pool.map(_mark, syms):
+                            marks[s] = price
                 for r in rows:
                     r["pnl"] = pnl_of(r, marks.get(r["symbol"]))
                     r["mark_price"] = marks.get(r["symbol"])
@@ -516,7 +538,9 @@ def make_handler(app: App):
                 return self._json({"ok": True, "schedule": app.scheduler.status()})
 
             if path == "/api/config":
-                return self._json({"ok": True, "config": app.cfg})
+                # cfg 是多线程共享的 dict，读取也要持锁（见 App.__init__ 注释）
+                with app.cfg_lock:
+                    return self._json({"ok": True, "config": app.cfg})
 
             if path == "/api/stream":
                 return self._sse()
@@ -571,7 +595,7 @@ def make_handler(app: App):
                 if action == "save":
                     p = ps.save(name,
                                 factor_weights=body.get("factor_weights") or {},
-                                score_threshold=body.get("score_threshold") or 30,
+                                score_threshold=body.get("score_threshold") or SCORE_THRESHOLD_DEFAULT,
                                 mode=body.get("mode") or DEFAULT_MODE,
                                 note=body.get("note") or "")
                     # 手动保存当前参数 -> 缓存里的旧计划按旧权重算的，全部作废

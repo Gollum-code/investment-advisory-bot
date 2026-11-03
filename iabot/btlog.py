@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from .signals import FACTOR_DEFAULTS
+from .config import SCORE_THRESHOLD_DEFAULT
 
 
 def build_params(cfg: dict, *, symbol: str, mode: str, bars: int, step: int,
@@ -36,7 +37,7 @@ def build_params(cfg: dict, *, symbol: str, mode: str, bars: int, step: int,
         "profile": cfg.get("active_profile") or "",
         "equity_usdt": float(equity_usdt),
         "risk_pct": float(risk_pct),
-        "score_threshold": float(an.get("score_threshold") or 30),
+        "score_threshold": float(an.get("score_threshold") or SCORE_THRESHOLD_DEFAULT),
         "factor_weights": weights,
         "resonance": {"enabled": bool(res.get("enabled")),
                       "weight": float(res.get("weight") or 0.06)},

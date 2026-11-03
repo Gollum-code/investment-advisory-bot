@@ -153,7 +153,7 @@ class TestSignalStore(unittest.TestCase):
         self.assertAlmostEqual(st["win_rate"], 0.5)
         self.assertIn("intraday", st["by_mode"])
         self.assertIn("TEST-USDT", st["by_symbol"])
-        self.assertIn("60-80", st["by_score"])   # score=70 落在 60-80 档
+        self.assertIn(">=70", st["by_score"])    # score=70 落在 >=70 档
         self.assertIn("<40", st["by_score"])      # score=-30 落在 <40 档
 
     def test_win_stats_groups_by_profile(self):

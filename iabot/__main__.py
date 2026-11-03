@@ -296,7 +296,7 @@ def cmd_scan(args) -> int:
               file=sys.stderr)
         return 2
 
-    workers = max(1, int(getattr(args, "workers", 4) or 4))
+    workers = max(1, min(16, int(getattr(args, "workers", 4) or 4)))
     if len(tokens) == 1 and is_all_token(tokens[0]):
         print(f"[全市场] 候选 {len(syms)} 个，并发 {workers} 分析中…", file=sys.stderr)
     t0 = time.time()

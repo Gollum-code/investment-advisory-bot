@@ -112,12 +112,15 @@ _MIGRATE: list[tuple[str, str]] = [
     ("checked_at", "REAL"),
 ]
 
-# 按 |score| 分档，用来统计"评分越高是不是真的越准"
+# 按 |score| 分档，用来统计"评分越高是不是真的越准"。
+# 边界跟着开仓阈值走：默认阈值 40，所以低档抬到 40；中段用
+# 40-55 / 55-70 两档（README「评分终于有了排序能力」里 40-55 是
+# 实测的甜点区、55-70 是单调改善的第二档），高档 70+。
 _SCORE_BUCKETS = (
     (0.0, 40.0, "<40"),
-    (40.0, 60.0, "40-60"),
-    (60.0, 80.0, "60-80"),
-    (80.0, 200.0, ">=80"),
+    (40.0, 55.0, "40-55"),
+    (55.0, 70.0, "55-70"),
+    (70.0, 200.0, ">=70"),
 )
 
 
@@ -343,7 +346,7 @@ class SignalStore:
         by_score = {}
         for r in rows:
             s = abs(r["score"] or 0)
-            b = next((label for lo, hi, label in _SCORE_BUCKETS if lo <= s < hi), ">=80")
+            b = next((label for lo, hi, label in _SCORE_BUCKETS if lo <= s < hi), ">=70")
             by_score.setdefault(b, []).append(r)
 
         return {

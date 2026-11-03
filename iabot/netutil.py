@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import shutil
 import ssl
+import string
 import sys
 import threading
 import time
@@ -33,7 +34,9 @@ _bundle_used: str | None = None
 
 
 def _drives() -> list[str]:
-    return [f"{c}:" for c in "CDEFG" if os.path.exists(f"{c}:\\")]
+    # Windows 盘符：A-Z 全扫（不只 CDEFG），不存在的盘 exists 返回 False 直接跳过。
+    # 3.12+ 可用 os.listdrives()，这里保持 3.9 兼容。
+    return [f"{c}:" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")]
 
 
 def _bundle_candidates() -> list[str]:

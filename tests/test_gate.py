@@ -58,7 +58,7 @@ class TestGateHelpers(unittest.TestCase):
     def test_gate_settings_defaults(self):
         name, min_rr, w = S._gate_settings({})
         self.assertEqual(name, "tp1")
-        self.assertEqual(min_rr, 1.0)
+        self.assertEqual(min_rr, 0.8)
         self.assertEqual(w, (0.5, 0.3, 0.2))
 
     def test_gate_settings_rejects_unknown_measure(self):
@@ -71,7 +71,7 @@ class TestGateHelpers(unittest.TestCase):
 
     def test_gate_settings_rejects_bad_numbers(self):
         _n, min_rr, w = S._gate_settings({"min_rr": "abc", "weights": "abc"})
-        self.assertEqual(min_rr, 1.0)
+        self.assertEqual(min_rr, 0.8)
         self.assertEqual(w, (0.5, 0.3, 0.2))
 
     def test_gate_settings_rejects_zero_weight_sum(self):
@@ -146,8 +146,8 @@ class TestGateConfigCoercion(unittest.TestCase):
         self.assertEqual(self._validate({"measure": "nope"})["measure"], "tp1")
 
     def test_non_numeric_rr_falls_back(self):
-        self.assertEqual(self._validate({"min_rr": "abc"})["min_rr"], 1.0)
-        self.assertEqual(self._validate({"min_target_rr": None})["min_target_rr"], 0.8)
+        self.assertEqual(self._validate({"min_rr": "abc"})["min_rr"], 0.8)
+        self.assertEqual(self._validate({"min_target_rr": None})["min_target_rr"], 0.5)
 
     def test_bad_weights_fall_back(self):
         self.assertEqual(self._validate({"weights": "abc"})["weights"], [0.5, 0.3, 0.2])

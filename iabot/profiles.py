@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import copy
 
-from .config import DEFAULT_MODE, SCHEDULABLE_MODES
+from .config import DEFAULT_MODE, SCHEDULABLE_MODES, SCORE_THRESHOLD_DEFAULT
 from .signals import FACTOR_DEFAULTS
 
 
@@ -27,14 +27,14 @@ def _norm_weights(w: dict | None) -> dict:
 
 
 def _thr(v) -> float:
-    """score_threshold 缺省取 30；但显式填 0 是合法的（阈值 0 = 不设门槛），
-    不能因为 0 为假就替换成 30。"""
+    """score_threshold 缺省取 SCORE_THRESHOLD_DEFAULT（40）；但显式填 0 是合法的
+    （阈值 0 = 不设门槛），不能因为 0 为假就替换成默认值。"""
     if v is None or v == "":
-        return 30.0
+        return SCORE_THRESHOLD_DEFAULT
     try:
         return float(v)
     except (TypeError, ValueError):
-        return 30.0
+        return SCORE_THRESHOLD_DEFAULT
 
 
 def _mode(v) -> str:

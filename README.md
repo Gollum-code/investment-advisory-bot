@@ -180,6 +180,10 @@ python -m iabot scan BTC-USDT,all                   :: 指定合约 + 全市场�
 
 首次运行会自动生成 `config.json`（不在 git 里）。字段说明见 `config.example.json`：
 
+> 配置与数据默认放在项目根（`config.json` / `data/`）。如果通过非 editable 方式
+> 安装（`pip install .` 进 site-packages，那里常为只读），或想让配置跟用户走，
+> 设环境变量 `IABOT_CONFIG_DIR` 指向任意目录即可重定向配置与数据。
+
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `rest_bases` | hbdm.com / btcgateway.pro / hbdm.vip | 行情域名池，启动时按顺序健康探测，用第一个能通的 |
@@ -210,7 +214,7 @@ python -m iabot scan BTC-USDT,all                   :: 指定合约 + 全市场�
 | `schedule.verify.*` | 开启 | 信号结果回填：多久后开始回填、每轮最多回填多少 |
 | `storage.keep_days` | 30 | 信号历史保留天数，启动与每轮定时任务自动清理 |
 | `backup.*` | 开启 / 每天 / 14 份 | 数据库自动备份（一致性快照），目录/间隔/保留份数 |
-| `auth.token` | 空 | HTTP 访问令牌；设了之后 /api/* 需带 Bearer token（静态页免鉴权） |
+| `auth.token` | 空 | HTTP 访问令牌；设了之后 /api/* 需带 Bearer token（静态页免鉴权）。实时流（SSE）的令牌走 `Authorization` 请求头，不进 URL/访问日志 |
 | `notify.*` | 关闭 | 通知：webhook / telegram / bark 渠道与推送阈值 |
 
 ---

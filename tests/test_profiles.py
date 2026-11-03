@@ -215,13 +215,13 @@ class TestBacktestAllUsesProfileWeights(unittest.TestCase):
         self.assertEqual(_exp_key("bad"), -999.0)
 
     def test_threshold_zero_is_preserved(self):
-        """显式把阈值设成 0（不设门槛）不能被当成缺省而变成 30。"""
+        """显式把阈值设成 0（不设门槛）不能被当成缺省而变成 40。"""
         from iabot.profiles import _thr
         self.assertEqual(_thr(0), 0.0)
         self.assertEqual(_thr(0.0), 0.0)
-        self.assertEqual(_thr(None), 30.0)
-        self.assertEqual(_thr(""), 30.0)
-        self.assertEqual(_thr("bad"), 30.0)
+        self.assertEqual(_thr(None), 40.0)
+        self.assertEqual(_thr(""), 40.0)
+        self.assertEqual(_thr("bad"), 40.0)
         self.assertEqual(_thr(45), 45.0)
 
 

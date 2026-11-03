@@ -17,7 +17,7 @@ import time as _time
 from dataclasses import dataclass, field
 
 from . import indicators as ind
-from .config import DEFAULT_MODE
+from .config import DEFAULT_MODE, SCORE_THRESHOLD_DEFAULT
 from .levels import (Level, fib_levels, merge_levels, moving_average_levels,
                      orderbook_walls, price_ladder, round_number_levels,
                      swing_points, top_volume_nodes)
@@ -756,9 +756,9 @@ def _gate_settings(gate_cfg: dict) -> tuple[str, float, tuple[float, ...]]:
     if name not in GATE_MEASURES:
         name = GATE_DEFAULT_MEASURE
     try:
-        min_rr = float((gate_cfg or {}).get("min_rr", 1.0))
+        min_rr = float((gate_cfg or {}).get("min_rr", 0.8))
     except (TypeError, ValueError):
-        min_rr = 1.0
+        min_rr = 0.8
     raw_w = (gate_cfg or {}).get("weights") or GATE_DEFAULT_WEIGHTS
     try:
         w = tuple(float(x) for x in raw_w)[:3]
@@ -1113,7 +1113,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     leverage = int(account.get("preferred_leverage") or 5)
     leverage = max(1, min(leverage, int(account.get("max_leverage") or 10)))
     max_margin_pct = float(account.get("max_margin_pct") or 50.0)
-    threshold = float((cfg.get("analysis") or {}).get("score_threshold") or 30)
+    threshold = float((cfg.get("analysis") or {}).get("score_threshold") or SCORE_THRESHOLD_DEFAULT)
 
     plan = Plan(symbol=snap.symbol, mode=mode, price=snap.price, generated_at=_time.time())
     # 记录当前生效的参数方案（若有），胜率统计按方案分组时用
@@ -1435,9 +1435,9 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     risk = abs(mid - plan.stop)
     gate_cfg = (cfg.get("analysis") or {}).get("gate") or {}
     try:
-        floor = float(gate_cfg.get("min_target_rr", 0.8))
+        floor = float(gate_cfg.get("min_target_rr", 0.5))
     except (TypeError, ValueError):
-        floor = 0.8
+        floor = 0.5
     cands = []
     for t in ladder:
         rr = _target_rr(t["price"], mid, risk, plan.direction)

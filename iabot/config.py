@@ -8,7 +8,22 @@ import os
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
+def _root_dir() -> Path:
+    """配置/数据的根目录。
+
+    默认取包上一级（源码布局：仓库根 = iabot 的父目录）。但项目被真正
+    ``pip install .`` 装进 site-packages 时，那里通常是只读的，把 config.json
+    和 data/ 写进包目录既写不动、也不是用户自己的配置。设环境变量
+    ``IABOT_CONFIG_DIR`` 可把配置和数据重定向到任意目录（如用户主目录），
+    非 editable 安装时建议用它。不设则保持原有行为不变。
+    """
+    override = os.environ.get("IABOT_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _root_dir()
 CONFIG_PATH = ROOT / "config.json"
 EXAMPLE_PATH = ROOT / "config.example.json"
 DATA_DIR = ROOT / "data"
@@ -26,6 +41,13 @@ REST_BASES = [
 # 的入口（定时任务、CLI、网页 API、参数方案）都回落到这里，避免再把用户
 # 默认带进一个亏钱的模式。
 DEFAULT_MODE = "swing"
+# 开仓阈值（|score| 达到该值才给方向）的唯一出处。
+# 30 -> 40 的依据见 README「评分终于有了排序能力」：修掉 funding lookahead
+# 之后评分分档变单调，提高阈值可同时提高胜率/单笔期望，并显著降低回撤。
+# 各层兜底（CLI/网页/参数方案/回测记录）都必须引用这个常量，不许再散落
+# 写死 30——实测网页存"没显式填阈值"的方案会落盘成 30，而实盘默认 40，
+# 两边阈值不一致。
+SCORE_THRESHOLD_DEFAULT = 40.0
 # 流动性体检的默认阈值（唯一出处，liquidity.py 从这里读）
 DEFAULT_MIN_TURNOVER = 5_000_000.0   # 24h 成交额下限（U）
 DEFAULT_MAX_SPREAD_BPS = 20.0       # 买卖价差上限（0.2%）
@@ -85,7 +107,7 @@ DEFAULTS: dict[str, Any] = {
         # |score| 达到该值才给方向。30 -> 40 的依据见 README「评分终于有了排序能力」：
         # 修掉 funding lookahead 之后评分分档变单调，提高阈值可同时
         # 提高胜率/单笔期望，并显著降低回撤（见实测表）。
-        "score_threshold": 40,       # |score| 达到该值才给方向（tanh 归一化后）
+        "score_threshold": SCORE_THRESHOLD_DEFAULT,  # |score| 达到该值才给方向（tanh 归一化后）
         "cache_ttl_sec": 20,          # 同一合约多久内重复查询直接复用结果
         "snapshot_ttl_sec": 20,       # 行情快照保鲜期（定时任务靠它拿到新数据）
         # 因子权重覆盖（可选）：{"trend_daily": 0.2, "momentum": 0.1, ...}
@@ -377,7 +399,8 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     an = _section(out, "analysis", DEFAULTS["analysis"])
     an["trend_veto"] = bool(an.get("trend_veto", False))
     an["score_threshold"] = _coerce_num(an.get("score_threshold"),
-                                        "analysis.score_threshold", 0, 100, 40.0)
+                                        "analysis.score_threshold", 0, 100,
+                                        SCORE_THRESHOLD_DEFAULT)
     an["cache_ttl_sec"] = _coerce_num(an.get("cache_ttl_sec"),
                                       "analysis.cache_ttl_sec", 1, 3600, 20.0)
     an["snapshot_ttl_sec"] = _coerce_num(an.get("snapshot_ttl_sec"),
@@ -461,9 +484,10 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                       f"改用 tp1")
             gc["measure"] = "tp1"
         gc["min_rr"] = _coerce_num(gc.get("min_rr"), "analysis.gate.min_rr",
-                                   0.0, 20.0, 1.0)
+                                   0.0, 20.0, DEFAULTS["analysis"]["gate"]["min_rr"])
         gc["min_target_rr"] = _coerce_num(gc.get("min_target_rr"),
-                                          "analysis.gate.min_target_rr", 0.0, 20.0, 0.8)
+                                          "analysis.gate.min_target_rr", 0.0, 20.0,
+                                          DEFAULTS["analysis"]["gate"]["min_target_rr"])
         # 上限允许 None（= 不限制）；给数字就夹到 min_target_rr 之上，
         # 否则上下限打架会把所有候选都滤掉。
         mx = gc.get("max_target_rr")

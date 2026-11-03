@@ -1221,7 +1221,7 @@ busy: false,
       };
       const def = d.defaults || {};
       if (def['score_threshold'] !== undefined) $('score-threshold').value = def['score_threshold'];
-      state.threshold = def['score_threshold'] ?? 30;
+      state.threshold = def['score_threshold'] ?? 40;
       // 阈值变了仪表盘刻度也要跟着变；重画一次建议卡（若已有计划）
       if (state.plan) renderAdvice(state.plan);
       $('res-enabled').checked = !!def['resonance_enabled'];
@@ -1261,7 +1261,7 @@ busy: false,
     $('btn-weights-reset').disabled = true;   // 同一个函数，防连点重复提交
     try {
       const data = reset ? {} : (state.weights || {});
-      const thr = reset ? 30 : parseInt($('score-threshold').value || '30', 10);
+      const thr = reset ? 40 : parseInt($('score-threshold').value || '40', 10);
       const res_on = reset ? false : $('res-enabled').checked;
       await api('/api/config', {
         method: 'POST',
@@ -1566,7 +1566,7 @@ busy: false,
         body: JSON.stringify({
           action: 'save', name,
           factor_weights: state.weights || {},
-          score_threshold: parseInt($('score-threshold').value || '30', 10),
+          score_threshold: parseInt($('score-threshold').value || '40', 10),
           mode: $('mode').value,
         }),
       });
@@ -1711,52 +1711,91 @@ busy: false,
   }
 
   function connectSSE() {
-    if (!window.EventSource) { setPill('pill-sse', '实时流 不支持', 'bad'); return; }
-    // 先关掉旧的再建：init 会先 bindEvents 再连一次，不关就会留下两个
-    // EventSource，服务端多挂一个订阅者。
-    if (state.es) { try { state.es.close(); } catch (e) { /* 已断开 */ } state.es = null; }
+    // 实时流：用 fetch + ReadableStream 代替 EventSource。
+    // EventSource 发不了请求头，令牌只能塞进 query（会进访问日志/浏览器历史），
+    // fetch 可以把 token 放进 Authorization 头，令牌不再出现在 URL 里。
+    if (state.es) { try { state.es.abort(); } catch (e) { /* 已断开 */ } state.es = null; }
     const tok = localStorage.getItem('iabot_token');
-    const es = new EventSource('/api/stream' + (tok ? ('?token=' + encodeURIComponent(tok)) : ''));
-    state.es = es;
-    es.onopen = () => setPill('pill-sse', '实时流 已连接', 'ok');
-    es.onerror = () => setPill('pill-sse', '实时流 重连中…', 'warn');
-    es.onmessage = (ev) => {
-      let d = null;
-      try { d = JSON.parse(ev.data); } catch (e) { return; }
-      if (d.type === 'hello') {
-        setPill('pill-sse', '实时流 v' + (d.version || ''), 'ok');
-      } else if (d.type === 'run_start') {
-        logLine('run', '开始一轮：' + (d.symbols || []).join(', '));
-        setPill('pill-sched', '任务运行中…', 'ok');
-      } else if (d.type === 'plan') {
-        const p = d.plan || {};
-        logLine(p.direction === 'wait' ? '' : 'ok',
-          p.symbol + ' ' + dirLabel(p.direction) + ' ' + signed(p.score) +
-          (p.rr != null ? ' RR ' + fmtNum(p.rr, 2) : ''));
-        loadHistory();
-      } else if (d.type === 'run_done') {
-        logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's' +
-          (d.verified ? '，回填 ' + d.verified + ' 条' : ''));
-        loadSchedule();
-      } else if (d.type === 'outcome') {
-        const oc = outcomeLabel(d.outcome);
-        logLine(oc.good ? 'ok' : 'err', d.symbol + ' ' + oc.label +
-          (d.mfe_pct != null ? ' 最大浮盈 ' + fmtNum(d.mfe_pct, 2) + '%' : ''));
-        loadWinStats();
-        loadHistory();
-      } else if (d.type === 'skip') {
-        logLine('warn', '跳过：' + (d.reason || ''));
-      } else if (d.type === 'error') {
-        logLine('err', (d.symbol ? d.symbol + ' ' : '') + (d.error || '未知错误'));
+    const ctrl = new AbortController();
+    state.es = ctrl;
+    const hdrs = {};
+    if (tok) hdrs['Authorization'] = 'Bearer ' + tok;
+    const doConnect = async () => {
+      let reader = null;
+      try {
+        const res = await fetch('/api/stream', { headers: hdrs, signal: ctrl.signal, cache: 'no-store' });
+        if (!res.ok) {
+          // 未授权时走一次 token 弹窗流程后重试；其余状态进重连
+          if (res.status === 401 && (await askToken())) { state.es = null; return connectSSE(); }
+          throw new Error('HTTP ' + res.status);
+        }
+        if (!res.body) throw new Error('no stream body');
+        setPill('pill-sse', '实时流 已连接', 'ok');
+        reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const line = frame.split('\n').find((l) => l.startsWith('data:'));
+            if (!line) continue;                 // : ping 心跳行没有 data
+            let d = null;
+            try { d = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+            handleSSEEvent(d);
+          }
+        }
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        setPill('pill-sse', '实时流 重连中…', 'warn');
+      } finally {
+        try { if (reader) reader.releaseLock(); } catch (e) { /* 忽略 */ }
       }
+      // 连接被服务端断开（或出错）：仍在页面上就 3 秒后重连；
+      // 页面切走后外部 abort 了，state.es 已换新，不再重连。
+      if (state.es === ctrl) setTimeout(connectSSE, 3000);
     };
+    doConnect();
+  }
+
+  function handleSSEEvent(d) {
+    if (d.type === 'hello') {
+      setPill('pill-sse', '实时流 v' + (d.version || ''), 'ok');
+    } else if (d.type === 'run_start') {
+      logLine('run', '开始一轮：' + (d.symbols || []).join(', '));
+      setPill('pill-sched', '任务运行中…', 'ok');
+    } else if (d.type === 'plan') {
+      const p = d.plan || {};
+      logLine(p.direction === 'wait' ? '' : 'ok',
+        p.symbol + ' ' + dirLabel(p.direction) + ' ' + signed(p.score) +
+        (p.rr != null ? ' RR ' + fmtNum(p.rr, 2) : ''));
+      loadHistory();
+    } else if (d.type === 'run_done') {
+      logLine('ok', '一轮结束：' + d.count + ' 个合约，耗时 ' + d.elapsed + 's' +
+        (d.verified ? '，回填 ' + d.verified + ' 条' : ''));
+      loadSchedule();
+    } else if (d.type === 'outcome') {
+      const oc = outcomeLabel(d.outcome);
+      logLine(oc.good ? 'ok' : 'err', d.symbol + ' ' + oc.label +
+        (d.mfe_pct != null ? ' 最大浮盈 ' + fmtNum(d.mfe_pct, 2) + '%' : ''));
+      loadWinStats();
+      loadHistory();
+    } else if (d.type === 'skip') {
+      logLine('warn', '跳过：' + (d.reason || ''));
+    } else if (d.type === 'error') {
+      logLine('err', (d.symbol ? d.symbol + ' ' : '') + (d.error || '未知错误'));
+    }
   }
 
   window.addEventListener('resize', () => { if (state.snapshot) renderChart(); });
   document.addEventListener('visibilitychange', () => {
     // 页面切走时断开 SSE，避免后台标签页长期占着一条长连接 + 服务端订阅队列
     if (document.hidden) {
-      if (state.es) { try { state.es.close(); } catch (e) { /* 忽略 */ } state.es = null; }
+      if (state.es) { try { state.es.abort(); } catch (e) { /* 忽略 */ } state.es = null; }
     } else {
       connectSSE();
     }
