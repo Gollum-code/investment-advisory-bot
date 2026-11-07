@@ -42,6 +42,14 @@
           <option value="intraday">日内（持仓数小时）</option>
         </select>
       </label>
+      <label class="fld">
+        <span>周期</span>
+        <select id="tf">
+          <!-- 空值=模式默认口径（swing=日线、intraday=15min），行为与已校准模型一致。
+               选具体周期时整条分析链（因子/止损/级别）围绕该周期重定标，属实验功能。 -->
+          <option value="">默认（跟随模式）</option>
+        </select>
+      </label>
       <label class="fld narrow">
         <span>账户 (U)</span>
         <input id="equity" type="number" min="1" step="10" value="450">

@@ -104,6 +104,11 @@ DEFAULTS: dict[str, Any] = {
         "tf_periods": ["1min", "5min", "15min", "60min", "1day"],
         "kline_size": 2000,
         "plan_cache_max": 128,       # 计划缓存条数上限（长跑服务防止无限膨胀）
+        # 多时间框架：设为空/auto 则用模式默认口径（swing=日线、intraday=15min）；
+        # 设为基础周期（如 "4hour" / "1week"）时，整条分析链的 K 线因子、止损 ATR、
+        # 目标位、价位回看都围绕该周期重定标。实验功能：因子权重仍用日线校准值，
+        # 换周期后请先用回测/影子账户验证。
+        "timeframe": "",
         # |score| 达到该值才给方向。30 -> 40 的依据见 README「评分终于有了排序能力」：
         # 修掉 funding lookahead 之后评分分档变单调，提高阈值可同时
         # 提高胜率/单笔期望，并显著降低回撤（见实测表）。
@@ -414,6 +419,15 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                    30, 2000, 2000)
     an["plan_cache_max"] = _coerce_int(an.get("plan_cache_max"),
                                        "analysis.plan_cache_max", 1, 100000, 128)
+    # 多时间框架：空/未知值回落为模式默认口径（"auto"）。只在 TIMEFRAMES 列表里的
+    # 基础周期才会生效；但 config 层不 import signals 避免循环依赖，这里只用宽校验，
+    # 真正的合法性由 signals.resolve_tf_spec 兜底（非法 -> 模式默认）。
+    tf = an.get("timeframe")
+    if tf is None or str(tf).strip() in ("", "auto"):
+        an["timeframe"] = ""
+    elif not isinstance(tf, str):
+        print("[config] analysis.timeframe 不是字符串，已重置为空（模式默认）")
+        an["timeframe"] = ""
     tf = an.get("tf_periods")
     if not isinstance(tf, list) or not tf:
         an["tf_periods"] = list(DEFAULTS["analysis"]["tf_periods"])

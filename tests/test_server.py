@@ -134,7 +134,8 @@ class TestServerAPI(unittest.TestCase):
         # 打桩 full_payload 避免联网，验证 /api/report 返回整页 HTML
         from iabot.market import Candle
 
-        def fake_full_payload(sym, mode="intraday", force=False, account=None):
+        def fake_full_payload(sym, mode="intraday", force=False, account=None,
+                          timeframe=None):
             base = 1_700_000_000
             k = [Candle(ts=base + i * 900, open=100, high=102, low=99,
                         close=101, volume=10) for i in range(40)]

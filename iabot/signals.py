@@ -29,6 +29,130 @@ from .risk import liquidation_price, safe_max_leverage, stop_is_effective
 # 0.40 => 加权均值 ±0.40 约对应 ±76 分；±0.20 约对应 ±46 分。
 SCORE_SCALE = 0.40
 
+# --------------------------------------------------------------------------
+# 时间周期绑定（多时间框架分析）
+#
+# 交易所支持一组 K 线周期，原来每个因子**写死**用哪个周期（trend_daily 用日线、
+# vwap 用 5min…），只能切模式（日内/波段）而不能"按任意周期分别分析"。
+#
+# 现在引入一个可选的**基础周期** timeframe：一旦显式选定（如 4hour），整条
+# 分析链——K 线类因子、止损 ATR、目标位、价位回看——都围绕它重新绑定：
+#   主趋势 / 波动率 / 成交量      -> 基础周期
+#   次级趋势（确认）/ 摆动结构     -> 上一级周期
+#   动量 RSI                      -> 上一级 + 基础（快慢两条）
+#   VWAP                          -> 下一级周期（太粗时退回基础周期）
+#   止损 ATR / 价位阶梯           -> 基础周期（+ 上一级做结构）
+#   斐波那契                      -> 基础周期（日线及以上），否则上一级
+#
+# 资金费 / 大户持仓 / 持仓量是交易所按固定结算周期发布的，与 K 线周期无关，
+# **不**随基础周期改变（它们没有"4 小时版"）。
+#
+# 不选 timeframe 时，所有因子沿用写死的原周期，行为与历史版本**逐字节一致**，
+# 已回测校准过的因子权重仍只对默认口径有效。
+# --------------------------------------------------------------------------
+TIMEFRAMES = ("5min", "15min", "30min", "60min", "4hour", "12hour",
+              "1day", "1week", "1mon")
+_PERIOD_CN = {"5min": "5分钟", "15min": "15分钟", "30min": "30分钟",
+              "60min": "1小时", "4hour": "4小时", "12hour": "12小时",
+              "1day": "日线", "1week": "周线", "1mon": "月线"}
+
+# 每个模式的默认基础周期（= 该模式原来写死的止损 ATR 周期）
+_MODE_BASE_TF = {"intraday": "15min", "swing": "1day", "reversion": "1day"}
+
+# 每个基础周期的"回看根数"按分钟跨度定（约 90 天日线等价），并封顶接口上限 2000
+_KLINE_MAX = 2000
+
+
+def period_cn(period: str) -> str:
+    """周期的中文名（用于因子详情文本）。未知周期原样返回。"""
+    return _PERIOD_CN.get(period, period)
+
+
+def _tf_neighbor(period: str, step: int) -> str:
+    """在 TF_CHAIN 里取相邻周期：step=+1 上一级（更粗），step=-1 下一级（更细）。"""
+    try:
+        i = TIMEFRAMES.index(period)
+    except ValueError:
+        return period
+    return TIMEFRAMES[max(0, min(len(TIMEFRAMES) - 1, i + step))]
+
+
+def tf_parent(period: str) -> str:
+    return _tf_neighbor(period, +1)
+
+
+def tf_child(period: str) -> str:
+    return _tf_neighbor(period, -1)
+
+
+def _bars_for_span(period: str, days: float) -> int:
+    """覆盖约 days 天需要多少根该周期 K 线（封顶接口上限）。"""
+    from .market import period_seconds
+    n = int(days * 86400 / period_seconds(period))
+    return max(1, min(_KLINE_MAX, n))
+
+
+def _freq_scale(tf: str, base_tf: str) -> float:
+    """止损区间/入场带宽的缩放系数 = sqrt(周期秒数比)。
+
+    ATR 随周期大致按 sqrt 缩放（随机游走），所以用**百分比**表达的止损区间
+    （stop_pct_range）和入场带宽（entry_width_pct）也要按同一系数缩放，
+    否则换到更细的周期会被区间下限"夹住"、换到更粗的周期止损被压得过大。
+    ATR 的**倍数**（stop_atr_mult / max_target_atr / min_dist_atr）是周期无关的，
+    不动。
+    """
+    import math
+    from .market import period_seconds
+    ratio = period_seconds(tf) / period_seconds(base_tf)
+    return math.sqrt(ratio) if ratio > 0 else 1.0
+
+
+def resolve_tf_spec(mode: str, timeframe: str | None):
+    """把"模式 + 可选基础周期"解成 (生效的模式字典, 因子周期 spec 或 None)。
+
+    返回 spec=None 表示"沿用原写死周期"（timeframe 为空，或等于该模式默认基础周期）。
+    否则返回一份按 timeframe 重绑定的模式字典（副本，不改全局 MODES）和因子 spec。
+    """
+    import copy as _copy
+    m = MODES.get(mode) or MODES[DEFAULT_MODE]
+    base_tf = _MODE_BASE_TF.get(mode, "1day")
+    # reversion（超卖反弹）走独立判据（RSI2/SMA20/SMA200 写死在日线上），
+    # 不参与多时间框架重定标
+    if mode == "reversion" or not timeframe or timeframe not in TIMEFRAMES or timeframe == base_tf:
+        return m, None
+
+    m = _copy.deepcopy(m)
+    m["atr_period"] = timeframe
+    parent = tf_parent(timeframe)
+    child = tf_child(timeframe)
+    # 止损区间 / 入场带宽按 sqrt 频率比缩放
+    f = _freq_scale(timeframe, base_tf)
+    lo, hi = m["stop_pct_range"]
+    m["stop_pct_range"] = (round(lo * f, 4), round(hi * f, 4))
+    m["entry_width_pct"] = round(m["entry_width_pct"] * f, 4)
+    # 价位阶梯回看：基础周期看约 90 天、上一级看约 180 天
+    m["level_lookback"] = {timeframe: _bars_for_span(timeframe, 90),
+                           parent: _bars_for_span(parent, 180)}
+    # 斐波那契：日线及以上用基础周期本身，更细的用上一级
+    m["use_daily_fib"] = timeframe in ("1day", "1week", "1mon")
+
+    spec = {
+        "tf": timeframe,
+        "parent": parent,
+        "child": child,
+        "trend_main": timeframe,          # trend_daily 用
+        "trend_confirm": parent,          # trend_intraday 用
+        "momentum": (child, timeframe),  # (快, 慢) 两条 RSI
+        "structure": timeframe,           # 摆动结构 / ADX
+        "vwap": child if child != timeframe else timeframe,
+        "volatility": timeframe,
+        "volume": timeframe,
+        "oi_price": timeframe,
+        "levels": m["level_lookback"],
+        "fib": timeframe if m["use_daily_fib"] else parent,
+    }
+    return m, spec
+
 # 趋势确认因子在方向判据里的折价。趋势因子 IC 在两段时序切分间会翻转
 # （train -0.089 / test -0.162），所以它只能"确认"不能"发起"：
 # 方向只认 状态因子 + TREND_CONFIRM_SCALE × 趋势因子。
@@ -201,6 +325,9 @@ class Plan:
     risk_mult_short: float = 1.0
     # 生效中的回测成本参数（taker/maker/滑点/冲击系数），供 sizing 摊开成本
     costs_cfg: dict = field(default_factory=dict)
+    # 多时间框架：本计划按哪个基础周期重定标（None = 模式默认口径）。
+    # 选了非默认周期时，因子/止损/级别都围绕它重算，权重仍沿用日线校准值。
+    timeframe: str | None = None
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if k != "factors"}
@@ -260,8 +387,8 @@ def _dampen_trend(score: float, cfg: dict | None) -> float:
     return sign * max(0.0, min(1.0, kept))
 
 
-def _f_trend(snap: Snapshot) -> Factor:
-    """日线趋势。
+def _f_trend(snap: Snapshot, spec: dict | None = None) -> Factor:
+    """主趋势（默认日线趋势）。
 
     旧版只比"价格在哪一侧"，三条均线等权布尔打分，SMA200 权重最高(1.6)
     却最滞后。实测 BTC：价格在 SMA20 下 1.7%、SMA50 上 0.6%、SMA200 上 13.0%
@@ -277,10 +404,15 @@ def _f_trend(snap: Snapshot) -> Factor:
         （k 按均线周期给：短均线贴近是常态，长均线贴近才是信号）
       - 增加均线自身斜率项：均线在往下走时，价格站在它上方不算多
       - 斜率与距离同向才给满票，反向时互相抵消
+
+    spec 给出基础周期（多时间框架分析）时，整根均线序列改用该周期，
+    因子名保持 trend_daily（权重/角色不变），详情里标注周期。
     """
-    cs = snap.closes("1day")
+    tf = (spec or {}).get("trend_main") or "1day"
+    cs = snap.closes(tf)
     if len(cs) < 60:
-        return Factor("trend_daily", "日线趋势", 0.0, _w("trend_daily"), "日线数据不足")
+        return Factor("trend_daily", "日线趋势", 0.0, _w("trend_daily"),
+                      f"{period_cn(tf)}数据不足")
     price = snap.price or cs[-1]
 
     specs = (
@@ -315,12 +447,13 @@ def _f_trend(snap: Snapshot) -> Factor:
         pts += 0.8 if e12 > e26 else -0.8
         parts.append(f"EMA12{'＞' if e12 > e26 else '＜'}EMA26")
     score = max(-1.0, min(1.0, pts / 6.6 * 1.35))
+    parts = ([f"[{period_cn(tf)}]"] if tf != "1day" else []) + parts
     return Factor("trend_daily", "日线趋势", score, _w("trend_daily"),
                   "；".join(parts))
 
 
-def _f_intraday(snap: Snapshot) -> Factor:
-    """1 小时趋势。
+def _f_intraday(snap: Snapshot, spec: dict | None = None) -> Factor:
+    """次级趋势（确认用，默认 1 小时趋势）。
 
     旧版布尔打分：现价在 60min SMA20 上方就给 +1.0，与"高出多少"无关。
     实测 IC = **-0.199**（20 币 × 2060 点，5 日持有）——
@@ -328,10 +461,14 @@ def _f_intraday(snap: Snapshot) -> Factor:
     根因是布尔票在反弹启动和反弹见顶时输出完全相同。
 
     改成与 _f_trend 同构：距离衰减 + 均线自身斜率。
+
+    多时间框架：spec 存在时用"上一级周期"做确认趋势，比主趋势慢一档。
     """
-    cs = snap.closes("60min")
+    tf = (spec or {}).get("trend_confirm") or "60min"
+    cs = snap.closes(tf)
     if len(cs) < 30:
-        return Factor("trend_intraday", "1小时趋势", 0.0, _w("trend_intraday"), "1小时数据不足")
+        return Factor("trend_intraday", "1小时趋势", 0.0, _w("trend_intraday"),
+                      f"{period_cn(tf)}数据不足")
     price = snap.price or cs[-1]
 
     pts = 0.0
@@ -355,18 +492,22 @@ def _f_intraday(snap: Snapshot) -> Factor:
         # 而距离项已验证过方向，不能让未验证项盖过已验证项。
         pts += 0.5 if h > 0 else -0.5
         parts.append(f"MACD柱{'正' if h > 0 else '负'}({h:+,.2f})")
+    detail = "；".join(parts)
+    if tf != "60min":
+        detail = f"[{period_cn(tf)}] {detail}"
     return Factor("trend_intraday", "1小时趋势", max(-1.0, min(1.0, pts / 3.1)),
-                  _w("trend_intraday"), "；".join(parts))
+                  _w("trend_intraday"), detail)
 
 
-def _f_momentum(snap: Snapshot) -> Factor:
-    cs15, cs60 = snap.closes("15min"), snap.closes("60min")
-    r15 = ind.last(ind.rsi(cs15, 14)) if len(cs15) > 20 else None
-    r60 = ind.last(ind.rsi(cs60, 14)) if len(cs60) > 20 else None
-    if r15 is None and r60 is None:
+def _f_momentum(snap: Snapshot, spec: dict | None = None) -> Factor:
+    fast, slow = ((spec or {}).get("momentum") or ("15min", "60min"))
+    cs_f, cs_s = snap.closes(fast), snap.closes(slow)
+    rf = ind.last(ind.rsi(cs_f, 14)) if len(cs_f) > 20 else None
+    rs = ind.last(ind.rsi(cs_s, 14)) if len(cs_s) > 20 else None
+    if rf is None and rs is None:
         return Factor("momentum", "动量(RSI)", 0.0, _w("momentum"), "RSI 数据不足")
     pts, parts = 0.0, []
-    for label, r in (("15m", r15), ("1h", r60)):
+    for label, r in ((fast, rf), (slow, rs)):
         if r is None:
             continue
         if r >= 75:
@@ -382,8 +523,9 @@ def _f_momentum(snap: Snapshot) -> Factor:
     return Factor("momentum", "动量(RSI)", max(-1.0, min(1.0, pts / 1.4)), _w("momentum"), "；".join(parts))
 
 
-def _f_structure(snap: Snapshot) -> Factor:
-    cs = snap.klines.get("60min", [])
+def _f_structure(snap: Snapshot, spec: dict | None = None) -> Factor:
+    tf = (spec or {}).get("structure") or "60min"
+    cs = snap.klines.get(tf, [])
     if len(cs) < 40:
         return Factor("structure", "摆动结构", 0.0, _w("structure"), "数据不足")
     highs, lows = swing_points(cs, width=3)
@@ -399,11 +541,15 @@ def _f_structure(snap: Snapshot) -> Factor:
     a = ind.last(ind.adx([c.high for c in cs], [c.low for c in cs], [c.close for c in cs], 14))
     if a is not None:
         parts.append(f"ADX {a:.0f} {'趋势市' if a >= 25 else ('震荡市' if a < 20 else '过渡')}")
-    return Factor("structure", "摆动结构", max(-1.0, min(1.0, pts / 1.4)), _w("structure"), "；".join(parts))
+    detail = "；".join(parts)
+    if tf != "60min":
+        detail = f"[{period_cn(tf)}] {detail}"
+    return Factor("structure", "摆动结构", max(-1.0, min(1.0, pts / 1.4)), _w("structure"), detail)
 
 
-def _f_vwap(snap: Snapshot) -> Factor:
-    cs = snap.klines.get("5min", [])
+def _f_vwap(snap: Snapshot, spec: dict | None = None) -> Factor:
+    tf = (spec or {}).get("vwap") or "5min"
+    cs = snap.klines.get(tf, [])
     if len(cs) < 30:
         return Factor("vwap", "日内VWAP", 0.0, _w("vwap"), "数据不足")
     day_start = (cs[-1].ts // 86400) * 86400
@@ -457,7 +603,7 @@ def _f_funding(snap: Snapshot) -> Factor:
     return Factor("funding", "资金费率", score, _w("funding"), detail)
 
 
-def _f_oi(snap: Snapshot) -> Factor:
+def _f_oi(snap: Snapshot, spec: dict | None = None) -> Factor:
     hist = snap.oi_history
     if len(hist) < 8 or not snap.price:
         return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), "数据不足")
@@ -466,7 +612,9 @@ def _f_oi(snap: Snapshot) -> Factor:
     if not now or not ago:
         return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), "数据不足")
     oi_chg = (now / ago - 1.0) * 100
-    cs = snap.closes("1day")
+    # 价格侧跟随基础周期；持仓量本身仍是交易所按日发布的 oi_history
+    tf = (spec or {}).get("oi_price") or "1day"
+    cs = snap.closes(tf)
     px_chg = ((cs[-1] / cs[-8] - 1.0) * 100) if len(cs) > 8 else None
     if px_chg is None:
         return Factor("open_interest", "持仓量", 0.0, _w("open_interest"), f"7日持仓 {oi_chg:+.1f}%")
@@ -481,7 +629,7 @@ def _f_oi(snap: Snapshot) -> Factor:
     else:
         score, tag = 0.0, "量价背离不明显"
     return Factor("open_interest", "持仓量", score, _w("open_interest"),
-                  f"7日持仓 {oi_chg:+.1f}%、价格 {px_chg:+.1f}% · {tag}")
+                  f"7日持仓 {oi_chg:+.1f}%、价格({period_cn(tf)}) {px_chg:+.1f}% · {tag}")
 
 
 def _f_elite(snap: Snapshot) -> Factor:
@@ -537,7 +685,7 @@ def _f_orderbook(snap: Snapshot, price: float | None) -> Factor:
                   f"±1% 买 {bid * cs:,.1f} / 卖 {ask * cs:,.1f} 币，比值 {ratio:.2f}（{tag}）")
 
 
-def _f_volatility(snap: Snapshot) -> Factor:
+def _f_volatility(snap: Snapshot, spec: dict | None = None) -> Factor:
     """波动率：低波动溢价。
 
     这是唯一经过样本外验证、且跨期符号稳定的方向信号（见 README「哪些信号真的有
@@ -546,34 +694,42 @@ def _f_volatility(snap: Snapshot) -> Factor:
 
     注意它和"风险提示"是两件事：波动高时仓位本该更小，那是风控（由仓位计算
     与强平校验负责）；这里只回答方向。
+
+    多时间框架：基础周期换到哪，就在哪个周期的 K 线上算 ATR 分位
+    （"近 250 根"而非"近 250 日"，换周期后覆盖的日历天数随之改变）。
     """
-    k = snap.klines.get("1day") or []
+    tf = (spec or {}).get("volatility") or "1day"
+    k = snap.klines.get(tf) or []
     cs = [c.close for c in k]
     atr = ind.atr([c.high for c in k], [c.low for c in k], cs, 14) if len(k) > 20 else []
     atrp = [a / c if (a and c) else None for a, c in zip(atr, cs)]
     detail = []
-    rv = ind.realized_vol_pct(cs, 30, bars_per_year("1day")) if len(cs) > 31 else None
+    rv = ind.realized_vol_pct(cs, 30, bars_per_year(tf)) if len(cs) > 31 else None
     if rv is not None:
-        detail.append(f"30日年化波动 {rv:.0f}%")
+        if tf == "1day":
+            detail.append(f"30日年化波动 {rv:.0f}%")
+        else:
+            detail.append(f"30×{period_cn(tf)}年化波动 {rv:.0f}%")
     cur = atrp[-1] if atrp else None
     window = [v for v in atrp[-250:] if v is not None]
     if cur is None or len(window) < 30:
         if cur and snap.price:
-            detail.append(f"日ATR {cur * 100:.2f}%")
+            detail.append(f"{period_cn(tf)}ATR {cur * 100:.2f}%")
         return Factor("volatility", "波动率", 0.0, _w("volatility"),
                       "；".join(detail) or "无数据")
     rank = sum(1 for v in window if v <= cur) / len(window)   # 0=最平静 1=最躁动
     score = max(-1.0, min(1.0, 1.0 - 2.0 * rank))
-    detail.append(f"日ATR {cur * 100:.2f}%，处于自身近 {len(window)} 日的 "
+    detail.append(f"{period_cn(tf)}ATR {cur * 100:.2f}%，处于自身近 {len(window)} 根的 "
                   f"{rank * 100:.0f}% 分位")
     detail.append("低波动（偏多）" if score > 0.15 else
                   ("高波动（偏空）" if score < -0.15 else "波动中性"))
     return Factor("volatility", "波动率", score, _w("volatility"), "；".join(detail))
 
 
-def _f_volume(snap: Snapshot) -> Factor:
+def _f_volume(snap: Snapshot, spec: dict | None = None) -> Factor:
     """成交量放大：另一个跨期符号稳定的正向信号（放量 -> 偏多）。"""
-    k = snap.klines.get("1day") or []
+    tf = (spec or {}).get("volume") or "1day"
+    k = snap.klines.get(tf) or []
     if len(k) < 25:
         return Factor("volume", "成交量", 0.0, _w("volume"), "数据不足")
     vs = [c.volume for c in k]
@@ -584,7 +740,7 @@ def _f_volume(snap: Snapshot) -> Factor:
     score = max(-1.0, min(1.0, z / 0.8))
     tag = "放量" if score > 0.2 else ("缩量" if score < -0.2 else "量能持平")
     return Factor("volume", "成交量", score, _w("volume"),
-                  f"当日 {vs[-1]:,.0f} 张，20日均 {base:,.0f} 张（{z * 100:+.0f}%，{tag}）")
+                  f"本周期 {vs[-1]:,.0f} 张，20周期均 {base:,.0f} 张（{z * 100:+.0f}%，{tag}）")
 
 
 # (因子函数, 是否需要现价)。只有盘口因子额外要一个 price 参数，
@@ -628,16 +784,20 @@ def _w(name: str) -> float:
     return float(FACTOR_DEFAULTS.get(name, 0.0))
 
 
-def _bias_daily(snap: Snapshot) -> float:
-    """日线方向偏置 [-1,1]：现价相对均线/EMA 的位置。"""
-    cs = snap.closes("1day")
+def _bias_on(snap: Snapshot, period: str = "1day", *, with_200: bool = True) -> float:
+    """某周期方向偏置 [-1,1]：现价相对均线/EMA 的位置。
+
+    with_200=True 时含 SMA200（长周期用，如日线），False 时只用 SMA20/50。
+    """
+    cs = snap.closes(period)
     if len(cs) < 30:
         return 0.0
     price = snap.price or cs[-1]
     pts, w = 0.0, 0.0
-    for v, wt in ((ind.last(ind.sma(cs, 20)), 1.0),
-                  (ind.last(ind.sma(cs, 50)), 1.2),
-                  (ind.last(ind.sma(cs, 200)), 1.5)):
+    ma_specs = [(ind.last(ind.sma(cs, 20)), 1.0), (ind.last(ind.sma(cs, 50)), 1.2)]
+    if with_200:
+        ma_specs.append((ind.last(ind.sma(cs, 200)), 1.5))
+    for v, wt in ma_specs:
         if v:
             pts += wt if price > v else -wt
             w += wt
@@ -646,6 +806,11 @@ def _bias_daily(snap: Snapshot) -> float:
         pts += 0.8 if e12 > e26 else -0.8
         w += 0.8
     return max(-1.0, min(1.0, pts / w)) if w else 0.0
+
+
+def _bias_daily(snap: Snapshot) -> float:
+    """日线方向偏置 [-1,1]：现价相对均线/EMA 的位置。"""
+    return _bias_on(snap, "1day", with_200=True)
 
 
 def _bias_intraday(snap: Snapshot) -> float:
@@ -667,20 +832,31 @@ def _bias_intraday(snap: Snapshot) -> float:
     return max(-1.0, min(1.0, pts / w)) if w else 0.0
 
 
-def _f_resonance(snap: Snapshot, weight: float) -> Factor:
-    """多周期共振 = 日线偏置 × 60min 偏置。
+def _f_resonance(snap: Snapshot, weight: float, spec: dict | None = None) -> Factor:
+    """多周期共振 = 高周期偏置 × 次级周期偏置（默认日线 × 60min）。
 
     同向（都多或都空）-> 正，表示趋势共振，顺势信号更可靠；
     背离 -> 负，表示在逆着高周期做，要谨慎。
+
+    spec 为 None 时严格沿用原口径（_bias_daily × _bias_intraday，含 MACD 项），
+    保证与已回测校准的行为逐字节一致；spec 给出时才改用重定标后的周期。
     """
-    hi = _bias_daily(snap)
-    lo = _bias_intraday(snap)
+    if spec is None:
+        hi, lo = _bias_daily(snap), _bias_intraday(snap)
+        hi_cn, lo_cn = "日线", "1h"
+    else:
+        hi_tf = spec.get("trend_main") or "1day"
+        lo_tf = spec.get("trend_confirm") or "60min"
+        # 重定标：主趋势用基础周期（长均线），确认趋势用上一级周期
+        hi = _bias_on(snap, hi_tf, with_200=True)
+        lo = _bias_on(snap, lo_tf, with_200=False)
+        hi_cn, lo_cn = period_cn(hi_tf), period_cn(lo_tf)
     score = max(-1.0, min(1.0, hi * lo))
     if hi == 0 or lo == 0:
-        detail = f"共振无法判断（日线偏置 {hi:+.2f} / 1h 偏置 {lo:+.2f}）"
+        detail = f"共振无法判断（{hi_cn}偏置 {hi:+.2f} / {lo_cn}偏置 {lo:+.2f}）"
     else:
         same = "同向共振" if score > 0 else "周期背离"
-        detail = f"{same}：日线 {hi:+.2f} × 1h {lo:+.2f}"
+        detail = f"{same}：{hi_cn} {hi:+.2f} × {lo_cn} {lo:+.2f}"
     return Factor("resonance", "多周期共振", score, weight, detail)
 
 
@@ -801,11 +977,17 @@ def _gate_measure(targets: list[dict], measure: str,
 
 def compute_factors(snap: Snapshot, *, resonance: bool = False,
                     resonance_weight: float = RESONANCE_DEFAULT_WEIGHT,
-                    trend_dampen: dict | None = None) -> list[Factor]:
+                    trend_dampen: dict | None = None,
+                    tf_spec: dict | None = None) -> list[Factor]:
+    """按基础周期 spec 重定标计算因子（spec=None 走原写死周期）。
+
+    tf_spec 是 resolve_tf_spec 返回的周期绑定表；None 表示保持历史口径，
+    行为与已回测校准过的默认模型完全一致。
+    """
     out: list[Factor] = []
     for fn, needs_price in FACTOR_FNS:
         try:
-            out.append(fn(snap, snap.price) if needs_price else fn(snap))
+            out.append(fn(snap, snap.price, tf_spec) if needs_price else fn(snap, tf_spec))
         except Exception as exc:
             out.append(Factor(fn.__name__.replace("_f_", ""), "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))
@@ -822,7 +1004,7 @@ def compute_factors(snap: Snapshot, *, resonance: bool = False,
                     "trend_dampen": trend_dampen}})
     if resonance:
         try:
-            out.append(_f_resonance(snap, resonance_weight))
+            out.append(_f_resonance(snap, resonance_weight, tf_spec))
         except Exception as exc:
             out.append(Factor("resonance", "计算异常", 0.0, 0.0,
                               f"{type(exc).__name__}: {exc}"))
@@ -833,9 +1015,14 @@ def compute_factors(snap: Snapshot, *, resonance: bool = False,
 # 价位阶梯
 # --------------------------------------------------------------------------
 
-def collect_levels(snap: Snapshot, price: float, mode: str = "intraday") -> list[Level]:
+def collect_levels(snap: Snapshot, price: float, mode: str = "intraday",
+                   spec: dict | None = None) -> list[Level]:
+    """价位阶梯。spec 给出时按基础周期重定标（回看窗口/结构周期/斐波那契/VWAP）。"""
     m = MODES.get(mode, MODES["intraday"])
-    lb = m["level_lookback"]
+    lb = (spec or {}).get("levels") or m["level_lookback"]
+    base_tf = (spec or {}).get("tf") or m["atr_period"]
+    child_tf = (spec or {}).get("child")
+    fib_tf = (spec or {}).get("fib")
     lv: list[Level] = []
 
     for period, n in lb.items():
@@ -855,15 +1042,19 @@ def collect_levels(snap: Snapshot, price: float, mode: str = "intraday") -> list
                 lv.append(Level(p, "resistance" if p > price else "support", w,
                                 f"{period}摆动低点", ""))
 
-    if m.get("use_daily_fib") and snap.klines.get("1day"):
-        k1 = snap.klines["1day"][-90:]
+    # 斐波那契：日线及以上用基础周期本身，更细的用上一级
+    fib_period = fib_tf or ("1day" if m.get("use_daily_fib") else None)
+    if fib_period and snap.klines.get(fib_period):
+        n_fib = _bars_for_span(fib_period, 90) if spec else (90 if fib_period == "1day" else 72)
+        k1 = snap.klines[fib_period][-n_fib:]
         hi, lo = max(c.high for c in k1), min(c.low for c in k1)
         if hi > lo:
             for r, p in fib_levels(hi, lo):
                 lv.append(Level(p, "resistance" if p > price else "support",
                                 0.5 if 0.3 <= r <= 0.7 else 0.35,
                                 f"斐波{r * 100:.1f}%", f"{lo:,.2f}~{hi:,.2f}"))
-    elif snap.klines.get("60min"):
+    elif spec is None and snap.klines.get("60min"):
+        # 原行为：未启用日线斐波时的 1h 斐波兜底
         k60 = snap.klines["60min"][-72:]
         hi, lo = max(c.high for c in k60), min(c.low for c in k60)
         if hi > lo:
@@ -873,27 +1064,47 @@ def collect_levels(snap: Snapshot, price: float, mode: str = "intraday") -> list
 
     # 均线 / VWAP
     mas: dict[str, float | None] = {}
-    cs60 = snap.closes("60min")
-    cs15 = snap.closes("15min")
-    cs1d = snap.closes("1day")
-    if len(cs15) >= 50:
-        mas["MA20(15m)"] = ind.last(ind.sma(cs15, 20))
-    if len(cs60) >= 50:
-        mas["MA50(1h)"] = ind.last(ind.sma(cs60, 50))
-    if len(cs1d) >= 20:
-        mas["EMA12"] = ind.last(ind.ema(cs1d, 12))
-        mas["EMA26"] = ind.last(ind.ema(cs1d, 26))
-    if len(cs1d) >= 50:
-        mas["SMA20"] = ind.last(ind.sma(cs1d, 20))
-        mas["SMA50"] = ind.last(ind.sma(cs1d, 50))
-    if len(cs1d) >= 200:
-        mas["SMA200"] = ind.last(ind.sma(cs1d, 200))
-    ks = snap.klines.get("5min") or []
-    if len(ks) >= 30:
-        day_start = (ks[-1].ts // 86400) * 86400
-        st = next((i for i, c in enumerate(ks) if c.ts >= day_start), 0)
-        mas["VWAP"] = ind.last(ind.vwap([c.high for c in ks], [c.low for c in ks],
-                                        [c.close for c in ks], [c.volume for c in ks], start=st))
+    if spec:
+        cs_b = snap.closes(base_tf)
+        if len(cs_b) >= 50:
+            mas[f"MA50({period_cn(base_tf)})"] = ind.last(ind.sma(cs_b, 50))
+        if len(cs_b) >= 20:
+            mas["EMA12"] = ind.last(ind.ema(cs_b, 12))
+            mas["EMA26"] = ind.last(ind.ema(cs_b, 26))
+        if len(cs_b) >= 50:
+            mas["SMA20"] = ind.last(ind.sma(cs_b, 20))
+        if len(cs_b) >= 200:
+            mas["SMA200"] = ind.last(ind.sma(cs_b, 200))
+        vwap_p = child_tf or base_tf
+        ks = snap.klines.get(vwap_p) or []
+        if len(ks) >= 30:
+            day_start = (ks[-1].ts // 86400) * 86400
+            st = next((i for i, c in enumerate(ks) if c.ts >= day_start), 0)
+            mas["VWAP"] = ind.last(ind.vwap([c.high for c in ks], [c.low for c in ks],
+                                            [c.close for c in ks], [c.volume for c in ks],
+                                            start=st))
+    else:
+        cs60 = snap.closes("60min")
+        cs15 = snap.closes("15min")
+        cs1d = snap.closes("1day")
+        if len(cs15) >= 50:
+            mas["MA20(15m)"] = ind.last(ind.sma(cs15, 20))
+        if len(cs60) >= 50:
+            mas["MA50(1h)"] = ind.last(ind.sma(cs60, 50))
+        if len(cs1d) >= 20:
+            mas["EMA12"] = ind.last(ind.ema(cs1d, 12))
+            mas["EMA26"] = ind.last(ind.ema(cs1d, 26))
+        if len(cs1d) >= 50:
+            mas["SMA20"] = ind.last(ind.sma(cs1d, 20))
+            mas["SMA50"] = ind.last(ind.sma(cs1d, 50))
+        if len(cs1d) >= 200:
+            mas["SMA200"] = ind.last(ind.sma(cs1d, 200))
+        ks = snap.klines.get("5min") or []
+        if len(ks) >= 30:
+            day_start = (ks[-1].ts // 86400) * 86400
+            st = next((i for i, c in enumerate(ks) if c.ts >= day_start), 0)
+            mas["VWAP"] = ind.last(ind.vwap([c.high for c in ks], [c.low for c in ks],
+                                            [c.close for c in ks], [c.volume for c in ks], start=st))
     lv += moving_average_levels(price, mas, span_pct=3.0 if mode == "intraday" else 8.0)
 
     lv += round_number_levels(price, span_pct=1.0 if mode == "intraday" else 2.5)
@@ -1104,9 +1315,16 @@ def _oversold_reversion_plan(snap: Snapshot, cfg: dict, mode: str,
     return plan
 
 
-def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
+def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE,
+               timeframe: str | None = None) -> Plan:
+    """生成交易计划。timeframe 给定基础周期时整条链重定标（因子/止损/级别）。
+
+    timeframe=None 时读 config 的 analysis.timeframe，再为空则沿用模式默认口径，
+    行为与已回测校准的默认模型一致。
+    """
     mode = mode if mode in MODES else DEFAULT_MODE
-    m = MODES[mode]
+    tf = timeframe or ((cfg.get("analysis") or {}).get("timeframe") or None)
+    m, tf_spec = resolve_tf_spec(mode, tf)
     account = cfg.get("account") or {}
     equity = float(account.get("equity_usdt") or 0)
     risk_pct = float(account.get("risk_pct_per_trade") or 2.0)
@@ -1122,6 +1340,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     plan.risk_mult_long = float(_an.get("risk_mult_long") or 1.0)
     plan.risk_mult_short = float(_an.get("risk_mult_short") or 1.0)
     plan.costs_cfg = dict(_an.get("backtest") or {})
+    plan.timeframe = tf_spec.get("tf") if tf_spec else None
     if not snap.price:
         plan.notes.append("拿不到最新价，无法分析。")
         plan.warnings.extend(snap.errors)
@@ -1148,7 +1367,8 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
         compute_factors(snap,
                         resonance=bool(res_cfg.get("enabled")),
                         resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT),
-                        trend_dampen=an.get("trend_dampen")),
+                        trend_dampen=an.get("trend_dampen"),
+                        tf_spec=tf_spec),
         an.get("factor_weights"))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)
@@ -1170,12 +1390,16 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
     if len(atr_k) > 15:
         atr_v = ind.last(ind.atr([c.high for c in atr_k], [c.low for c in atr_k],
                                  [c.close for c in atr_k], 14))
-    k60 = snap.klines.get("60min", [])
-    adx_v = ind.last(ind.adx([c.high for c in k60], [c.low for c in k60],
-                             [c.close for c in k60], 14)) if len(k60) > 30 else None
-    rv = ind.realized_vol_pct(snap.closes("1day"), 30, 365) if len(snap.closes("1day")) > 31 else None
+    adx_tf = "60min" if tf_spec is None else (tf_spec.get("structure") or "60min")
+    k_adx = snap.klines.get(adx_tf, [])
+    adx_v = ind.last(ind.adx([c.high for c in k_adx], [c.low for c in k_adx],
+                             [c.close for c in k_adx], 14)) if len(k_adx) > 30 else None
+    rv_tf = (tf_spec or {}).get("volatility") or "1day"
+    cs_rv = snap.closes(rv_tf)
+    rv = ind.realized_vol_pct(cs_rv, 30, bars_per_year(rv_tf)) if len(cs_rv) > 31 else None
     plan.market = {
         "mode": mode, "mode_label": m["label"],
+        "timeframe": tf_spec.get("tf") if tf_spec else None,
         "threshold": threshold,
         "atr_period": m["atr_period"],
         "atr": round(atr_v, 8) if atr_v else None,
@@ -1186,6 +1410,13 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
         "change_24h_pct": round(snap.change_24h_pct, 2) if snap.change_24h_pct is not None else None,
         "basis_pct": round(snap.basis_pct, 4) if snap.basis_pct is not None else None,
     }
+    if tf_spec:
+        plan.notes.append(
+            f"多时间框架：本计划按 {period_cn(tf_spec['tf'])} 重定标——"
+            f"主趋势/波动率/成交量用 {period_cn(tf_spec['tf'])}，"
+            f"次级趋势/摆动结构用 {period_cn(tf_spec['parent'])}，"
+            f"止损 ATR 用 {period_cn(tf_spec['tf'])}，目标位/级别回看同步。"
+            "因子权重仍沿用日线校准值，属实验功能，请先用回测/影子账户验证。")
 
     # 流动性体检：成交额 / 买卖价差。滑点模型假设的 2bps 在薄合约上根本不
     # 成立，所以先把"这个合约能不能做得进"单独说清楚；enforce 开启时直接拦。
@@ -1216,7 +1447,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE) -> Plan:
         return plan
 
     # ---- 价位阶梯 ----
-    all_levels = collect_levels(snap, price, mode)
+    all_levels = collect_levels(snap, price, mode, tf_spec)
     min_dist = atr_v * m["min_dist_atr"]
     max_dist = atr_v * m["max_target_atr"]
     up = price_ladder(price, all_levels, min_dist=min_dist, max_dist=max_dist, direction="up")

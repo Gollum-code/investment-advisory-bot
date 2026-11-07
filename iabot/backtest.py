@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from .costs import impact_bps
 from .market import Candle, period_seconds, Snapshot
 from .outcomes import evaluate_outcome
-from .signals import build_plan
+from .signals import build_plan, resolve_tf_spec
 
 # 成本模型默认值（bps = 万分之一）。一次往返 = 开仓一次 + 平仓一次。
 DEFAULT_COSTS = {"taker_fee_bps": 5.0, "slippage_bps": 2.0,
@@ -269,6 +269,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
              step: int = 10, warmup: int = 60, max_points: int = 400,
              apply_costs: bool | None = None, costs: dict | None = None,
              equity_usdt: float | None = None, risk_pct: float | None = None,
+             timeframe: str | None = None,
              start_index: int | None = None, end_index: int | None = None) -> BacktestResult:
     """在 base 快照的历史 K 线上滑动回测。
 
@@ -279,6 +280,10 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
                  None=读 config 的 analysis.backtest（默认开启）。
     costs:  覆盖默认成本参数；资金费率从 base.funding_rate 取（作为近似）。
     equity_usdt / risk_pct: 用于把 R 折算成金额（默认取 cfg.account）。
+    timeframe: 多时间框架基础周期。None 时回落 config.analysis.timeframe，
+                 再为空则用模式默认口径（intraday=15min / swing=1day）。
+                 设为其他基础周期（如 "4hour"）时，主建仓序列、因子、
+                 止损、目标位都围绕该周期重定标（实验功能）。
     start_index / end_index: 只在主周期序列的这段区间里取建仓点（走样本外
                  折间检验用）。注意**不裁剪历史**：因子在每个建仓点看到的
                  仍然是该点之前的全部 K 线，否则日线类因子（波动率分位、
@@ -311,7 +316,13 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         C.update({k: float(v) for k, v in costs.items() if k in C})
     # 出场管理（保本 / 移动止损）：默认都关，开了才改变判定口径。
     exit_cfg = (cfg.get("analysis") or {}).get("exit") or {}
-    m_period = "15min" if mode == "intraday" else "1day"
+    # 主周期：显式 timeframe > 配置 analysis.timeframe > 模式默认。
+    # 主序列用哪个周期，建仓点、持仓时长、判定窗口就跟着哪个周期走。
+    bt_tf = timeframe or (cfg.get("analysis") or {}).get("timeframe") or None
+    # resolve_tf_spec 返回 (模式字典, spec|None)；atr_period 在模式字典上
+    # （未重定标时就是模式默认，重定标时已换成基础周期）。
+    bt_mode, _bt_spec = resolve_tf_spec(mode, bt_tf)
+    m_period = bt_mode["atr_period"]
     m_period_sec = period_seconds(m_period)
     # 资金费率：优先用显式传入；否则优先用历史资金费率序列（按各建仓点时刻取），
     # 都没有才退回快照当前费率作近似。config 的 analysis.backtest.funding=false 可整体不计。
@@ -421,7 +432,7 @@ def backtest(base: Snapshot, cfg: dict, *, mode: str = "intraday",
         # 判定用"之后"的 K 线：从 i+1 开始
         future = main[i + 1:]
 
-        plan = build_plan(snap, cfg, mode=mode)
+        plan = build_plan(snap, cfg, mode=mode, timeframe=timeframe)
         try:
             coverages.append(float(getattr(plan, "factor_coverage", 1.0) or 1.0))
         except (TypeError, ValueError):

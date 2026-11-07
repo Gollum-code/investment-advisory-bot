@@ -63,7 +63,8 @@ class ScanTest(unittest.TestCase):
         adv.client = client
 
         # 先真的走一遍 client（触发失败/耗时/并发统计），再返回可控的分数。
-        def fake_payload(symbol, *, mode="intraday", force=False, account=None):
+        def fake_payload(symbol, *, mode="intraday", force=False, account=None,
+                     timeframe=None):
             adv.fetch(symbol, force=True)
             base = symbol.split("-")[0]
             score = float(base.replace("C", "") or 0)
@@ -86,7 +87,8 @@ class ScanTest(unittest.TestCase):
         adv = Advisor(DEFAULTS)
         adv.client = FakeClient()
 
-        def payload(symbol, *, mode="intraday", force=False, account=None):
+        def payload(symbol, *, mode="intraday", force=False, account=None,
+                timeframe=None):
             d = "wait" if symbol.startswith("C1") else "long"
             return {"symbol": symbol, "score": 40.0, "direction": d}
         adv.plan_payload = payload

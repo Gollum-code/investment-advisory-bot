@@ -72,11 +72,12 @@ def score_ranking(trade_logs: list[dict], *,
 
 
 def _symbol_rows(snapshots: dict[str, Snapshot], cfg: dict, *,
-                 mode: str, step: int, warmup: int, max_points: int) -> list[dict]:
+                 mode: str, step: int, warmup: int, max_points: int,
+                 timeframe: str | None = None) -> list[dict]:
     rows: list[dict] = []
     for sym, snap in snapshots.items():
         res = backtest(snap, cfg, mode=mode, step=step, warmup=warmup,
-                       max_points=max_points)
+                       max_points=max_points, timeframe=timeframe)
         rows.append({
             "symbol": sym,
             "trades": res.trades,
@@ -131,10 +132,11 @@ def _concentration(rows: list[dict]) -> dict:
 
 def multi_backtest(snapshots: dict[str, Snapshot], cfg: dict, *,
                    mode: str = "swing", step: int = 10, warmup: int = 60,
-                   max_points: int = 100000) -> dict:
+                   max_points: int = 100000,
+                   timeframe: str | None = None) -> dict:
     """对多个合约跑同一套规则，合并出整体期望，并检查收益是否集中在少数币上。"""
     rows = _symbol_rows(snapshots, cfg, mode=mode, step=step, warmup=warmup,
-                        max_points=max_points)
+                        max_points=max_points, timeframe=timeframe)
     rs: list[float] = []
     logs: list[dict] = []
     for r in rows:
@@ -236,18 +238,22 @@ def validate(snapshots: dict[str, Snapshot], cfg: dict, *,
              max_per_cluster: int | None = None,
              corr_threshold: float = 0.7,
              risk_mult_long: float | None = None,
-             risk_mult_short: float | None = None) -> dict:
+             risk_mult_short: float | None = None,
+             timeframe: str | None = None) -> dict:
     """完整验证：整段回测 + 折间一致性 + 集中度 + 组合模拟，一起给结论。
 
     整段正期望只说明"历史上总体是赚的"；折间一致性说明"不是靠某一段行情"；
     集中度说明"不是靠某几个币"；组合模拟说明"资金和并发够不够"。
     四样都过才算真的能用。
+    timeframe: 多时间框架基础周期。None 时回落 config.analysis.timeframe。
     """
-    full = multi_backtest(snapshots, cfg, mode=mode, step=step, warmup=warmup)
+    full = multi_backtest(snapshots, cfg, mode=mode, step=step, warmup=warmup,
+                          timeframe=timeframe)
     wf_rows = []
     for _sym, snap in snapshots.items():
         wf_rows.append(walk_forward(snap, cfg, mode=mode, folds=folds,
-                                    step=step, warmup=warmup))
+                                    step=step, warmup=warmup,
+                                    timeframe=timeframe))
     wf = aggregate(wf_rows)
     wf_conc = _concentration_pairs([
         (r.get("symbol") or "?", (r.get("pooled") or {}).get("total_r") or 0.0)

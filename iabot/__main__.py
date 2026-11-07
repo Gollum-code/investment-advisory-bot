@@ -21,7 +21,7 @@ from . import snapcache
 from .advisor import Advisor
 from .config import DEFAULT_MODE, ensure_example, load_config
 from .server import build_server, make_app
-from .signals import MODES
+from .signals import MODES, TIMEFRAMES
 from .symbols import to_contract
 from .universe import is_all_token, merge_spec, select
 
@@ -62,10 +62,17 @@ def render_plan(plan: dict, *, verbose: bool = True) -> str:
     """把一个计划渲染成终端可读的多行文本。"""
     sym = plan.get("symbol", "?")
     mode = MODES.get(plan.get("mode"), {}).get("label", plan.get("mode", ""))
+    tf = plan.get("timeframe")
+    if tf:
+        mode = f"{mode}"
     d = 1 if (plan.get("price") or 0) > 1000 else (4 if (plan.get("price") or 0) > 1 else 8)
     line = "=" * 66
-    out = [line, f"  {sym}  |  {mode}  |  评分 {plan.get('score', 0):+.1f}  |  "
-                 f"价格 {_num(plan.get('price'), d)}", line]
+    head = f"  {sym}  |  {mode}"
+    if tf:
+        from .signals import period_cn
+        head += f"（{period_cn(tf)}）"
+    head += f"  |  评分 {plan.get('score', 0):+.1f}  |  价格 {_num(plan.get('price'), d)}"
+    out = [line, head, line]
 
     m = plan.get("market") or {}
     if m:
@@ -161,6 +168,15 @@ def _account_from(args) -> dict:
     return acc
 
 
+def _tf_from(args) -> str | None:
+    """从 args 取多时间框架基础周期；空/非法回 None（模式默认口径）。"""
+    tf = (getattr(args, "tf", None) or "").strip()
+    if not tf:
+        return None
+    from .signals import TIMEFRAMES
+    return tf if tf in TIMEFRAMES else None
+
+
 def _save_plans(cfg: dict, plans: list[dict]) -> int:
     """把一批计划写进信号历史库（只写有明确方向的），返回条数。"""
     from .store import SignalStore
@@ -182,7 +198,8 @@ def cmd_analyze(args) -> int:
     adv = Advisor(cfg)
     acc = _account_from(args) or None
     try:
-        plan = adv.plan_payload(args.symbol, mode=args.mode, force=True, account=acc)
+        plan = adv.plan_payload(args.symbol, mode=args.mode, force=True, account=acc,
+                                timeframe=_tf_from(args))
     except Exception as exc:
         print(f"[错误] 拉取失败: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -309,7 +326,8 @@ def cmd_scan(args) -> int:
                   f"{plan['score']:+7.1f}", file=sys.stderr)
 
     plans, errs = adv.scan(syms, mode=args.mode, account=acc,
-                           workers=workers, on_result=on_result)
+                           workers=workers, on_result=on_result,
+                           timeframe=_tf_from(args))
     if getattr(args, "save", False):
         saved = _save_plans(cfg, plans)
         print(f"[已保存] {saved} 条有方向的信号写入历史库", file=sys.stderr)
@@ -403,9 +421,18 @@ def cmd_check(args) -> int:
 def cmd_backtest(args) -> int:
     from .backtest import backtest
     from .market import period_seconds
+    from .signals import resolve_tf_spec
     cfg = load_config()
     adv = Advisor(cfg)
-    main_period = "15min" if args.mode == "intraday" else "1day"
+    bt_tf = _tf_from(args)
+    # 主周期跟随多时间框架；未指定时用模式默认口径。
+    # resolve_tf_spec 返回 (模式字典, spec|None)：atr_period 在模式字典上，
+    # parent/child 在 spec 上（spec 非 None 才有多时间框架重定标）。
+    bt_mode, bt_spec = resolve_tf_spec(args.mode, bt_tf
+                                       or (cfg.get("analysis") or {}).get("timeframe")
+                                       or None)
+    main_period = bt_mode["atr_period"] if bt_spec else (
+        "15min" if args.mode == "intraday" else "1day")
     sym = to_contract(args.symbol)
     # 各周期按主周期时间跨度换算根数：15min 300 根只覆盖 3 天，回测一年日线
     # 就需要 365*24*4=35000 根 15min。给个上限，宁可早段少几个因子也不要缺数据。
@@ -415,6 +442,12 @@ def cmd_backtest(args) -> int:
         ratio = period_seconds(main_period) / period_seconds(period)
         return min(4000, max(60, int(args.bars * ratio)))
     periods = cfg.get("analysis", {}).get("tf_periods") or ["1min", "5min", "15min", "60min", "1day"]
+    if bt_spec:
+        # 多时间框架：把重定标链（基础+上一级+下一级）补进抓取周期，
+        # 否则主周期/因子周期根本没有 K 线，回测会整段 insufficient_data。
+        for p in (bt_spec["tf"], bt_spec.get("parent"), bt_spec.get("child")):
+            if p and p not in periods:
+                periods = list(periods) + [p]
     try:
         snap = adv.client.snapshot(sym, periods=periods, kline_size=max(args.bars, 120))
         # 主周期 K 线数不够时按换算好的各自根数补齐
@@ -447,7 +480,7 @@ def cmd_backtest(args) -> int:
     if getattr(args, "wf", 0):
         from .walkforward import walk_forward
         out = walk_forward(snap, cfg, mode=args.mode, folds=args.wf,
-                           step=args.step, warmup=args.warmup)
+                           step=args.step, warmup=args.warmup, timeframe=bt_tf)
         ms = (time.time() - t0) * 1000
         if args.json:
             print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -484,7 +517,8 @@ def cmd_backtest(args) -> int:
     res = backtest(snap, cfg, mode=args.mode, step=args.step,
                    warmup=args.warmup, max_points=2000,
                    equity_usdt=bt_acc.get("equity_usdt"),
-                   risk_pct=bt_acc.get("risk_pct_per_trade"))
+                   risk_pct=bt_acc.get("risk_pct_per_trade"),
+                   timeframe=bt_tf)
     ms = (time.time() - t0) * 1000
     if args.json:
         print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
@@ -588,7 +622,8 @@ def cmd_validate(args) -> int:
                    max_heat_pct=args.max_heat_pct,
                    max_per_cluster=args.max_per_cluster,
                    risk_mult_long=args.risk_mult_long,
-                   risk_mult_short=args.risk_mult_short)
+                   risk_mult_short=args.risk_mult_short,
+                   timeframe=_tf_from(args))
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0
@@ -1041,6 +1076,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="把本次信号写入历史库（默认 data/signals.db）")
     p_an.add_argument("--paper", action="store_true",
                       help="按本次计划开一笔模拟仓（入场/止损/止盈自动带入）")
+    p_an.add_argument("--tf", choices=list(TIMEFRAMES),
+                      help="多时间框架基础周期：把整条分析链围绕该周期重定标"
+                           "（如 4hour / 1week）。空=用模式默认口径。实验功能")
 
     p_sc = sub.add_parser("scan", help="批量扫描多个合约，或全市场（all）")
     p_sc.add_argument("symbols",
@@ -1062,6 +1100,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="全市场候选排序方式，默认按成交额")
     p_sc.add_argument("--workers", type=int, default=4,
                       help="并发分析数（默认 4，调高容易撞限流）")
+    p_sc.add_argument("--tf", choices=list(TIMEFRAMES),
+                      help="多时间框架基础周期：把整条分析链围绕该周期重定标"
+                           "（如 4hour / 1week）。空=用模式默认口径。实验功能")
     p_sc.add_argument("--radar", action="store_true",
                       help="只打印全市场雷达表（现价/涨跌/成交额，1 个请求），不做深度分析")
 
@@ -1089,6 +1130,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "还是只来自某一两段行情\"")
     p_bk.add_argument("--save", action="store_true",
                       help="把本次回测的参数与结果写入实验记录（可事后复现/对比）")
+    p_bk.add_argument("--tf", choices=list(TIMEFRAMES),
+                      help="多时间框架基础周期：主建仓序列、因子、止损、目标位都围绕"
+                           "该周期重定标（如 4hour / 1week）。空=用模式默认口径。实验功能")
 
     p_vd = sub.add_parser(
         "validate",
@@ -1115,6 +1159,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="本地快照缓存有效期秒数（默认 1800；<=0 表示永不过期）")
     p_vd.add_argument("--cache-dir", dest="cache_dir", default=None,
                       help="快照缓存目录（默认 data/snapcache）")
+    p_vd.add_argument("--tf", choices=list(TIMEFRAMES),
+                      help="多时间框架基础周期：整段/折间/组合全部围绕该周期重定标"
+                           "（如 4hour / 1week）。空=用模式默认口径。实验功能")
 
     p_sh = sub.add_parser(
         "shadow",

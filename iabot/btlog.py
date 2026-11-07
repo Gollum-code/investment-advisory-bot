@@ -30,6 +30,7 @@ def build_params(cfg: dict, *, symbol: str, mode: str, bars: int, step: int,
     return {
         "symbol": symbol,
         "mode": mode,
+        "timeframe": an.get("timeframe") or "",
         "bars": int(bars),
         "step": int(step),
         "warmup": int(warmup),

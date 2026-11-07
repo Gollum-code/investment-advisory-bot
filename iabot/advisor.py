@@ -49,8 +49,11 @@ class Advisor:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _plan_key(symbol: str, mode: str, account: dict | None) -> str:
+    def _plan_key(symbol: str, mode: str, account: dict | None,
+                  timeframe: str | None = None) -> str:
         base = f"{symbol}:{mode}"
+        if timeframe:
+            base = f"{base}@{timeframe}"
         if not account:
             return base
         part = "&".join(f"{k}={account[k]}" for k in _ACCOUNT_KEY_FIELDS
@@ -65,10 +68,13 @@ class Advisor:
             del cache[key]
 
     def analyze(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
-                account: dict | None = None, snap: Snapshot | None = None) -> Plan:
+                account: dict | None = None, snap: Snapshot | None = None,
+                timeframe: str | None = None) -> Plan:
         sym = to_contract(symbol)
         mode = mode if mode in MODES else DEFAULT_MODE
-        key = self._plan_key(sym, mode, account)
+        # timeframe 显式给空串时归 None；否则透传给 build_plan（None=读配置/模式默认）
+        tf = timeframe if timeframe not in (None, "") else None
+        key = self._plan_key(sym, mode, account, tf)
         now = time.time()
         if not force:
             with self._lock:
@@ -80,11 +86,11 @@ class Advisor:
                         return hit[2]
 
         if snap is None:
-            snap = self.fetch(sym, force=force)
+            snap = self.fetch(sym, force=force, periods=self._periods_for(tf))
         cfg = self.cfg
         if account:
             cfg = {**cfg, "account": {**(cfg.get("account") or {}), **account}}
-        plan = build_plan(snap, cfg, mode=mode)
+        plan = build_plan(snap, cfg, mode=mode, timeframe=tf)
         with self._lock:
             # 写入时刻用"现在"而不是函数入口的 now：并发抓行情时单次可能要好几秒，
             # 按开始时刻算会让条目一落地就"过期大半"（与 MarketClient._cached 同理）。
@@ -92,7 +98,23 @@ class Advisor:
             self._trim_locked(self._plan_cache, self._plan_cache_max)
         return plan
 
-    def fetch(self, symbol: str, *, force: bool = False) -> Snapshot:
+    def _periods_for(self, timeframe: str | None) -> list[str]:
+        """快照要抓哪些周期的 K 线。
+
+        默认取配置 tf_periods；指定基础周期 timeframe 时，把重定标链
+        （基础 + 上一级 + 下一级 + 快慢动量）补进来，否则对应周期的 K 线
+        根本没抓，因子会全部按"数据不足"降级。
+        """
+        periods = list(self.periods)
+        if timeframe:
+            from .signals import tf_parent, tf_child
+            for p in (timeframe, tf_parent(timeframe), tf_child(timeframe)):
+                if p and p not in periods:
+                    periods.append(p)
+        return periods
+
+    def fetch(self, symbol: str, *, force: bool = False,
+              periods: list[str] | None = None) -> Snapshot:
         sym = to_contract(symbol)
         now = time.time()
         if not force:
@@ -100,7 +122,8 @@ class Advisor:
                 hit = self._snap_cache.get(sym)
                 if hit and now - hit[0] < self._snap_ttl:
                     return hit[1]
-        snap = self.client.snapshot(sym, periods=self.periods, kline_size=self.kline_size)
+        snap = self.client.snapshot(sym, periods=periods or self.periods,
+                                    kline_size=self.kline_size)
         with self._lock:
             self._snap_cache[sym] = (time.time(), snap)
             self._trim_locked(self._snap_cache, self._snap_cache_max)
@@ -119,18 +142,21 @@ class Advisor:
 
     # ------------------------------------------------------------------
     def plan_payload(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
-                     account: dict | None = None) -> dict:
-        return self.analyze(symbol, mode=mode, force=force, account=account).to_dict()
+                     account: dict | None = None, timeframe: str | None = None) -> dict:
+        return self.analyze(symbol, mode=mode, force=force, account=account,
+                            timeframe=timeframe).to_dict()
 
     def full_payload(self, symbol: str, *, mode: str = DEFAULT_MODE, force: bool = False,
-                     account: dict | None = None) -> dict:
+                     account: dict | None = None, timeframe: str | None = None) -> dict:
         """前端一次拿全：交易计划 + 行情快照 + K线。
 
         先取快照、再用同一份快照算计划，保证计划与 K 线严格同源，
         不会出现"快照已刷新、计划还是上一份行情"的错位。
         """
-        snap = self.fetch(symbol, force=force)
-        plan = self.analyze(symbol, mode=mode, force=force, account=account, snap=snap)
+        tf = timeframe if timeframe not in (None, "") else None
+        snap = self.fetch(symbol, force=force, periods=self._periods_for(tf))
+        plan = self.analyze(symbol, mode=mode, force=force, account=account,
+                            snap=snap, timeframe=tf)
         return {
             "plan": plan.to_dict(),
             "snapshot": {
@@ -150,7 +176,7 @@ class Advisor:
     # ------------------------------------------------------------------
     def scan(self, symbols: list[str], *, mode: str = DEFAULT_MODE,
              account: dict | None = None, workers: int = 4, force: bool = True,
-             only_signal: bool = False,
+             only_signal: bool = False, timeframe: str | None = None,
              on_result: Any = None, should_stop: Any = None,
              ) -> tuple[list[dict], list[str]]:
         """并发分析一批合约，返回 (plans, errors)，plans 按 |评分| 降序。
@@ -159,15 +185,18 @@ class Advisor:
         workers 默认 4：火币公开接口对高频请求会限流（429），并发抬太高反而
         更慢——429 会触发指数退避重试。on_result(symbol, plan, error) 每完成
         一个回调一次；should_stop() 返回 True 时不再派发新任务（定时任务收尾用）。
+        timeframe 显式给定基础周期时，每个合约都按该周期重定标分析。
         """
         plans: list[dict] = []
         errors: list[str] = []
         if not symbols:
             return plans, errors
         workers = max(1, min(int(workers or 4), len(symbols)))
+        tf = timeframe if timeframe not in (None, "") else None
 
         def work(sym: str) -> dict:
-            return self.plan_payload(sym, mode=mode, account=account, force=force)
+            return self.plan_payload(sym, mode=mode, account=account, force=force,
+                                     timeframe=tf)
 
         def _notify(sym, plan, err):
             # on_result 是调用方给的回调（落库 + 推送 + SSE），它自己抛异常

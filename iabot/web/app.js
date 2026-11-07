@@ -3,6 +3,12 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
+  // 多时间框架基础周期的中文标签（与后端 signals._PERIOD_CN 对齐）
+  const TF_CN = {
+    '5min': '5分钟', '15min': '15分钟', '30min': '30分钟',
+    '60min': '1小时', '4hour': '4小时', '12hour': '12小时',
+    '1day': '日线', '1week': '周线', '1mon': '月线',
+  };
   const state = {
     meta: null,
     watchlist: [],
@@ -219,6 +225,12 @@ busy: false,
       if (acc.preferred_leverage) $('leverage').value = acc.preferred_leverage;
       if (acc.risk_pct_per_trade) $('risk').value = acc.risk_pct_per_trade;
 
+      // 多时间框架基础周期下拉：用后端 TIMEFRAMES 填充，默认"跟随模式"
+      if ($('tf') && (meta.timeframes || []).length) {
+        $('tf').innerHTML = '<option value="">默认（跟随模式）</option>' +
+          meta.timeframes.map((p) => '<option value="' + esc(p) + '">' + esc(TF_CN[p] || p) + '</option>').join('');
+      }
+
       const cert = meta.cert || {};
       setPill('pill-cert', '证书 ' + (cert.ca_count || 0) + ' 个' + (cert.verifying ? '' : '（未校验）'),
         cert.ca_count ? 'ok' : 'bad');
@@ -259,6 +271,8 @@ busy: false,
     $('btn-go').onclick = () => analyze(false);
     $('btn-refresh').onclick = () => analyze(true);
     $('mode').onchange = () => { state.mode = $('mode').value; analyze(true); };
+    // 多时间框架：换基础周期立即按新口径重算（图表周期 state.tf 不受影响）
+    if ($('tf')) $('tf').onchange = () => analyze(true);
     $('symbol').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); analyze(false); }
     });
@@ -334,6 +348,10 @@ busy: false,
         leverage: $('leverage').value || '10',
         risk_pct: $('risk').value || '2',
       });
+      // 注意：state.tf 是图表 K 线周期，不是这里的多时间框架基础周期。
+      // 下拉 id="tf" 上的值才是分析重定标用的基础周期（空=模式默认口径）。
+      const atf = $('tf') ? $('tf').value : '';
+      if (atf) q.set('tf', atf);
       if (force) q.set('force', '1');
       const d = await api('/api/analyze?' + q.toString());
       if (seq !== state.analyzeSeq) return;   // 已有更新的请求，丢弃这份过期结果
@@ -921,6 +939,9 @@ busy: false,
         risk_pct: $('risk').value || '2',
         workers: $('uni-workers').value || '4',
       });
+      // 扫描也跟随当前选中的多时间框架基础周期（空=模式默认口径）
+      const scanTf = $('tf') ? $('tf').value : '';
+      if (scanTf) q.set('tf', scanTf);
       if (full) for (const [k, v] of uniQuery()) q.set(k, v);
       const d = await api('/api/scan?' + q.toString());
       const plans = d.plans || [];
@@ -1291,6 +1312,8 @@ busy: false,
     btn.disabled = true;
     try {
       const q = new URLSearchParams({ symbol: $('symbol').value, mode: $('mode').value });
+      // 导出报告也跟随当前选中的多时间框架基础周期
+      if ($('tf') && $('tf').value) q.set('tf', $('tf').value);
       const token = localStorage.getItem('iabot_token');
       const hdrs = {};
       if (token) hdrs['Authorization'] = 'Bearer ' + token;

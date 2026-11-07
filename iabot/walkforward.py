@@ -23,13 +23,19 @@ from .market import Snapshot
 
 def walk_forward(base: Snapshot, cfg: dict, *, mode: str = "swing",
                  folds: int = 5, step: int = 10, warmup: int = 60,
-                 max_points: int = 100000) -> dict:
+                 max_points: int = 100000,
+                 timeframe: str | None = None) -> dict:
     """把主周期 K 线按时间均分成 folds 段，逐段独立取建仓点回测。
 
     每个折都保留该折之前的全部历史（因子看到的信息与真实当时一致），
     只是不在这段之外建仓——所以每折的结果都是真正的样本外。
+    timeframe: 多时间框架基础周期；None 时按 backtest 的口径回落。
     """
-    main_period = "15min" if mode == "intraday" else "1day"
+    from .signals import resolve_tf_spec
+    wf_tf = timeframe or (cfg.get("analysis") or {}).get("timeframe") or None
+    # resolve_tf_spec 返回 (模式字典, spec|None)；atr_period 在模式字典上
+    wf_mode, _wf_spec = resolve_tf_spec(mode, wf_tf)
+    main_period = wf_mode["atr_period"]
     main = base.klines.get(main_period) or []
     n = len(main)
     folds = max(2, int(folds))
@@ -46,7 +52,7 @@ def walk_forward(base: Snapshot, cfg: dict, *, mode: str = "swing",
         if hi_i - lo_i < min_fold:
             continue
         res = backtest(base, cfg, mode=mode, step=step, warmup=warmup,
-                       max_points=max_points,
+                       max_points=max_points, timeframe=timeframe,
                        start_index=lo_i, end_index=hi_i)
         usable = (not res.insufficient_data) and res.trades > 0
         if usable:

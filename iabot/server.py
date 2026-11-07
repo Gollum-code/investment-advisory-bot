@@ -18,7 +18,7 @@ from .advisor import Advisor
 from .config import (DEFAULT_MODE, SCORE_THRESHOLD_DEFAULT, load_config,
                      save_config, validate_config)
 from .scheduler import Scheduler
-from .signals import FACTOR_DEFAULTS, MODES
+from .signals import FACTOR_DEFAULTS, MODES, TIMEFRAMES
 from .profiles import ProfileStore, cfg_with_profile
 from .store import SignalStore
 from .universe import merge_spec, select
@@ -298,6 +298,15 @@ def make_handler(app: App):
                 traceback.print_exc()
                 self._err(f"{type(exc).__name__}: {exc}", 500)
 
+        @staticmethod
+        def _tf(q: dict) -> str | None:
+            """从查询串取多时间框架基础周期；空/非法回 None（模式默认口径）。"""
+            tf = (q.get("tf") or "").strip()
+            if not tf:
+                return None
+            from .signals import TIMEFRAMES
+            return tf if tf in TIMEFRAMES else None
+
         def _api_get(self, path: str, q: dict):
             if path == "/api/meta":
                 # cfg 是与多个线程共享的 dict（profiles 增删会改条目数），
@@ -309,6 +318,8 @@ def make_handler(app: App):
                         "symbols": sym_mod.catalog_payload(),
                         "watchlist": app.cfg.get("symbols") or [],
                         "periods": ["1min", "5min", "15min", "30min", "60min", "4hour", "1day"],
+                        "timeframes": list(TIMEFRAMES),
+                        "timeframe": app.cfg.get("analysis", {}).get("timeframe") or "",
                         "auth_required": bool(app.auth_token),
                         "defaults": {
                             "account": app.cfg.get("account"),
@@ -328,13 +339,15 @@ def make_handler(app: App):
                 mode = q.get("mode") or DEFAULT_MODE
                 force = q.get("force") == "1"
                 return self._json({"ok": True, **app.advisor.full_payload(
-                    sym, mode=mode, force=force, account=app._account(q))})
+                    sym, mode=mode, force=force, account=app._account(q),
+                    timeframe=self._tf(q))})
 
             if path == "/api/plan":
                 sym = q.get("symbol") or "BTC-USDT"
                 return self._json({"ok": True, "plan": app.advisor.plan_payload(
                     sym, mode=q.get("mode") or DEFAULT_MODE,
-                    force=q.get("force") == "1", account=app._account(q))})
+                    force=q.get("force") == "1", account=app._account(q),
+                    timeframe=self._tf(q))})
 
             if path == "/api/scan":
                 raw = q.get("symbols") or "BTC-USDT"
@@ -358,7 +371,7 @@ def make_handler(app: App):
                 out, errs = app.advisor.scan(
                     syms, mode=mode, account=app._account(q),
                     workers=max(1, min(16, int(q.get("workers") or 4))),
-                    only_signal=only_sig)
+                    only_signal=only_sig, timeframe=self._tf(q))
                 return self._json({"ok": True, "plans": out, "errors": errs,
                                    "breadth": market_breadth(out),
                                    "scanned": len(syms),
@@ -416,10 +429,11 @@ def make_handler(app: App):
                 raw = q.get("symbols") or ",".join(app.cfg.get("symbols") or ["BTC-USDT"])
                 syms = [s for s in raw.split(",") if s.strip()][:30]
                 mode = q.get("mode") or DEFAULT_MODE
+                tf = self._tf(q)
                 plans, errs = [], []
                 for s in syms:
                     try:
-                        plans.append(app.advisor.plan_payload(s, mode=mode))
+                        plans.append(app.advisor.plan_payload(s, mode=mode, timeframe=tf))
                     except Exception as exc:
                         errs.append(f"{s}: {type(exc).__name__}: {exc}")
                 return self._json({"ok": True, "breadth": market_breadth(plans),
@@ -514,13 +528,16 @@ def make_handler(app: App):
                 from .report import render_report
                 sym = q.get("symbol") or "BTC-USDT"
                 mode = q.get("mode") or DEFAULT_MODE
+                tf = self._tf(q)
                 try:
-                    payload = app.advisor.full_payload(sym, mode=mode)
+                    payload = app.advisor.full_payload(sym, mode=mode, timeframe=tf)
                 except Exception as exc:
                     return self._err(f"分析失败: {exc}", 502)
                 plan = payload["plan"]
                 snap = payload["snapshot"]
-                candles = (snap.get("klines") or {}).get("15min" if mode == "intraday" else "1day") or []
+                candles = (snap.get("klines") or {}).get(
+                    (plan.get("market") or {}).get("atr_period")
+                    or ("15min" if mode == "intraday" else "1day")) or []
                 win = app.store.win_stats(days=30)
                 html_text = render_report(plan, snap, candles, symbol=sym, mode=mode,
                                           win_stats=win)
