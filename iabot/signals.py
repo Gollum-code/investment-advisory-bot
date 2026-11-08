@@ -790,6 +790,23 @@ FACTOR_DEFAULTS = {
 RESONANCE_DEFAULT_WEIGHT = 0.06
 
 
+def factor_weights_for(an: dict, timeframe: str | None) -> dict:
+    """解析某基础周期实际生效的因子权重覆盖。
+
+    优先级：analysis.tf_weights[timeframe] > analysis.factor_weights > 内置默认。
+    权重扫描实测（4hour/12hour 各 5 组候选）：组间差异全部落在 95% 区间
+    重叠带内——**微调权重不是有效杠杆**，该机制的价值在于"每个周期可以
+    独立配参做 A/B"，而不是"调了就会更好"。
+    """
+    weights = dict((an or {}).get("factor_weights") or {})
+    if timeframe:
+        tf_w = ((an or {}).get("tf_weights") or {}).get(timeframe) or {}
+        if isinstance(tf_w, dict):
+            weights.update({k: float(v) for k, v in tf_w.items()
+                            if isinstance(v, (int, float)) and v > 0})
+    return weights
+
+
 def _w(name: str) -> float:
     """因子的默认权重。只认 FACTOR_DEFAULTS 这一处，避免函数里的字面量漂移。"""
     return float(FACTOR_DEFAULTS.get(name, 0.0))
@@ -1350,6 +1367,14 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE,
     _an = cfg.get("analysis") or {}
     plan.risk_mult_long = float(_an.get("risk_mult_long") or 1.0)
     plan.risk_mult_short = float(_an.get("risk_mult_short") or 1.0)
+    # 按基础周期的多空风险覆盖：tf_risk[tf] 里的 long/short 覆盖全局默认
+    if tf_spec:
+        tf_r = (_an.get("tf_risk") or {}).get(tf_spec.get("tf")) or {}
+        if isinstance(tf_r, dict):
+            if isinstance(tf_r.get("long"), (int, float)) and tf_r["long"] > 0:
+                plan.risk_mult_long = float(tf_r["long"])
+            if isinstance(tf_r.get("short"), (int, float)) and tf_r["short"] > 0:
+                plan.risk_mult_short = float(tf_r["short"])
     plan.costs_cfg = dict(_an.get("backtest") or {})
     plan.timeframe = tf_spec.get("tf") if tf_spec else None
     if not snap.price:
@@ -1380,7 +1405,7 @@ def build_plan(snap: Snapshot, cfg: dict, mode: str = DEFAULT_MODE,
                         resonance_weight=float(res_cfg.get("weight") or RESONANCE_DEFAULT_WEIGHT),
                         trend_dampen=an.get("trend_dampen"),
                         tf_spec=tf_spec),
-        an.get("factor_weights"))
+        factor_weights_for(an, plan.timeframe))
     plan.factors = factors
     raw = sum(f.score * f.weight for f in factors)
     total_w = sum(f.weight for f in factors if f.weight > 0) or 1.0

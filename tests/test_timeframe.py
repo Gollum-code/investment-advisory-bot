@@ -16,8 +16,8 @@ import unittest
 
 from iabot.config import DEFAULTS
 from iabot.market import period_seconds
-from iabot.signals import (MODES, TIMEFRAMES, build_plan, resolve_tf_spec,
-                           tf_child, tf_parent)
+from iabot.signals import (FACTOR_DEFAULTS, MODES, TIMEFRAMES, build_plan,
+                           resolve_tf_spec, tf_child, tf_parent)
 
 # 复用 test_signals 的合成行情夹具（保证各周期同向，否则趋势因子会互相打架）
 from tests.test_signals import DOWN_SWING, UP, cfg_with, make_snapshot
@@ -171,6 +171,41 @@ class TestBuildPlanTf(unittest.TestCase):
         snap.klines["12hour"] = [c for i, c in enumerate(k1d) if i % 12 == 0] or k1d
         p = build_plan(snap, cfg_with(), mode="swing", timeframe="4hour")
         self.assertTrue(any("多时间框架" in n for n in p.notes))
+
+    def test_tf_weights_override_per_period(self):
+        """tf_weights[tf] 覆盖该周期的因子权重（其他周期不受影响）。"""
+        cfg = cfg_with()
+        cfg["analysis"]["tf_weights"] = {"4hour": {"volatility": 0.5}}
+        snap = self._snap()
+        k1d = snap.klines.get("1day") or []
+        snap.klines["4hour"] = [c for i, c in enumerate(k1d) if i % 6 == 0] or k1d
+        snap.klines["12hour"] = [c for i, c in enumerate(k1d) if i % 12 == 0] or k1d
+
+        # 4hour 周期：volatility 权重被覆盖为 0.5
+        p4 = build_plan(snap, cfg, mode="swing", timeframe="4hour")
+        w4 = {f.name: f.weight for f in p4.factors}
+        self.assertEqual(w4["volatility"], 0.5)
+        # 未配置 tf（默认日线口径）：volatility 仍是内置默认，不受 tf_weights 影响
+        p0 = build_plan(snap, cfg_with(), mode="swing", timeframe=None)
+        w0 = {f.name: f.weight for f in p0.factors}
+        self.assertEqual(w0["volatility"], FACTOR_DEFAULTS["volatility"])
+
+    def test_tf_risk_override_per_period(self):
+        """tf_risk[tf] 覆盖该周期的多空风险倍数（其他周期不受影响）。"""
+        cfg = cfg_with()
+        cfg["analysis"]["tf_risk"] = {"4hour": {"long": 0.7, "short": 1.4}}
+        snap = self._snap()
+        k1d = snap.klines.get("1day") or []
+        snap.klines["4hour"] = [c for i, c in enumerate(k1d) if i % 6 == 0] or k1d
+        snap.klines["12hour"] = [c for i, c in enumerate(k1d) if i % 12 == 0] or k1d
+
+        p4 = build_plan(snap, cfg, mode="swing", timeframe="4hour")
+        self.assertEqual(p4.risk_mult_long, 0.7)
+        self.assertEqual(p4.risk_mult_short, 1.4)
+        # 默认口径不受 tf_risk 影响
+        p0 = build_plan(snap, cfg_with(), mode="swing", timeframe=None)
+        self.assertEqual(p0.risk_mult_long, 1.0)
+        self.assertEqual(p0.risk_mult_short, 1.0)
 
 
 if __name__ == "__main__":

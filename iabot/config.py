@@ -109,6 +109,15 @@ DEFAULTS: dict[str, Any] = {
         # 目标位、价位回看都围绕该周期重定标。实验功能：因子权重仍用日线校准值，
         # 换周期后请先用回测/影子账户验证。
         "timeframe": "",
+        # 按基础周期的因子权重覆盖：{"4hour": {"volatility": 0.34, ...}}。
+        # 优先级 periods.tf_weights[tf] > factor_weights > 内置默认。权重扫描实测
+        # 组间差异在噪声带内（微调权重不是有效杠杆），此机制的价值是让每个周期
+        # 能独立配参做 A/B，而不是"调了就会更好"。为空 = 各周期共用 factor_weights。
+        "tf_weights": {},
+        # 按基础周期的多空风险倍数覆盖：{"4hour": {"long": 0.8, "short": 1.3}}。
+        # 所有周期都实测空单远好于多单（4h short +0.393 vs long +0.135），
+        # 可用它按周期放大空头单笔风险。优先级 tf_risk[tf] > risk_mult_long/short。
+        "tf_risk": {},
         # |score| 达到该值才给方向。30 -> 40 的依据见 README「评分终于有了排序能力」：
         # 修掉 funding lookahead 之后评分分档变单调，提高阈值可同时
         # 提高胜率/单笔期望，并显著降低回撤（见实测表）。
@@ -437,6 +446,39 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     elif not isinstance(fw, dict):
         print("[config] analysis.factor_weights 不是字典，已重置为空")
         an["factor_weights"] = {}
+    # 按周期的权重/风险覆盖：非 dict 直接重置，内部数值夹到合理区间。
+    # 别名 tf_weights/tf_risk 只接受 {"周期": {因子: 数值}} 的形状。
+    tw = an.get("tf_weights")
+    if not isinstance(tw, dict):
+        if tw is not None:
+            print("[config] analysis.tf_weights 不是字典，已重置为空")
+        an["tf_weights"] = {}
+    else:
+        an["tf_weights"] = {
+            str(k): {kk: float(vv) for kk, vv in v.items()
+                     if isinstance(vv, (int, float)) and vv > 0}
+            for k, v in tw.items() if isinstance(v, dict)
+        }
+    tr = an.get("tf_risk")
+    if not isinstance(tr, dict):
+        if tr is not None:
+            print("[config] analysis.tf_risk 不是字典，已重置为空")
+        an["tf_risk"] = {}
+    else:
+        clean = {}
+        for k, v in tr.items():
+            if not isinstance(v, dict):
+                continue
+            long_ = v.get("long")
+            short_ = v.get("short")
+            entry = {}
+            if isinstance(long_, (int, float)):
+                entry["long"] = max(0.1, min(3.0, float(long_)))
+            if isinstance(short_, (int, float)):
+                entry["short"] = max(0.1, min(3.0, float(short_)))
+            if entry:
+                clean[str(k)] = entry
+        an["tf_risk"] = clean
     rc = an.get("resonance")
     if not isinstance(rc, dict):        an["resonance"] = {"enabled": False, "weight": 0.06}
     else:

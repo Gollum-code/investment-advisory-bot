@@ -52,6 +52,8 @@
     "kline_size": 2000,
     "plan_cache_max": 128,
     "timeframe": "",
+    "tf_weights": {},
+    "tf_risk": {},
     "score_threshold": 40.0,
     "cache_ttl_sec": 20,
     "snapshot_ttl_sec": 20,
