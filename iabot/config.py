@@ -260,9 +260,14 @@ DEFAULTS: dict[str, Any] = {
         # 影子账户：定时把当前信号按多套参数各记一份（只记录不下单），
         # 用未来的真实行情验证"要不要改默认值"。默认开、每 6 轮记一次，
         # 成本很低（复用 20 秒快照缓存），样本会自己慢慢攒起来。
+        #
+        # tf4h：把同一批快照按 4hour 口径再记一份。组合验证显示 4hour 显著
+        # 占优（期望 +0.262R、折间 77%），但那是历史回测——默认值能不能真切到
+        # 4hour，得靠这个变体攒前向样本，用 shadow-report 对比 base 才算数。
+        # 注意它会让影子快照多抓 4hour/12hour 两个周期的 K 线。
         "shadow": {
             "enabled": True,
-            "variants": ["base", "trail_1atr"],
+            "variants": ["base", "tf4h"],
             "every_runs": 6,
             "path": "",              # 留空 = data/shadow.jsonl
         },

@@ -722,16 +722,21 @@ def cmd_validate(args) -> int:
 
 def cmd_shadow(args) -> int:
     """影子账户：把当前信号按多个方案各记一份，只记录不下单。"""
-    from .shadow import record
+    from .shadow import record, required_periods
     cfg = load_config()
     adv = Advisor(cfg)
     syms = [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
     if not syms:
         syms = list(VALIDATE_SYMBOLS)
     names = [s.strip() for s in (args.variants or "").split(",") if s.strip()]
+    # tf4h 等多时间框架变体要求快照含重定标链的 K 线，补进抓取参数
+    periods = list(adv.periods)
+    for p in required_periods(names):
+        if p not in periods:
+            periods.append(p)
     try:
-        snap_shots = {to_contract(s): adv.client.snapshot(to_contract(s),
-                                                          with_depth=False)
+        snap_shots = {to_contract(s): adv.client.snapshot(
+                          to_contract(s), with_depth=False, periods=periods)
                       for s in syms}
     except Exception as exc:
         print(f"[shadow] 取快照失败：{exc}")
@@ -1063,7 +1068,7 @@ COMMANDS = ("serve", "analyze", "scan", "check", "backtest", "backtests",
             "shadow", "shadow-report")
 # 子命令 help 里要列出可选方案名；延迟 import 避免顶层依赖顺序问题
 VARIANTS_NAMES = ("base", "trend_veto", "trail_1atr", "be_1r",
-                  "short_heavy")
+                  "short_heavy", "tf4h")
 
 
 def build_parser() -> argparse.ArgumentParser:

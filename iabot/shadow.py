@@ -29,6 +29,10 @@ VARIANTS: dict[str, dict] = {
     "be_1r": {"analysis": {"exit": {"breakeven_at_r": 1.0}}},
     "short_heavy": {"analysis": {"risk_mult_long": 0.5,
                                  "risk_mult_short": 1.5}},
+    # 多时间框架对照：同一批快照按 4hour 口径再记一份。
+    # 组合验证显示 4hour 显著占优（折间 77% vs 日线），但那是历史回测；
+    # 要在未来也成立，必须攒前向样本。这个变体就是干这个的。
+    "tf4h": {"analysis": {"timeframe": "4hour"}},
 }
 
 DEFAULT_PATH = "data/shadow.jsonl"
@@ -37,6 +41,26 @@ DEFAULT_PATH = "data/shadow.jsonl"
 # 100 是"足够放心"的经验值。
 MIN_SAMPLES = 30
 READY_SAMPLES = 100
+
+
+def required_periods(variants: list[str] | None) -> list[str]:
+    """这些方案里需要额外抓取的 K 线周期（去重、保持顺序）。
+
+    比如 tf4h 方案重现定标到 4hour，快照必须含 4hour/12hour/60min 的 K 线，
+    否则 build_plan 按"数据不足"降级、一条也记不下来。
+    默认快照（1min~1day）不含 4hour，所以调用方抓影子快照前先算它。
+    """
+    from .signals import tf_required_periods
+    out: list[str] = []
+    for n in variants or []:
+        patch = VARIANTS.get(n) or {}
+        tf = ((patch.get("analysis") or {}).get("timeframe") or "").strip()
+        if not tf:
+            continue
+        for p in tf_required_periods(tf):
+            if p not in out:
+                out.append(p)
+    return out
 
 
 def _merge_patch(cfg: dict, patch: dict) -> dict:

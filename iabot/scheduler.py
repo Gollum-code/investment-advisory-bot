@@ -299,11 +299,22 @@ class Scheduler:
             return {"enabled": True, "skipped": "未到记录轮次",
                     "every_runs": self.shadow_every}
         try:
-            from .shadow import record
+            from .shadow import record, required_periods
+            # tf4h 等多时间框架变体需要快照里有对应周期的 K 线，默认抓取
+            # (1min~1day) 不含 4hour/12hour，得把重定标链补进抓取参数。
+            # 只有配置了这类变体才补，默认 base/tf4h 只多抓两个周期。
+            extra = required_periods(self.shadow_variants)
             snaps: dict[str, Any] = {}
             for sym in symbols:
                 try:
-                    snaps[sym] = self.advisor.fetch(sym)   # 命中 20s 快照缓存
+                    if extra:
+                        periods = list(self.advisor.periods)
+                        for p in extra:
+                            if p not in periods:
+                                periods.append(p)
+                        snaps[sym] = self.advisor.fetch(sym, periods=periods)
+                    else:
+                        snaps[sym] = self.advisor.fetch(sym)   # 命中 20s 快照缓存
                 except Exception:
                     continue
             if not snaps:

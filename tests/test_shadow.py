@@ -32,6 +32,54 @@ def _c(ts_off, o, h, l, cl):
     return Candle(ts=T0 + ts_off, open=o, high=h, low=l, close=cl, volume=1.0)
 
 
+class TestTf4hVariant(unittest.TestCase):
+    """tf4h 变体：同一批快照按 4hour 口径再记一份（多时间框架前向对照）。"""
+
+    def test_required_periods_for_tf4h(self):
+        from iabot.shadow import required_periods
+        # tf4h 需要快照含基础+上一级+下一级（4hour/12hour/60min）
+        self.assertEqual(required_periods(["tf4h"]), ["4hour", "12hour", "60min"])
+        # 默认方案（base/trail_1atr）不需要额外周期
+        self.assertEqual(required_periods(["base", "trail_1atr"]), [])
+        self.assertEqual(required_periods(None), [])
+
+    def test_record_applies_timeframe_for_tf4h(self):
+        """tf4h 变体生成的记录里，plan.timeframe 必须是 4hour（base 则没有）。
+
+        record 把 VARIANTS[name] patch 进 cfg 后调用 build_plan(snap, vcfg)，
+        多时间框架由 vcfg 的 analysis.timeframe 携带，不单独成参数。
+        """
+        snap = _trading_snapshot()
+        seen: dict[str, str | None] = {}
+
+        def fake_build_plan(s, cfg, mode):
+            from iabot.signals import Plan
+            tf = (cfg.get("analysis") or {}).get("timeframe") or None
+            return Plan(symbol=s.symbol, mode=mode, direction="long",
+                        price=100.0, generated_at=0.0, timeframe=tf)
+
+        with mock.patch("iabot.shadow.build_plan", side_effect=fake_build_plan):
+            with tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "shadow.jsonl")
+                out = record({"A-USDT": snap}, _cfg(),
+                             variants=["base", "tf4h"], mode="swing", path=p,
+                             now=T0)
+                self.assertEqual(out["written"], 2)
+                rows = load(p)
+                by = {r["variant"]: r["plan"].get("timeframe") for r in rows}
+                self.assertEqual(by["base"], None)
+                self.assertEqual(by["tf4h"], "4hour")
+
+    def test_readiness_works_for_tf4h(self):
+        from iabot.shadow import readiness
+        rows = [{"variant": "tf4h", "symbol": "A", "outcome": "tp1", "r": 2.0}
+                for _ in range(12)]
+        r = readiness({"variants": {"tf4h": {
+            "decided": 12, "pending": 60, "target": 100}}})
+        self.assertEqual(r["tf4h"]["status"], "不足")
+        self.assertIn("还差", r["tf4h"]["advice"])
+
+
 class TestRecord(unittest.TestCase):
     def test_writes_one_line_per_variant_and_symbol(self):
         snap = _trading_snapshot()
