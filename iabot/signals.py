@@ -85,6 +85,17 @@ def tf_child(period: str) -> str:
     return _tf_neighbor(period, -1)
 
 
+def tf_required_periods(timeframe: str) -> tuple[str, str, str]:
+    """按基础周期算需要抓的 K 线周期集 (基础, 上一级, 下一级)。
+
+    因子重定标只用这三个：主趋势/波动率/成交量/止损用基础周期，次级趋势/
+    结构用上一级，动量快线/VWAP 用下一级。抓快照时把这三档补进 periods，
+    否则对应周期没有 K 线、因子全部按"数据不足"降级、回测整段空跑
+    （实测 validate --tf 12hour 因缺 12hour K 线，20 个标的全部数据不足）。
+    """
+    return timeframe, tf_parent(timeframe), tf_child(timeframe)
+
+
 def _bars_for_span(period: str, days: float) -> int:
     """覆盖约 days 天需要多少根该周期 K 线（封顶接口上限）。"""
     from .market import period_seconds

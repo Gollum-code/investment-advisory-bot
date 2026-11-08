@@ -591,22 +591,39 @@ def cmd_validate(args) -> int:
     - 点估计为正，可能分不清 edge 和噪声（所以要看置信区间）
     """
     from .validation import GATE_CN, validate
+    from .signals import tf_required_periods
     cfg = load_config()
     adv = Advisor(cfg)
     syms = [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
     if not syms:
         syms = list(VALIDATE_SYMBOLS)
+    # 多时间框架：快照必须包含基础周期链（基础+上一级+下一级）的 K 线，
+    # 否则主周期数据缺失，所有标的都会"数据不足"跑 0 笔。缓存也要按
+    # 周期集分开存（variant），不然会命中"只有默认周期"的旧缓存。
+    vd_tf = _tf_from(args)
+    vd_periods = None
+    vd_variant = ""
+    if vd_tf:
+        vd_periods = list(cfg.get("analysis", {}).get("tf_periods")
+                          or ["1min", "5min", "15min", "60min", "1day"])
+        for p in tf_required_periods(vd_tf):
+            if p and p not in vd_periods:
+                vd_periods.append(p)
+        vd_variant = vd_tf
     snaps = {}
     hits = 0
     for s in syms:
         sym = to_contract(s)
         try:
             if args.refresh:
-                snaps[sym] = adv.client.snapshot(sym, with_depth=False)
+                snaps[sym] = adv.client.snapshot(sym, with_depth=False,
+                                                  periods=vd_periods)
             else:
                 got = snapcache.get_or_fetch(
-                    lambda sym=sym: adv.client.snapshot(sym, with_depth=False),
-                    sym, cache_dir=args.cache_dir, ttl_sec=args.cache_ttl)
+                    lambda sym=sym: adv.client.snapshot(
+                        sym, with_depth=False, periods=vd_periods),
+                    sym, cache_dir=args.cache_dir, ttl_sec=args.cache_ttl,
+                    variant=vd_variant)
                 if got is None:
                     print(f"  跳过 {sym}: 缓存未命中且抓取失败", file=sys.stderr)
                     continue

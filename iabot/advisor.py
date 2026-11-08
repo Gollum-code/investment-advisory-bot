@@ -102,13 +102,13 @@ class Advisor:
         """快照要抓哪些周期的 K 线。
 
         默认取配置 tf_periods；指定基础周期 timeframe 时，把重定标链
-        （基础 + 上一级 + 下一级 + 快慢动量）补进来，否则对应周期的 K 线
+        （基础 + 上一级 + 下一级）补进来，否则对应周期的 K 线
         根本没抓，因子会全部按"数据不足"降级。
         """
         periods = list(self.periods)
         if timeframe:
-            from .signals import tf_parent, tf_child
-            for p in (timeframe, tf_parent(timeframe), tf_child(timeframe)):
+            from .signals import tf_required_periods
+            for p in tf_required_periods(timeframe):
                 if p and p not in periods:
                     periods.append(p)
         return periods

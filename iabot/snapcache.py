@@ -21,16 +21,20 @@ DEFAULT_DIR = "data/snapcache"
 DEFAULT_TTL_SEC = 1800.0
 
 
-def _snap_path(symbol: str, cache_dir: str | Path | None = None) -> Path:
+def _snap_path(symbol: str, cache_dir: str | Path | None = None,
+               variant: str = "") -> Path:
     base = Path(cache_dir) if cache_dir else data_path(DEFAULT_DIR)
     base.mkdir(parents=True, exist_ok=True)
     safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in symbol)
+    if variant:
+        safe += "".join(ch if ch.isalnum() or ch in "-_." else "_"
+                        for ch in ("-" + variant))
     return base / f"{safe}.json"
 
 
 def save(snap: Snapshot, cache_dir: str | Path | None = None,
-         now: float | None = None) -> Path:
-    p = _snap_path(snap.symbol, cache_dir)
+         now: float | None = None, variant: str = "") -> Path:
+    p = _snap_path(snap.symbol, cache_dir, variant)
     payload = {
         "saved_at": float(now if now is not None else time.time()),
         "symbol": snap.symbol,
@@ -54,9 +58,9 @@ def save(snap: Snapshot, cache_dir: str | Path | None = None,
 
 def load(symbol: str, *, cache_dir: str | Path | None = None,
          ttl_sec: float = DEFAULT_TTL_SEC,
-         now: float | None = None) -> Snapshot | None:
+         now: float | None = None, variant: str = "") -> Snapshot | None:
     """命中返回快照，未命中/过期/损坏返回 None（调用方去真实抓）。"""
-    p = _snap_path(symbol, cache_dir)
+    p = _snap_path(symbol, cache_dir, variant)
     if not p.exists():
         return None
     now = float(now if now is not None else time.time())
@@ -89,15 +93,20 @@ def load(symbol: str, *, cache_dir: str | Path | None = None,
 
 def get_or_fetch(fetch, symbol: str, *, cache_dir: str | Path | None = None,
                  ttl_sec: float = DEFAULT_TTL_SEC,
-                 now: float | None = None) -> Snapshot | None:
-    """先读缓存，未命中再调用 fetch()，并把结果写回缓存。"""
-    hit = load(symbol, cache_dir=cache_dir, ttl_sec=ttl_sec, now=now)
+                 now: float | None = None, variant: str = "") -> Snapshot | None:
+    """先读缓存，未命中再调用 fetch()，并把结果写回缓存。
+
+    variant 用于区分同一标的的不同周期集（如回测 tf=4hour 时抓的快照含
+    4hour/12hour K 线，和默认 tf_periods 的快照不是同一份），避免互相覆盖。
+    """
+    hit = load(symbol, cache_dir=cache_dir, ttl_sec=ttl_sec, now=now,
+               variant=variant)
     if hit is not None:
         return hit
     snap = fetch()
     if snap is not None and snap.price and snap.klines:
         try:
-            save(snap, cache_dir=cache_dir, now=now)
+            save(snap, cache_dir=cache_dir, now=now, variant=variant)
         except OSError:
             pass
     return snap
