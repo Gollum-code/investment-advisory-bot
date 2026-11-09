@@ -136,16 +136,25 @@ def report(entries: list[dict], candles_by_symbol: dict, *,
            exit_by_variant: dict | None = None) -> dict:
     """用真实 K 线判定每条影子信号的结局，按方案汇总。
 
-    candles_by_symbol: {symbol: [Candle, ...]}（该标的信号之后的主周期 K 线）。
+    candles_by_symbol 支持两种格式：
+    - {symbol: [Candle, ...]}                    旧格式：所有记录用同一组 K 线
+    - {symbol: {period: [Candle, ...]}}          新格式：按该记录的止损 ATR 周期
+      （plan.market.atr_period）取判定 K 线——tf4h 的止损/止盈按 4hour ATR 算，
+      用日线判会漏掉 4h 级别的出场（一根日线直接跳过止损位）。
     exit_by_variant:   {variant: {"breakeven_at_r":..., "trail_atr_mult":...}}
                        通常直接用 VARIANTS 里的配置；不传就按基线出场。
     """
     rows: list[dict] = []
     for e in entries:
         sym = e.get("symbol")
-        candles = candles_by_symbol.get(sym) or []
+        per = candles_by_symbol.get(sym) or []
         plan = e.get("plan") or {}
         variant = e.get("variant") or "?"
+        if isinstance(per, dict):
+            atrp = (plan.get("market") or {}).get("atr_period") or "1day"
+            candles = per.get(atrp) or []
+        else:
+            candles = per
         if not candles:
             # 还没拿到后续行情 -> 待定，不要当成"没有这笔"
             rows.append({"variant": variant, "symbol": sym,

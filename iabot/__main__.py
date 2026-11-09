@@ -764,24 +764,25 @@ def cmd_shadow_report(args) -> int:
         return 0
     cfg = load_config()
     adv = Advisor(cfg)
-    # 按标的取"最后一条记录之后"的 K 线，保证判定只用信号之后的行情
-    last_ts: dict[str, float] = {}
+    # 按各条记录的止损 ATR 周期聚合判定 K 线：tf4h 变体用 4hour，base/swing
+    # 用 1day，intraday 用 15min。判定 K 线直接给快照全量——evaluate_outcome
+    # 内部会从 generated_at 起扫（start 之后），防回灌在那里保证，不需要也不
+    # 应该在这里按最后一条记录预切：常驻定时记录会一直刷新 last_ts，
+    # 把旧记录全切成 pending，decided 恒为 0（本次修复的 bug）。
+    needed: dict[str, set[str]] = {}
     for e in entries:
-        last_ts[e["symbol"]] = max(last_ts.get(e["symbol"], 0.0),
-                                   float(e.get("ts") or 0))
+        plan = e.get("plan") or {}
+        per = (plan.get("market") or {}).get("atr_period") or (
+            "15min" if (e.get("mode") == "intraday") else "1day")
+        needed.setdefault(e.get("symbol"), set()).add(per)
     candles = {}
-    for sym, ts in last_ts.items():
+    for sym, periods in needed.items():
         try:
-            snap = adv.client.snapshot(sym, with_depth=False)
+            grab = sorted(periods | {"1day"})
+            snap = adv.client.snapshot(sym, with_depth=False, periods=grab)
         except Exception:
             continue
-        rows = snap.klines.get("1day") or []
-        if not rows:
-            continue
-        period = ("15min" if (entries[0].get("mode") == "intraday") else "1day")
-        rows = snap.klines.get(period) or rows
-        # 判定只用"信号之后"的 K 线：过滤掉更早的，避免结果回灌
-        candles[sym] = [c for c in rows if c.ts > ts]
+        candles[sym] = {p: (snap.klines.get(p) or []) for p in periods}
     exits = {k: v.get("analysis", {}) for k, v in VARIANTS.items()
              if "analysis" in v}
     out = report(entries, candles, exit_by_variant=exits)

@@ -50,7 +50,6 @@ class TestTf4hVariant(unittest.TestCase):
         多时间框架由 vcfg 的 analysis.timeframe 携带，不单独成参数。
         """
         snap = _trading_snapshot()
-        seen: dict[str, str | None] = {}
 
         def fake_build_plan(s, cfg, mode):
             from iabot.signals import Plan
@@ -72,8 +71,6 @@ class TestTf4hVariant(unittest.TestCase):
 
     def test_readiness_works_for_tf4h(self):
         from iabot.shadow import readiness
-        rows = [{"variant": "tf4h", "symbol": "A", "outcome": "tp1", "r": 2.0}
-                for _ in range(12)]
         r = readiness({"variants": {"tf4h": {
             "decided": 12, "pending": 60, "target": 100}}})
         self.assertEqual(r["tf4h"]["status"], "不足")
