@@ -128,7 +128,12 @@
         "tf4h"
       ],
       "every_runs": 6,
-      "path": ""
+      "path": "",
+      "dedupe": {
+        "enabled": true,
+        "cooldown_sec": 21600,
+        "score_delta": 8.0
+      }
     },
     "warn_near_stop": {
       "enabled": true,

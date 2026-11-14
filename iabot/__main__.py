@@ -750,6 +750,9 @@ def cmd_shadow(args) -> int:
     print(f"影子账户已记录 {out['written']} 条 -> {out['path']}")
     for name, cnt in out["by_variant"].items():
         print(f"  {name:<14s} {cnt} 条")
+    if out.get("skipped_dup"):
+        print(f"  （去重跳过 {out['skipped_dup']} 条：同方向同评分且在冷却期内，"
+              f"属同一信号的重复采样）")
     if out["skipped_wait"]:
         print(f"  （观望的方案/标的 {out['skipped_wait']} 个，没有可验证的结局，跳过）")
     return 0

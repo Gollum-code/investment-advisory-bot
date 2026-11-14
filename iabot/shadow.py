@@ -80,6 +80,11 @@ def record(snaps: dict, cfg: dict, *, variants: list[str] | None = None,
     """对每个 (标的 × 方案) 生成计划并追加到 JSONL。
 
     只记录有方向的计划（观望没有可验证的结局）。返回统计，便于 CLI 汇报。
+
+    去重（analysis 级，读 schedule.shadow.dedupe）：同一个 (标的 × 方案) 若上一条
+    记录方向未变、评分也没明显变化、且未超出冷却期，就不重复记。否则会像实测
+    那样（5 天 994 条但独立信号只有 25 个），把同一笔信号反复判成同一个结局，
+    样本"看着够了"其实全是重复。
     """
     from .config import DEFAULT_MODE
     mode = mode or cfg.get("mode") or DEFAULT_MODE
@@ -90,9 +95,19 @@ def record(snaps: dict, cfg: dict, *, variants: list[str] | None = None,
     p = Path(path) if path else data_path(DEFAULT_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
     ts = float(now if now is not None else time.time())
-
+    ded = _dedupe_config(cfg)
+    # 一次读全文件建索引： (symbol, variant) -> 该组合的最后一条记录。
+    # 样本量小（数百条），O(n) 一次足够；循环里再逐组合去读就是 O(n²)。
+    last_by = {}
+    if ded["enabled"]:
+        for r in load(p):
+            key = (r.get("symbol"), r.get("variant"))
+            if last_by.get(key, 0) and (r.get("ts") or 0) <= last_by[key].get("ts", 0):
+                continue
+            last_by[key] = r
     written = 0
     skipped_wait = 0
+    skipped_dup = 0
     by_variant: dict[str, int] = {n: 0 for n in names}
     with p.open("a", encoding="utf-8", newline="\n") as fh:
         for name in names:
@@ -105,14 +120,52 @@ def record(snaps: dict, cfg: dict, *, variants: list[str] | None = None,
                 if plan.direction not in ("long", "short"):
                     skipped_wait += 1
                     continue
+                # 去重：与同 (标的 × 方案) 的上一条记录比较，
+                # 方向/评分没明显变化且在冷却期内 => 重复采样，跳过
+                if ded["enabled"]:
+                    prev = last_by.get((sym, name))
+                    if prev and not _is_new_signal(prev, plan, ts, ded):
+                        skipped_dup += 1
+                        continue
                 plan.generated_at = ts
                 row = {"ts": ts, "symbol": sym, "variant": name,
                        "mode": mode, "plan": plan.to_dict()}
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                 written += 1
                 by_variant[name] += 1
-    return {"path": str(p), "written": written, "skipped_wait": skipped_wait,
-            "by_variant": by_variant}
+                if ded["enabled"]:
+                    last_by[(sym, name)] = row
+    out = {"path": str(p), "written": written, "skipped_wait": skipped_wait,
+           "by_variant": by_variant}
+    if ded["enabled"]:
+        out["skipped_dup"] = skipped_dup
+    return out
+
+
+def _dedupe_config(cfg: dict) -> dict:
+    """影子去重配置，缺省开：冷却 6 小时、评分变化阈值 8。"""
+    sh = (cfg.get("schedule") or {}).get("shadow") or {}
+    d = sh.get("dedupe") or {}
+    return {
+        "enabled": bool(d.get("enabled", True)),
+        "cooldown_sec": float(d.get("cooldown_sec") or 21600),
+        "score_delta": float(d.get("score_delta") or 8.0),
+    }
+
+
+def _is_new_signal(prev: dict, plan, ts: float, ded: dict) -> bool:
+    """要不要把这笔信号当成"新的独立信号"记下来。
+
+    方向变了 → 新信号；评分变化超过阈值 → 强度升级的新信号；
+    超出冷却期 → 旧信号已结束的独立信号；否则算同一信号的重复采样，跳过。
+    """
+    if prev["plan"].get("direction") != plan.direction:
+        return True
+    score_now = abs(float(plan.score or 0))
+    score_prev = abs(float(prev["plan"].get("score") or 0))
+    if abs(score_now - score_prev) >= ded["score_delta"]:
+        return True
+    return (ts - float(prev.get("ts") or 0)) >= ded["cooldown_sec"]
 
 
 def load(path: str | Path | None = None) -> list[dict]:

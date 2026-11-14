@@ -114,6 +114,82 @@ class TestRecord(unittest.TestCase):
                 record({"A-USDT": _trading_snapshot()}, _cfg(),
                        variants=["nope"], path=p)
 
+    def test_dedupe_skips_same_signal_during_cooldown(self):
+        """同一 (标的×方案) 同方向同评分且在冷却期内：不重复记，算去重跳过。"""
+        snap = _trading_snapshot()
+        loader = [{"direction": "long", "score": 40.0}]
+        def fake_build(s, c, mode):
+            plan = _fake_plan(loader[0]["direction"], s.symbol)
+            plan.score = loader[0]["score"]
+            return plan
+        with mock.patch("iabot.shadow.build_plan", side_effect=fake_build):
+            with tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "shadow.jsonl")
+                # 第一次：写入（无上一条）
+                r1 = record({"A-USDT": snap}, _cfg(), variants=["base"],
+                            mode="swing", path=p, now=T0)
+                self.assertEqual(r1["written"], 1)
+                # 第二次：同方向同评分，冷却期内（21600s 内）-> 跳过
+                r2 = record({"A-USDT": snap}, _cfg(), variants=["base"],
+                            mode="swing", path=p, now=T0 + 100)
+                self.assertEqual(r2["written"], 0)
+                self.assertEqual(r2["skipped_dup"], 1)
+                self.assertEqual(len(load(p)), 1)
+
+    def test_dedupe_keeps_direction_flip(self):
+        """方向翻转必须是独立新信号，不能被去重吞掉。"""
+        snap = _trading_snapshot()
+        loader = [{"direction": "long", "score": 40.0}]
+        def fake_build(s, c, mode):
+            plan = _fake_plan(loader[0]["direction"], s.symbol)
+            plan.score = loader[0]["score"]
+            return plan
+        with mock.patch("iabot.shadow.build_plan", side_effect=fake_build):
+            with tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "shadow.jsonl")
+                record({"A-USDT": snap}, _cfg(), variants=["base"],
+                       mode="swing", path=p, now=T0)   # long
+                loader[0]["direction"] = "short"       # 翻转为空头
+                r2 = record({"A-USDT": snap}, _cfg(), variants=["base"],
+                            mode="swing", path=p, now=T0 + 100)
+                self.assertEqual(r2["written"], 1)     # 方向变了必须记
+                self.assertEqual(r2["skipped_dup"], 0)
+                self.assertEqual(len(load(p)), 2)
+
+    def test_dedupe_keeps_score_jump(self):
+        """评分变化超过阈值（强度升级）算新信号。"""
+        snap = _trading_snapshot()
+        loader = [{"direction": "long", "score": 40.0}]
+        def fake_build(s, c, mode):
+            plan = _fake_plan(loader[0]["direction"], s.symbol)
+            plan.score = loader[0]["score"]
+            return plan
+        with mock.patch("iabot.shadow.build_plan", side_effect=fake_build):
+            with tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "shadow.jsonl")
+                record({"A-USDT": snap}, _cfg(), variants=["base"],
+                       mode="swing", path=p, now=T0)   # 40 分
+                loader[0]["score"] = 70.0              # 评分跳变 >8
+                r2 = record({"A-USDT": snap}, _cfg(), variants=["base"],
+                            mode="swing", path=p, now=T0 + 100)
+                self.assertEqual(r2["written"], 1)
+                self.assertEqual(len(load(p)), 2)
+
+    def test_dedupe_keeps_after_cooldown(self):
+        """超出冷却期后，同向信号算新的独立采样。"""
+        snap = _trading_snapshot()
+        def fake_build(s, c, mode):
+            return _fake_plan("long", s.symbol)
+        with mock.patch("iabot.shadow.build_plan", side_effect=fake_build):
+            with tempfile.TemporaryDirectory() as d:
+                p = os.path.join(d, "shadow.jsonl")
+                record({"A-USDT": snap}, _cfg(), variants=["base"],
+                       mode="swing", path=p, now=T0)
+                r2 = record({"A-USDT": snap}, _cfg(), variants=["base"],
+                            mode="swing", path=p, now=T0 + 30000)  # >21600s
+                self.assertEqual(r2["written"], 1)
+                self.assertEqual(len(load(p)), 2)
+
     def test_load_missing_file_is_empty(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(load(os.path.join(d, "none.jsonl")), [])

@@ -270,6 +270,15 @@ DEFAULTS: dict[str, Any] = {
             "variants": ["base", "tf4h"],
             "every_runs": 6,
             "path": "",              # 留空 = data/shadow.jsonl
+            # 记录去重：同一个 (标的×方案) 若上一条方向未变、评分没明显变化
+            # 且在冷却期内，就不重复记——否则常驻记录会把同一信号反复采样
+            # （实测 5 天 994 条里独立信号只有 25 个，decided 全是重复虚数）。
+            # 方向翻转 / 评分变化超阈值 / 超出冷却期，都算新信号照记。
+            "dedupe": {
+                "enabled": True,
+                "cooldown_sec": 21600,   # 6 小时：同向信号的再采样间隔
+                "score_delta": 8.0,      # 评分变化超过该值算强度升级的新信号
+            },
         },
         # 持仓接近止损预警：现价进入止损附近 pct% 内时推通知（每仓有冷却）
         "warn_near_stop": {
@@ -601,6 +610,15 @@ def validate_config(cfg: dict[str, Any]) -> dict[str, Any]:
                                    "schedule.shadow.every_runs", 1, 1000, 6)
     if not isinstance(sh.get("path"), str):
         sh["path"] = ""
+    # 影子记录去重（与 schedule.dedupe 是两码事：那个管信号落库，这个管阴影样本）
+    sded = _section(sh, "dedupe", DEFAULTS["schedule"]["shadow"]["dedupe"])
+    sded["enabled"] = bool(sded.get("enabled", True))
+    sded["cooldown_sec"] = _coerce_num(sded.get("cooldown_sec"),
+                                       "schedule.shadow.dedupe.cooldown_sec",
+                                       0, 86400, 21600.0)
+    sded["score_delta"] = _coerce_num(sded.get("score_delta"),
+                                      "schedule.shadow.dedupe.score_delta",
+                                      0, 100, 8.0)
     ded = _section(sc, "dedupe", DEFAULTS["schedule"]["dedupe"])
     ded["cooldown_sec"] = _coerce_num(ded.get("cooldown_sec"),
                                       "schedule.dedupe.cooldown_sec", 0, 86400, 3600.0)
